@@ -4,7 +4,7 @@ NIO Runtime is a non-blocking I/O runtime for Rust. It supports epoll (Linux), w
 
 # Performance
 
-NIO Runtime is designed to be high throughput / low latency. Benchmarks show that NIO Runtime is approximately as performant as [nginx](http://nginx.com). In certain circumstances (as in the Linux server that was used for testing), the throughput is slightly better than Nginx. Nginx's latency is slightly faster, although both are very good on both metrics. Having a comparable performing server written in Rust will likely be useful for people looking to write performant server side applications in Rust. Here are a few runs of the benchmark tool which is included in the [Rustlet](https://github.com/bitcoinmw/rustlet) project.
+NIO Runtime is designed to be high throughput / low latency. Benchmarks show that NIO Runtime is approximately as performant as [nginx](http://nginx.com). In certain circumstances (as in the Linux server that was used for testing), the throughput is slightly better than Nginx. Nginx's latency is slightly faster, although both are very good on both metrics. Having a comparable performing server written in Rust will likely be useful for people looking to write performant server side applications in Rust. Here are a few runs of the benchmark tool which is included in the [Rustlet](https://github.com/37miners/rustlet) project.
 
 Rustlet with 100 request per connection, 100 threads, and 10 iterations.
 ```
