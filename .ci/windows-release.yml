@@ -39,7 +39,7 @@ steps:
     displayName: Github release
     condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/'), eq(variables['CI_JOB'], 'release' ))
     inputs:
-      gitHubConnection: 'github.com_Rubius_hagrid37'
+      gitHubConnection: 'hagridthegreat37'
       repositoryName: 'bitcoinmw/nioruntime'
       action: 'edit'
       target: '$(build.sourceVersion)'
