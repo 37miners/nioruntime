@@ -104,7 +104,7 @@ jobs:
         cargo doc
         tar cvf doc.tar target/doc
         gzip doc.tar
-        sshpass -p "$(upload_pw)" ssh -o StrictHostKeyChecking=no uploader@bitcoinmw.com "mkdir -p /var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`"
-        sshpass -p "$(upload_pw)" scp -o StrictHostKeyChecking=no tarpaulin.*.txt uploader@bitcoinmw.com:/var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`
-        sshpass -p "$(upload_pw)" scp -o StrictHostKeyChecking=no doc.tar.gz uploader@bitcoinmw.com:/var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`
+        sshpass -p "$(upload_pw)" ssh -o StrictHostKeyChecking=no uploader@37miners.com "mkdir -p /var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`"
+        sshpass -p "$(upload_pw)" scp -o StrictHostKeyChecking=no tarpaulin.*.txt uploader@37miners.com:/var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`
+        sshpass -p "$(upload_pw)" scp -o StrictHostKeyChecking=no doc.tar.gz uploader@37miners.com:/var/www/html/ci_uploads/nioruntime/`date +"%Y_%m_%d"`
       displayName: Code Coverage
