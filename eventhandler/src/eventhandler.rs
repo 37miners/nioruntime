@@ -158,7 +158,7 @@ pub struct WriteHandle {
 	fd: ConnectionHandle,
 	connection_id: u128,
 	guarded_data: Arc<RwLock<GuardedData>>,
-	global_lock: Arc<RwLock<bool>>,
+	_global_lock: Arc<RwLock<bool>>,
 	pub callback_state: Arc<RwLock<State>>,
 	tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	tls_client: Option<Arc<RwLock<ClientConnection>>>,
@@ -169,7 +169,7 @@ impl WriteHandle {
 		fd: ConnectionHandle,
 		guarded_data: Arc<RwLock<GuardedData>>,
 		connection_id: u128,
-		global_lock: Arc<RwLock<bool>>,
+		_global_lock: Arc<RwLock<bool>>,
 		tls_client: Option<Arc<RwLock<ClientConnection>>>,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	) -> Self {
@@ -181,7 +181,7 @@ impl WriteHandle {
 			fd,
 			guarded_data,
 			connection_id,
-			global_lock,
+			_global_lock,
 			callback_state,
 			tls_server,
 			tls_client,
@@ -581,7 +581,7 @@ where
 			fd,
 			connection_id,
 			guarded_data: self.guarded_data[gd_index].clone(),
-			global_lock: self.global_lock.clone(),
+			_global_lock: self.global_lock.clone(),
 			callback_state,
 			tls_server: None,
 			tls_client,
@@ -677,7 +677,7 @@ where
 			fd,
 			connection_id,
 			guarded_data: self.guarded_data[gd_index].clone(),
-			global_lock: self.global_lock.clone(),
+			_global_lock: self.global_lock.clone(),
 			callback_state,
 			tls_server: None,
 			tls_client: None,
@@ -2823,8 +2823,8 @@ struct Callbacks<F, G, H, K> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct StreamWriteBuffer {
-	fd: ConnectionHandle,
-	write_buffer: WriteBuffer,
+	_fd: ConnectionHandle,
+	_write_buffer: WriteBuffer,
 }
 
 #[derive(Debug, Clone, PartialEq)]

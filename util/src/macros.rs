@@ -47,7 +47,7 @@ macro_rules! lockr {
 			let error: Error =
 				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
 			error
-		})?;
+		})?
 	};
 }
 

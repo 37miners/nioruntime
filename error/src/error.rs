@@ -30,6 +30,9 @@ pub struct Error {
 /// Kinds of errors that can occur
 #[derive(Clone, Eq, PartialEq, Debug, Fail)]
 pub enum ErrorKind {
+	/// Application Error
+	#[fail(display = "Application Error: {}", _0)]
+	ApplicationError(String),
 	/// IOError Error
 	#[fail(display = "IOError Error: {}", _0)]
 	IOError(String),
