@@ -18,9 +18,7 @@ use libc::{accept, c_int, c_void, EAGAIN};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use rand::Rng;
-use rustls::{
-	ClientConfig, ClientConnection, Connection, RootCertStore, ServerConfig, ServerConnection,
-};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::LinkedList;
@@ -36,7 +34,6 @@ use std::sync::mpsc::SyncSender;
 use std::sync::RwLockWriteGuard;
 use std::sync::{Arc, RwLock};
 use std::thread::spawn;
-use webpki_roots;
 
 pub type OnPanic = fn() -> Result<(), Error>;
 
@@ -337,7 +334,7 @@ fn make_config(
 	trusted_cert_full_chain_file: Option<&str>,
 ) -> Result<Arc<rustls::ClientConfig>, Error> {
 	let mut root_store = RootCertStore::empty();
-	root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0);
+	//root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0);
 	match trusted_cert_full_chain_file {
 		Some(trusted_cert_full_chain_file) => {
 			let full_chain_certs = load_certs(trusted_cert_full_chain_file);
@@ -360,7 +357,7 @@ fn make_config(
 		.with_safe_default_kx_groups()
 		.with_safe_default_protocol_versions()
 		.unwrap()
-		.with_root_certificates(root_store, &[])
+		.with_root_certificates(root_store)
 		.with_no_client_auth();
 
 	Ok(Arc::new(config))
