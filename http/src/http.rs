@@ -19,6 +19,9 @@ use lazy_static::lazy_static;
 use nioruntime_err::{Error, ErrorKind};
 pub use nioruntime_evh::{EventHandler, EventHandlerConfig, State, WriteHandle};
 use nioruntime_log::*;
+use nioruntime_tor::config as tor_config;
+use nioruntime_tor::process as tor_process;
+use nioruntime_tor::process::TorProcess;
 use nioruntime_util::threadpool::OnPanic;
 use num_format::{Locale, ToFormattedString};
 use rand::Rng;
@@ -31,6 +34,7 @@ use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
 use std::num::ParseIntError;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::time::Instant;
@@ -236,6 +240,8 @@ pub struct HttpConfig {
 	/// The maximum number of entries to allow in the log queue before dropping logging items.
 	/// The default value is 100,000.
 	pub max_log_queue: usize,
+	/// Port to run tor listener on. Default is 0, which is disabled.
+	pub tor_port: u16,
 	/// Whether or not to print debugging information to stdout.
 	pub debug: bool,
 }
@@ -270,6 +276,7 @@ impl Default for HttpConfig {
 			on_panic: empty_on_panic,
 			on_housekeeper: empty_housekeeper,
 			max_log_queue: 100_000,
+			tor_port: 0,
 			debug: false,
 		}
 	}
@@ -382,6 +389,7 @@ pub struct HttpServer {
 	pub config: HttpConfig,
 	listener: Option<TcpListener>,
 	pub http_context: Option<Arc<RwLock<HttpContext>>>,
+	_tor_process: Option<Arc<RwLock<TorProcess>>>,
 }
 
 impl HttpServer {
@@ -421,6 +429,7 @@ impl HttpServer {
 			config: cloned_config,
 			listener: None,
 			http_context: None,
+			_tor_process: None,
 		}
 	}
 
@@ -516,6 +525,15 @@ impl HttpServer {
 
 		self.check_config()?;
 
+		// check if tor is configured. If so, start it.
+		let (mut onion_address, tor_process);
+		onion_address = "".to_string();
+		if self.config.tor_port != 0 {
+			(onion_address, tor_process) =
+				self.start_tor(self.config.tor_port, self.config.port)?;
+			self._tor_process = Some(tor_process);
+		}
+
 		log_multi!(INFO, MAIN_LOG, "{}", self.config.server_name);
 		log_no_ts_multi!(INFO, MAIN_LOG, "{}", HEADER);
 		log_multi!(
@@ -610,6 +628,24 @@ impl HttpServer {
 			certificates_file,
 		);
 		log_multi!(INFO, MAIN_LOG, "tls_private_key_file: {}", private_key_file,);
+
+		if self.config.tor_port == 0 {
+			log_multi!(INFO, MAIN_LOG, "tor_port:             DISABLED");
+			log_multi!(INFO, MAIN_LOG, "onion_address:        DISABLED");
+		} else {
+			log_multi!(
+				INFO,
+				MAIN_LOG,
+				"tor_port:             {}",
+				self.config.tor_port
+			);
+			log_multi!(
+				INFO,
+				MAIN_LOG,
+				"onion_address:        http://{}.onion",
+				onion_address
+			);
+		}
 
 		if self.config.debug {
 			log_multi!(WARN, MAIN_LOG, "WARNING! flag set:    'debug'");
@@ -726,6 +762,100 @@ impl HttpServer {
 		)?;
 
 		Ok(())
+	}
+
+	/// If configured, start the tor process
+	fn start_tor(
+		&self,
+		tor_port: u16,
+		http_port: u16,
+	) -> Result<(String, Arc<RwLock<TorProcess>>), Error> {
+		let tor_dir = format!("{}/tor", self.config.root_dir);
+		let addr = format!("127.0.0.1:{}", http_port);
+		let scoped_vec;
+		let mut sec_key_vec = None;
+		let onion_service_dir = format!("{}/onion_service_addresses", tor_dir.clone());
+		let mut onion_address = "".to_string();
+		let mut existing_onion = None;
+		let mut found = false;
+		if std::path::Path::new(&onion_service_dir).exists() {
+			for entry in std::fs::read_dir(onion_service_dir.clone())? {
+				onion_address = entry.unwrap().file_name().into_string().unwrap();
+				found = true;
+			}
+		}
+		let socks_port = tor_port;
+
+		if !found {
+			let sec_key = secp256k1zkp::SecretKey::new(
+				&secp256k1zkp::Secp256k1::new(),
+				&mut rand::thread_rng(),
+			);
+			scoped_vec = vec![sec_key.clone()];
+			sec_key_vec = Some((scoped_vec).as_slice());
+		} else {
+			existing_onion = Some(onion_address.clone());
+		}
+
+		tor_config::output_tor_listener_config(
+			&tor_dir,
+			&addr,
+			sec_key_vec,
+			existing_onion,
+			socks_port,
+		)
+		.map_err(|e| {
+			error!("failed to configure tor due to {:?}. Halting!", e);
+			std::process::exit(-1);
+		})
+		.unwrap();
+
+		if !found {
+			// now that it's configured, read it
+			if std::path::Path::new(&onion_service_dir).exists() {
+				for entry in std::fs::read_dir(onion_service_dir)? {
+					onion_address = entry.unwrap().file_name().into_string().unwrap();
+				}
+			}
+		}
+
+		// Start Tor process
+		let tor_path = PathBuf::from(format!("{}/torrc", tor_dir));
+		let tor_path = std::fs::canonicalize(&tor_path)?;
+		let tor_path = Self::adjust_canonicalization(tor_path);
+
+		let mut process = tor_process::TorProcess::new();
+
+		let res = process
+			.torrc_path(&tor_path)
+			.working_dir(&tor_dir)
+			.timeout(200)
+			.completion_percent(100)
+			.launch();
+
+		match res {
+			Err(e) => {
+				let error: Error = ErrorKind::Configuration(e.to_string()).into();
+				Err(error)
+			}
+			Ok(_) => Ok((onion_address.to_string(), Arc::new(RwLock::new(process)))),
+		}
+	}
+
+	#[cfg(not(target_os = "windows"))]
+	fn adjust_canonicalization<P: AsRef<Path>>(p: P) -> String {
+		p.as_ref().display().to_string()
+	}
+
+	#[cfg(target_os = "windows")]
+	fn adjust_canonicalization<P: AsRef<Path>>(p: P) -> String {
+		const VERBATIM_PREFIX: &str = r#"\\?\"#;
+		let p = p.as_ref().display().to_string();
+		if p.starts_with(VERBATIM_PREFIX) {
+			p[VERBATIM_PREFIX.len()..].to_string()
+		} else {
+			p
+		}
 	}
 
 	/// Stop the [`HttpServer`]. All resources including threads and file descriptors will be released.

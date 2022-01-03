@@ -218,8 +218,11 @@ fn real_main() -> Result<(), Error> {
 	let threads = args.is_present("threads");
 	let count = args.is_present("count");
 	let itt = args.is_present("itt");
+	let http_port = args.is_present("http_port");
 	let max = args.is_present("max");
 	let min = args.is_present("min");
+	let tor = args.is_present("tor_port");
+	let bind_address = args.is_present("addr");
 	let http = args.is_present("http");
 	let certs = args.is_present("certs");
 	let private_key = args.is_present("private_key");
@@ -250,9 +253,24 @@ fn real_main() -> Result<(), Error> {
 		false => 1,
 	};
 
+	let tor = match tor {
+		true => args.value_of("tor_port").unwrap().parse().unwrap(),
+		false => 0,
+	};
+
+	let host = match bind_address {
+		true => args.value_of("addr").unwrap().to_string(),
+		false => "0.0.0.0".to_string(),
+	};
+
 	let itt = match itt {
 		true => args.value_of("itt").unwrap().parse().unwrap(),
 		false => 1,
+	};
+
+	let http_port = match http_port {
+		true => args.value_of("http_port").unwrap().parse().unwrap(),
+		false => 8080,
 	};
 
 	let max = match max {
@@ -268,6 +286,9 @@ fn real_main() -> Result<(), Error> {
 	if http {
 		let config = HttpConfig {
 			debug: false,
+			tor_port: tor,
+			host,
+			port: http_port,
 			evh_config: EventHandlerConfig {
 				tls_config,
 				..Default::default()

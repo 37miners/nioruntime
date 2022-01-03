@@ -20,6 +20,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
+use std::sync::mpsc::RecvError;
 
 /// Base Error struct which is used throught this crate and other crates
 #[derive(Debug, Fail)]
@@ -87,6 +88,42 @@ pub enum ErrorKind {
 	/// ParseIntError
 	#[fail(display = "ParseIntError: {}", _0)]
 	ParseIntError(String),
+	/// Tor Error
+	#[fail(display = "Tor Error: {}", _0)]
+	Tor(String),
+	/// Process Error
+	#[fail(display = "Process Error: {}", _0)]
+	Process(String),
+	/// Pid Error
+	#[fail(display = "PID Error: {}", _0)]
+	Pid(String),
+	/// ProcessNotStarted
+	#[fail(display = "Process not started: {}", _0)]
+	ProcessNotStarted(String),
+	/// InvalidBootstrapLine
+	#[fail(display = "InvalidBootstrapLine: {}", _0)]
+	InvalidBootstrapLine(String),
+	/// Regex
+	#[fail(display = "Regex: {}", _0)]
+	Regex(String),
+	/// InvalidLogLine
+	#[fail(display = "InvalidLogLine: {}", _0)]
+	InvalidLogLine(String),
+	/// Timeout
+	#[fail(display = "Timeout: {}", _0)]
+	Timeout(String),
+	/// RecvError
+	#[fail(display = "RecvError: {}", _0)]
+	RecvError(String),
+	/// NotOnion
+	#[fail(display = "NotOnion: {}", _0)]
+	NotOnion(String),
+	/// ED25519Key
+	#[fail(display = "ED25519Key: {}", _0)]
+	ED25519Key(String),
+	/// Configuration
+	#[fail(display = "Configuration Error: {}", _0)]
+	Configuration(String),
 }
 
 impl Display for Error {
@@ -175,6 +212,22 @@ impl From<rustls::Error> for Error {
 	fn from(e: rustls::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::TLSError(format!("{}", e))),
+		}
+	}
+}
+
+impl From<RecvError> for Error {
+	fn from(e: RecvError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::RecvError(format!("RecvError: {}", e))),
+		}
+	}
+}
+
+impl From<failure::Context<ErrorKind>> for Error {
+	fn from(e: failure::Context<ErrorKind>) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
 		}
 	}
 }

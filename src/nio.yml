@@ -64,3 +64,18 @@ args:
         short: l
         long: tls
         takes_value: false
+    - tor_port:
+        help: Optional tor port. If not specified, tor daemon will not be started
+        short: w
+        long: tor
+        takes_value: true
+    - http_port:
+        help: HTTP server port. Default is 8080.
+        short: v
+        long: http_port
+        takes_value: true
+    - addr:
+        help: Address to bind to. Default is 0.0.0.0.
+        short: a
+        long: addr
+        takes_value: true
