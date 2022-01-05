@@ -327,28 +327,24 @@ pub fn _complete_tor_address(input: &str) -> Result<String, Error> {
 mod tests {
 	use super::*;
 
-	use rand::rngs::mock::StepRng;
-
-	use crate::util::{self, secp};
-
+	use secp256k1zkp::rand::rngs::mock::StepRng;
 	pub fn clean_output_dir(test_dir: &str) {
 		let _ = fs::remove_dir_all(test_dir);
 	}
 
 	pub fn setup(test_dir: &str) {
-		util::init_test_logger();
 		clean_output_dir(test_dir);
 	}
 
 	#[test]
 	fn test_service_config() -> Result<(), Error> {
-		use grin_util::static_secp_instance;
+		use crate::static_secp_instance;
 		let test_dir = "target/test_output/onion_service";
 		setup(test_dir);
 		let mut test_rng = StepRng::new(1_234_567_890_u64, 1);
 		let secp = static_secp_instance();
-		let secp = secp.lock();
-		let sec_key = secp::key::SecretKey::new(&secp, &mut test_rng);
+		let secp = secp.lock().unwrap();
+		let sec_key = secp256k1zkp::SecretKey::new(&secp, &mut test_rng);
 		output_onion_service_config(test_dir, &sec_key)?;
 		clean_output_dir(test_dir);
 		Ok(())
@@ -356,21 +352,14 @@ mod tests {
 
 	#[test]
 	fn test_output_tor_config() -> Result<(), Error> {
-		use grin_util::static_secp_instance;
+		use crate::static_secp_instance;
 		let test_dir = "./target/test_output/tor";
 		setup(test_dir);
 		let mut test_rng = StepRng::new(1_234_567_890_u64, 1);
 		let secp = static_secp_instance();
-		let secp = secp.lock();
-		let sec_key = secp::key::SecretKey::new(&secp, &mut test_rng);
-		output_tor_listener_config(
-			test_dir,
-			"127.0.0.1:3415",
-			"127.0.0.1:3416",
-			Some(&[sec_key]),
-			None,
-			0,
-		)?;
+		let secp = secp.lock().unwrap();
+		let sec_key = secp256k1zkp::SecretKey::new(&secp, &mut test_rng);
+		output_tor_listener_config(test_dir, "127.0.0.1:3415", Some(&[sec_key]), None, 0)?;
 		clean_output_dir(test_dir);
 		Ok(())
 	}

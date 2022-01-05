@@ -960,6 +960,7 @@ dependencies = [
  "failure",
  "futures",
  "grin_secp256k1zkp",
+ "lazy_static",
  "libc",
  "log",
  "nioruntime_err",
