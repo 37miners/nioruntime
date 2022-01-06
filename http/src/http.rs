@@ -529,8 +529,11 @@ impl HttpServer {
 		let (mut onion_address, tor_process);
 		onion_address = "".to_string();
 		if self.config.tor_port != 0 {
-			(onion_address, tor_process) =
+			let (returned_onion_address, returned_tor_process) =
 				self.start_tor(self.config.tor_port, self.config.port)?;
+			onion_address = returned_onion_address;
+			tor_process = returned_tor_process;
+
 			self._tor_process = Some(tor_process);
 		}
 
