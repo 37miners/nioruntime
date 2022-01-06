@@ -21,6 +21,7 @@ use std::fmt::Display;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
 use std::sync::mpsc::RecvError;
+use std::sync::MutexGuard;
 
 /// Base Error struct which is used throught this crate and other crates
 #[derive(Debug, Fail)]
@@ -226,6 +227,14 @@ impl From<RecvError> for Error {
 
 impl From<failure::Context<ErrorKind>> for Error {
 	fn from(e: failure::Context<ErrorKind>) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
+		}
+	}
+}
+
+impl From<std::sync::PoisonError<MutexGuard<'_, Vec<(String, String)>>>> for Error {
+	fn from(e: std::sync::PoisonError<MutexGuard<'_, Vec<(String, String)>>>) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
 		}
