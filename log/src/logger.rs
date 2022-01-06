@@ -61,6 +61,7 @@ lazy_static! {
 /// // [2021-08-09 19:41:37]: hi
 /// ```
 #[macro_export]
+
 macro_rules! fatal {
         () => {
                 nioruntime_log::do_log!(nioruntime_log::FATAL);
@@ -655,6 +656,70 @@ macro_rules! do_log {
         };
 }
 
+/// get_config_multi get's the LogConfig structure for the specified logger
+///
+/// A sample get_config_multi! call might look something like this:
+///
+/// ```
+/// use nioruntime_log::*;
+///
+/// info!();
+/// const MAIN_LOG: &str = "mainlog";
+///
+/// log_multi!(INFO, MAIN_LOG, "test");
+/// let mut config = get_config_multi!(MAIN_LOG).unwrap();
+///
+/// // print to stdout as well as log
+/// config.show_stdout = true;
+/// log_config_multi!(MAIN_LOG, config.clone());
+///
+///
+/// log_multi!(
+/// 	INFO,
+/// 	MAIN_LOG,
+/// 	"print to stdout as well",
+/// );
+///
+/// config.show_stdout = false;
+/// log_config_multi!(MAIN_LOG, config);
+///
+/// log_multi!(
+/// 	INFO,
+///	MAIN_LOG,
+/// 	"print only to log file",
+/// );
+/// ```
+///
+/// For full details on all parameters of LogConfig see [`LogConfig`].
+#[macro_export]
+macro_rules! get_config_multi {
+	($a:expr) => {{
+		let static_log = &nioruntime_log::STATIC_LOG;
+		let mut log_map = static_log.lock();
+		match log_map {
+			Ok(mut log_map) => {
+				let log = log_map.get_mut($a);
+				match log {
+					Some(log) => match &log.params {
+						Some(params) => Ok(params.config.clone()),
+						None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
+							"no params found".to_string(),
+						)),
+					},
+					None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
+						"no config found".to_string(),
+					)),
+				}
+			}
+			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
+				"log generated poison error: {}",
+				e
+			))
+			.into()),
+		}
+	}};
+}
+
 /// log_config_multi is identical to [`log_config`] except that the name of the logger is specified instead of using
 /// the default logger.
 ///
@@ -749,15 +814,15 @@ macro_rules! log_config {
 
 /// The main logging object
 pub struct Log {
-	params: Option<LogParams>,
+	pub params: Option<LogParams>,
 }
 
 /// The data that is held by the Log object
-struct LogParams {
+pub struct LogParams {
 	file: Option<File>,
 	cur_size: u64,
 	init_age_millis: u128,
-	config: LogConfig,
+	pub config: LogConfig,
 	has_rotated: bool,
 }
 
@@ -768,6 +833,7 @@ pub enum RotationStatus {
 }
 
 /// Log Config object.
+#[derive(Debug, Clone)]
 pub struct LogConfig {
 	/// The path to the log file. By default, logging is only printed to standard output.
 	/// This default behaviour is acheived by setting file_path to an empty string.
