@@ -240,3 +240,11 @@ impl From<std::sync::PoisonError<MutexGuard<'_, Vec<(String, String)>>>> for Err
 		}
 	}
 }
+
+impl From<std::string::FromUtf8Error> for Error {
+	fn from(e: std::string::FromUtf8Error) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("UTF-8 error: {}", e))),
+		}
+	}
+}
