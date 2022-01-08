@@ -879,6 +879,7 @@ dependencies = [
 name = "nioruntime_err"
 version = "0.0.2-beta1"
 dependencies = [
+ "base64",
  "byteorder",
  "bytes",
  "chrono",

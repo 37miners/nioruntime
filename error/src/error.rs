@@ -248,3 +248,22 @@ impl From<std::string::FromUtf8Error> for Error {
 		}
 	}
 }
+
+impl From<base64::DecodeError> for Error {
+	fn from(e: base64::DecodeError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("Base64 error: {}", e))),
+		}
+	}
+}
+
+impl From<std::array::TryFromSliceError> for Error {
+	fn from(e: std::array::TryFromSliceError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!(
+				"TryFromSlice error: {}",
+				e
+			))),
+		}
+	}
+}
