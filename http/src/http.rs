@@ -440,12 +440,7 @@ impl HttpServer {
 	pub fn add_api_extension(&self, extension: String) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut context = http_context.write().map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string()))
-							.into();
-					error
-				})?;
+				let mut context = nioruntime_util::lockw!(http_context);
 				context.api_extensions.insert(extension.to_lowercase());
 			}
 			None => {
@@ -465,12 +460,7 @@ impl HttpServer {
 	pub fn add_api_mapping(&self, path: String) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut context = http_context.write().map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string()))
-							.into();
-					error
-				})?;
+				let mut context = nioruntime_util::lockw!(http_context);
 				context.api_mappings.insert(path);
 			}
 			None => {
@@ -865,13 +855,7 @@ impl HttpServer {
 	pub fn stop(&mut self) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut http_context = http_context.write().map_err(|_e| {
-					let error: Error = ErrorKind::InternalError(
-						"unexpected error obtaining http_context lock".to_string(),
-					)
-					.into();
-					error
-				})?;
+				let mut http_context = nioruntime_util::lockw!(http_context);
 				http_context.stop = true;
 			}
 			None => {
@@ -1224,11 +1208,7 @@ impl HttpServer {
 				http_config.stats_frequency,
 			));
 
-			let http_context = http_context.read().map_err(|_| {
-				let error: Error =
-					ErrorKind::InternalError("http_context lock err".to_string()).into();
-				error
-			})?;
+			let http_context = nioruntime_util::lockr!(http_context);
 
 			if itt % 6 == 0 {
 				log_no_ts_multi!(INFO, STATS_LOG, "{}", HEADER);
@@ -1609,21 +1589,18 @@ impl HttpServer {
 		let mut rtimeout_incr = 0;
 
 		{
-			let http_context = http_context.write().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-				error
-			})?;
-
 			let mut del_list = vec![];
 
 			{
-				let map = http_context.map.read().map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string()))
-							.into();
-					error
-				})?;
+				let mut varr: Vec<(u128, Arc<RwLock<ConnData>>)> = vec![];
+				{
+					let http_context = nioruntime_util::lockr!(http_context);
+					let map = { nioruntime_util::lockr!(http_context.map) };
+
+					for (k, v) in &*map {
+						varr.push((k.clone(), v.clone()));
+					}
+				}
 
 				let start_time = *START_TIME;
 				let since_start = Instant::now().duration_since(start_time);
@@ -1631,7 +1608,7 @@ impl HttpServer {
 				let last_request_timeout = http_config.last_request_timeout;
 				let read_timeout = http_config.read_timeout;
 
-				for (k, v) in &*map {
+				for (k, v) in &varr {
 					let (idledisc, rtimeout) = match Self::check_idle(
 						time_now,
 						v,
@@ -1661,29 +1638,25 @@ impl HttpServer {
 				}
 			}
 
+			let stop;
 			{
-				let mut map = http_context.map.write().map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string()))
-							.into();
-					error
-				})?;
+				let http_context = nioruntime_util::lockr!(http_context);
+				let mut map = {
+					stop = http_context.stop;
+					nioruntime_util::lockw!(http_context.map)
+				};
 				for d in del_list {
 					map.remove(&d);
 				}
 			}
 
-			if http_context.stop {
+			if stop {
 				return Ok(true);
 			}
 		}
 
 		if idledisc_incr > 0 || rtimeout_incr > 0 {
-			let mut http_context = http_context.write().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-				error
-			})?;
+			let mut http_context = nioruntime_util::lockw!(http_context);
 			http_context.stats.idledisc += idledisc_incr;
 			http_context.stats.rtimeout += rtimeout_incr;
 		}
@@ -1826,12 +1799,7 @@ impl HttpServer {
 		id: u128,
 		wh: WriteHandle,
 	) -> Result<(), Error> {
-		let mut http_context = http_context.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-			error
-		})?;
-
+		let mut http_context = nioruntime_util::lockw!(http_context);
 		http_context.stats.conns += 1;
 		http_context.stats.connects += 1;
 
@@ -1853,17 +1821,8 @@ impl HttpServer {
 		wh: WriteHandle,
 	) -> Result<(), Error> {
 		let (conn_data, mappings, extensions) = {
-			let http_context = http_context.write().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-				error
-			})?;
-
-			let mut map = http_context.map.write().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-				error
-			})?;
+			let http_context = nioruntime_util::lockw!(http_context);
+			let mut map = nioruntime_util::lockw!(http_context.map);
 
 			let conn_data = map.get_mut(&wh.get_connection_id());
 
@@ -2426,19 +2385,11 @@ impl HttpServer {
 		_http_config: HttpConfig,
 		id: u128,
 	) -> Result<(), Error> {
-		let mut http_context = http_context.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-			error
-		})?;
+		let mut http_context = nioruntime_util::lockw!(http_context);
 
 		http_context.stats.conns -= 1;
 
-		let mut map = http_context.map.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-			error
-		})?;
+		let mut map = nioruntime_util::lockw!(http_context.map);
 
 		map.remove(&id);
 		Ok(())

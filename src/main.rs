@@ -215,6 +215,7 @@ fn real_main() -> Result<(), Error> {
 		.version(built_info::PKG_VERSION)
 		.get_matches();
 	let client = args.is_present("client");
+	let debug = args.is_present("debug");
 	let threads = args.is_present("threads");
 	let count = args.is_present("count");
 	let itt = args.is_present("itt");
@@ -285,7 +286,7 @@ fn real_main() -> Result<(), Error> {
 
 	if http {
 		let config = HttpConfig {
-			debug: false,
+			debug,
 			tor_port: tor,
 			host,
 			port: http_port,
