@@ -15,6 +15,10 @@
 use bytefmt;
 use chrono::prelude::*;
 use dirs;
+use ed25519_dalek::ExpandedSecretKey;
+use ed25519_dalek::PublicKey;
+use ed25519_dalek::Signature;
+use ed25519_dalek::Verifier;
 use lazy_static::lazy_static;
 use nioruntime_err::{Error, ErrorKind};
 pub use nioruntime_evh::{EventHandler, EventHandlerConfig, State, WriteHandle};
@@ -391,6 +395,7 @@ pub struct HttpServer {
 	pub config: HttpConfig,
 	listener: Option<TcpListener>,
 	onion_address: Option<String>,
+	onion_secret: Option<ExpandedSecretKey>,
 	pub http_context: Option<Arc<RwLock<HttpContext>>>,
 	_tor_process: Option<Arc<RwLock<TorProcess>>>,
 }
@@ -432,9 +437,44 @@ impl HttpServer {
 			config: cloned_config,
 			listener: None,
 			onion_address: None,
+			onion_secret: None,
 			http_context: None,
 			_tor_process: None,
 		}
+	}
+
+	pub fn tor_sign(&self, message: &[u8]) -> Result<[u8; 64], Error> {
+		let pubkey = self.get_tor_pubkey()?;
+		if pubkey.is_none() {
+			return Err(ErrorKind::NotOnion(format!("tor not configured.")).into());
+		}
+		let pubkey = pubkey.unwrap();
+		let pubkey = PublicKey::from_bytes(&pubkey)?;
+
+		let secret_key = self.onion_secret.as_ref();
+		if secret_key.is_none() {
+			return Err(ErrorKind::NotOnion(format!("tor not configured.")).into());
+		}
+		let secret_key = secret_key.unwrap();
+
+		Ok(secret_key.sign(message, &pubkey).to_bytes())
+	}
+
+	pub fn verify(
+		&self,
+		message: &[u8],
+		pubkey: Option<[u8; 32]>,
+		signature: [u8; 64],
+	) -> Result<bool, Error> {
+		if pubkey.is_none() {
+			return Err(ErrorKind::NotOnion(format!("tor not configured.")).into());
+		}
+		let pubkey = pubkey.unwrap();
+		let pubkey = PublicKey::from_bytes(&pubkey)?;
+
+		Ok(pubkey
+			.verify(message, &Signature::from_bytes(&signature)?)
+			.is_ok())
 	}
 
 	pub fn get_tor_pubkey(&self) -> Result<Option<[u8; 32]>, Error> {
@@ -547,8 +587,24 @@ impl HttpServer {
 			onion_address = returned_onion_address;
 			self.onion_address = Some(onion_address.clone());
 			tor_process = returned_tor_process;
-
 			self._tor_process = Some(tor_process);
+
+			let tor_dir = format!("{}/tor/onion_service_addresses", self.config.root_dir);
+			let paths = std::fs::read_dir(tor_dir)?;
+			let mut service_dir = "".to_string();
+
+			for path in paths {
+				service_dir = format!("{}", path?.path().display());
+			}
+
+			let secret_file = format!("{}/hs_ed25519_secret_key", service_dir);
+
+			let mut f = File::open(&secret_file)?;
+			let metadata = std::fs::metadata(&secret_file)?;
+			let mut buffer = vec![0; metadata.len() as usize];
+			f.read(&mut buffer)?;
+			let secret_bytes = &buffer[32..];
+			self.onion_secret = Some(ExpandedSecretKey::from_bytes(secret_bytes)?);
 		}
 
 		log_multi!(INFO, MAIN_LOG, "{}", self.config.server_name);

@@ -267,3 +267,11 @@ impl From<std::array::TryFromSliceError> for Error {
 		}
 	}
 }
+
+impl From<ed25519_dalek::ed25519::Error> for Error {
+	fn from(e: ed25519_dalek::ed25519::Error) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("dalek error: {}", e))),
+		}
+	}
+}
