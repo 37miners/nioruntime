@@ -20,6 +20,8 @@ use nioruntime_err::{Error, ErrorKind};
 pub use nioruntime_evh::{EventHandler, EventHandlerConfig, State, WriteHandle};
 use nioruntime_log::*;
 use nioruntime_tor::config as tor_config;
+use nioruntime_tor::ov3::OnionV3Address;
+use nioruntime_tor::ov3::OnionV3Error;
 use nioruntime_tor::process as tor_process;
 use nioruntime_tor::process::TorProcess;
 use nioruntime_util::threadpool::OnPanic;
@@ -388,6 +390,7 @@ pub struct HttpServer {
 	/// The config of this [`HttpServer`].
 	pub config: HttpConfig,
 	listener: Option<TcpListener>,
+	onion_address: Option<String>,
 	pub http_context: Option<Arc<RwLock<HttpContext>>>,
 	_tor_process: Option<Arc<RwLock<TorProcess>>>,
 }
@@ -428,8 +431,28 @@ impl HttpServer {
 		HttpServer {
 			config: cloned_config,
 			listener: None,
+			onion_address: None,
 			http_context: None,
 			_tor_process: None,
+		}
+	}
+
+	pub fn get_tor_pubkey(&self) -> Result<Option<[u8; 32]>, Error> {
+		match &self.onion_address {
+			None => Ok(None),
+			Some(onion_address) => {
+				let onion_address: &str = &onion_address[..];
+				let onion_address: OnionV3Address =
+					onion_address.try_into().map_err(|e: OnionV3Error| {
+						let error: Error = ErrorKind::NotOnion(format!(
+							"onion address was not valid: {}",
+							e.to_string()
+						))
+						.into();
+						error
+					})?;
+				Ok(Some(*onion_address.as_bytes()))
+			}
 		}
 	}
 
@@ -522,6 +545,7 @@ impl HttpServer {
 			let (returned_onion_address, returned_tor_process) =
 				self.start_tor(self.config.tor_port, self.config.port)?;
 			onion_address = returned_onion_address;
+			self.onion_address = Some(onion_address.clone());
 			tor_process = returned_tor_process;
 
 			self._tor_process = Some(tor_process);
