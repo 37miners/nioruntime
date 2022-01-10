@@ -703,13 +703,13 @@ impl HttpServer {
 		log_multi!(INFO, MAIN_LOG, "tls_private_key_file: {}", private_key_file,);
 
 		if self.config.tor_port == 0 {
-			log_multi!(INFO, MAIN_LOG, "tor_port:             DISABLED");
+			log_multi!(INFO, MAIN_LOG, "onion_port:           DISABLED");
 			log_multi!(INFO, MAIN_LOG, "onion_address:        DISABLED");
 		} else {
 			log_multi!(
 				INFO,
 				MAIN_LOG,
-				"tor_port:             {}",
+				"onion_port:           {}",
 				self.config.tor_port
 			);
 			log_multi!(
