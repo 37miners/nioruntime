@@ -275,3 +275,14 @@ impl From<ed25519_dalek::ed25519::Error> for Error {
 		}
 	}
 }
+
+impl From<std::time::SystemTimeError> for Error {
+	fn from(e: std::time::SystemTimeError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!(
+				"system time error: {}",
+				e
+			))),
+		}
+	}
+}
