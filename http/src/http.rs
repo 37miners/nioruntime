@@ -572,6 +572,7 @@ impl HttpServer {
 			MAIN_LOG,
 			LogConfig {
 				file_path: format!("{}/logs/mainlog.log", self.config.root_dir),
+				show_log_level: false,
 				..Default::default()
 			}
 		)?;
@@ -830,6 +831,7 @@ impl HttpServer {
 				show_stdout: self.config.debug,
 				max_age_millis: self.config.main_log_max_age_millis,
 				max_size: self.config.main_log_max_size,
+				show_log_level: false,
 				..Default::default()
 			}
 		)?;
@@ -1266,6 +1268,7 @@ impl HttpServer {
 				file_header: file_header.clone(),
 				max_age_millis: http_config.stats_log_max_age_millis,
 				max_size: http_config.stats_log_max_size,
+				show_log_level: false,
 				..Default::default()
 			}
 		)?;
@@ -1465,6 +1468,7 @@ impl HttpServer {
 			&header,
 			false,
 			http_config.delete_request_rotation,
+			false,
 		)?;
 
 		let len = http_config.request_log_params.len();

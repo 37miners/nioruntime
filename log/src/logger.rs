@@ -20,6 +20,7 @@ use chrono::{DateTime, Local, Utc};
 use lazy_static::lazy_static;
 use nioruntime_err::{Error, ErrorKind};
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fs::{canonicalize, metadata, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ pub const INFO: i32 = 2;
 pub const WARN: i32 = 3;
 pub const ERROR: i32 = 4;
 pub const FATAL: i32 = 5;
+pub const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
 lazy_static! {
 	/// This is the static holder of all log objects. Generally this
@@ -612,10 +614,11 @@ macro_rules! do_log {
                                                 $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
                                         }
 
+					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
 					let _ = $log.update_show_timestamp($show_ts);
 
 						if $level >= LOG_LEVEL {
-                                        		match $log.log(&format!($a)) {
+                                        		match $log.log_level(&format!($a), $level) {
                                                 		Ok(_) => {},
                                                 		Err(e) => {
                                                         		println!(
@@ -627,8 +630,10 @@ macro_rules! do_log {
                                         		}
 						}
 
+					let _ = $log.update_show_log_level(cur_show_log_level);
 					// always set to showing timestamp (as default)
 					let _ = $log.update_show_timestamp(true);
+
 			}
         };
         ($level:expr, $show_ts:expr, $log:expr, $a:expr, $($b:tt)*)=>{
@@ -638,10 +643,11 @@ macro_rules! do_log {
                                                 $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
                                         }
 
+					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
 					let _ = $log.update_show_timestamp($show_ts);
 
 					if $level >= LOG_LEVEL {
-                                        	match $log.log(&format!($a, $($b)*)) {
+                                        	match $log.log_level(&format!($a, $($b)*), $level) {
                                                 	Ok(_) => {},
                                                 	Err(e) => {
                                                         	println!(
@@ -652,6 +658,10 @@ macro_rules! do_log {
                                                 	}
                                         	}
 					}
+
+                                        let _ = $log.update_show_log_level(cur_show_log_level);
+                                        // always set to showing timestamp (as default)
+                                        let _ = $log.update_show_timestamp(true);
 			}
         };
 }
@@ -859,6 +869,8 @@ pub struct LogConfig {
 	pub show_stdout: bool,
 	/// delete the rotated log immidiately (only used for testing)
 	pub delete_rotation: bool,
+	/// display the log level
+	pub show_log_level: bool,
 }
 
 impl Default for LogConfig {
@@ -871,6 +883,7 @@ impl Default for LogConfig {
 			show_timestamp: true,
 			show_stdout: true,
 			delete_rotation: false,
+			show_log_level: true,
 		}
 	}
 }
@@ -935,12 +948,21 @@ impl LogParams {
 	}
 
 	/// The actual logging function, handles rotation if needed
-	pub fn log(&mut self, line: &str) -> Result<(), Error> {
+	pub fn log(&mut self, line: &str, level: i32) -> Result<(), Error> {
 		let line_bytes = line.as_bytes(); // get line as bytes
 		self.cur_size += line_bytes.len() as u64 + 1; // increment cur_size
 		if self.config.show_timestamp {
 			// timestamp is an additional 23 bytes
 			self.cur_size += 23;
+		}
+		if self.config.show_log_level
+			&& level <= DISPLAY_ARRAY.len().try_into().unwrap_or(0)
+			&& level >= 0
+		{
+			self.cur_size += DISPLAY_ARRAY[level.try_into().unwrap_or(0)]
+				.len()
+				.try_into()
+				.unwrap_or(0) + 3;
 		}
 		// get current time
 		let start_time = *START_TIME;
@@ -969,6 +991,21 @@ impl LogParams {
 				print!("[{}]: ", formatted_ts);
 			}
 		}
+
+		if self.config.show_log_level
+			&& level < DISPLAY_ARRAY.len().try_into().unwrap_or(0)
+			&& level >= 0
+		{
+			if self.file.is_some() {
+				self.file.as_ref().unwrap().write(
+					format!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)]).as_bytes(),
+				)?;
+			}
+			if self.config.show_stdout {
+				print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)]);
+			}
+		}
+
 		// finally log the line followed by a newline.
 		if self.file.is_some() {
 			let mut file = self.file.as_ref().unwrap();
@@ -1008,6 +1045,7 @@ impl Log {
 			&config.file_header,
 			config.show_stdout,
 			config.delete_rotation,
+			config.show_log_level,
 		)?;
 		Ok(())
 	}
@@ -1022,6 +1060,7 @@ impl Log {
 		file_header: &str,
 		show_stdout: bool,
 		delete_rotation: bool,
+		show_log_level: bool,
 	) -> Result<(), Error> {
 		// create file with append option and create option
 		let file = match file_path.clone() {
@@ -1077,6 +1116,7 @@ impl Log {
 				file_header,
 				show_stdout,
 				delete_rotation,
+				show_log_level,
 			},
 			has_rotated: false,
 		});
@@ -1104,9 +1144,36 @@ impl Log {
 	pub fn log(&mut self, line: &str) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => {
-				params.log(line)?;
+				params.log(line, 10000)?;
 				Ok(())
 			}
+			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+		}
+	}
+
+	pub fn log_level(&mut self, line: &str, level: i32) -> Result<(), Error> {
+		match self.params.as_mut() {
+			Some(params) => {
+				params.log(line, level)?;
+				Ok(())
+			}
+			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+		}
+	}
+
+	pub fn update_show_log_level(&mut self, show: bool) -> Result<(), Error> {
+		match self.params.as_mut() {
+			Some(params) => {
+				params.config.show_log_level = show;
+				Ok(())
+			}
+			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+		}
+	}
+
+	pub fn get_show_log_level(&mut self) -> Result<bool, Error> {
+		match self.params.as_mut() {
+			Some(params) => Ok(params.config.show_log_level),
 			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
 		}
 	}
