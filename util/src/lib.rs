@@ -15,3 +15,5 @@
 mod macros;
 pub mod ser;
 pub mod threadpool;
+
+pub use backtrace;

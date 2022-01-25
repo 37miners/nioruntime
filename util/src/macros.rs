@@ -32,7 +32,10 @@ macro_rules! lockw {
 	($a:expr) => {{
 		let do_try_lock = true;
 		let mut is_locked = false;
-		let id: u128 = rand::random();
+		let id: u128 = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos(); // use time in nanos as random enough number here
 
 		if do_try_lock {
 			match $a.try_write() {
