@@ -780,7 +780,7 @@ impl HttpServer {
 		std::thread::spawn(move || loop {
 			std::thread::sleep(std::time::Duration::from_millis(100));
 			{
-				let http_context = match http_context_clone4.read() {
+				let http_context = match nioruntime_util::lockr!(http_context_clone4) {
 					Ok(http_context) => http_context,
 					Err(e) => {
 						log_multi!(
@@ -1782,7 +1782,7 @@ impl HttpServer {
 			let conn_data = e.into_inner();
 
 			{
-				let callback_state = conn_data.wh.callback_state.read();
+				let callback_state = nioruntime_util::lockr!(conn_data.wh.callback_state);
 				if callback_state.is_ok() {
 					let callback_state = callback_state.unwrap();
 					if *callback_state == State::Init {
@@ -1810,7 +1810,7 @@ impl HttpServer {
 				}
 			}
 			{
-				let callback_state = conn_data.wh.callback_state.read();
+				let callback_state = nioruntime_util::lockr!(conn_data.wh.callback_state);
 				if callback_state.is_ok() {
 					let callback_state = callback_state.unwrap();
 					if *callback_state == State::HeadersChunked {
