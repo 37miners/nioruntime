@@ -176,7 +176,7 @@ impl TorProcess {
 
 			if start_tor {
 				{
-					let mut status = status.write().unwrap();
+					let mut status = nioruntime_util::lockw!(status)?;
 					status.last = Self::timenow();
 				}
 				let mut tor = Command::new(&self.tor_cmd);
@@ -275,11 +275,8 @@ impl TorProcess {
 				}
 				Err(_) => {
 					{
-						let status = status.write();
-						if status.is_err() {
-							return Err(ErrorKind::Timeout("timeout".to_string()).into());
-						}
-						let mut status = status.unwrap();
+						let mut status = nioruntime_util::lockw!(status)?;
+
 						if status.status == self.completion_percent {
 							return Ok(self);
 						}
@@ -348,15 +345,7 @@ impl TorProcess {
 
 							{
 								// update status
-								let status = status.write();
-								if status.is_err() {
-									return Err(ErrorKind::Tor(format!(
-										"{:?}: {:?}",
-										status, warnings
-									))
-									.into());
-								}
-								let mut status = status.unwrap();
+								let mut status = nioruntime_util::lockw!(status)?;
 								status.status = perc;
 								status.last = Self::timenow();
 							}

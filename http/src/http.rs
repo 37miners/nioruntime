@@ -503,7 +503,7 @@ impl HttpServer {
 	pub fn add_api_extension(&self, extension: String) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut context = nioruntime_util::lockw!(http_context);
+				let mut context = nioruntime_util::lockw!(http_context)?;
 				context.api_extensions.insert(extension.to_lowercase());
 			}
 			None => {
@@ -523,7 +523,7 @@ impl HttpServer {
 	pub fn add_api_mapping(&self, path: String) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut context = nioruntime_util::lockw!(http_context);
+				let mut context = nioruntime_util::lockw!(http_context)?;
 				context.api_mappings.insert(path);
 			}
 			None => {
@@ -937,7 +937,7 @@ impl HttpServer {
 	pub fn stop(&mut self) -> Result<(), Error> {
 		match &self.http_context {
 			Some(http_context) => {
-				let mut http_context = nioruntime_util::lockw!(http_context);
+				let mut http_context = nioruntime_util::lockw!(http_context)?;
 				http_context.stop = true;
 			}
 			None => {
@@ -1283,7 +1283,7 @@ impl HttpServer {
 		let mut max_lat_perm = 0;
 		loop {
 			{
-				let mut http_context = nioruntime_util::lockw!(http_context);
+				let mut http_context = nioruntime_util::lockw!(http_context)?;
 				http_context.stats.max_lat = 0;
 			}
 
@@ -1291,7 +1291,7 @@ impl HttpServer {
 				http_config.stats_frequency,
 			));
 
-			let http_context = nioruntime_util::lockr!(http_context);
+			let http_context = nioruntime_util::lockr!(http_context)?;
 
 			if itt % 6 == 0 {
 				log_no_ts_multi!(INFO, STATS_LOG, "{}", HEADER);
@@ -1482,7 +1482,7 @@ impl HttpServer {
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(100));
 			let stop = {
-				let mut http_context = nioruntime_util::lockw!(http_context);
+				let mut http_context = nioruntime_util::lockw!(http_context)?;
 				to_log = http_context.log_queue.clone();
 				(*http_context).log_queue.clear();
 				http_context.stop
@@ -1678,8 +1678,8 @@ impl HttpServer {
 			{
 				let mut varr: Vec<(u128, Arc<RwLock<ConnData>>)> = vec![];
 				{
-					let http_context = nioruntime_util::lockr!(http_context);
-					let map = { nioruntime_util::lockr!(http_context.map) };
+					let http_context = nioruntime_util::lockr!(http_context)?;
+					let map = { nioruntime_util::lockr!(http_context.map)? };
 
 					for (k, v) in &*map {
 						varr.push((k.clone(), v.clone()));
@@ -1724,10 +1724,10 @@ impl HttpServer {
 
 			let stop;
 			{
-				let http_context = nioruntime_util::lockr!(http_context);
+				let http_context = nioruntime_util::lockr!(http_context)?;
 				let mut map = {
 					stop = http_context.stop;
-					nioruntime_util::lockw!(http_context.map)
+					nioruntime_util::lockw!(http_context.map)?
 				};
 				for d in del_list {
 					map.remove(&d);
@@ -1740,7 +1740,7 @@ impl HttpServer {
 		}
 
 		if idledisc_incr > 0 || rtimeout_incr > 0 {
-			let mut http_context = nioruntime_util::lockw!(http_context);
+			let mut http_context = nioruntime_util::lockw!(http_context)?;
 			http_context.stats.idledisc += idledisc_incr;
 			http_context.stats.rtimeout += rtimeout_incr;
 		}
@@ -1883,15 +1883,11 @@ impl HttpServer {
 		id: u128,
 		wh: WriteHandle,
 	) -> Result<(), Error> {
-		let mut http_context = nioruntime_util::lockw!(http_context);
+		let mut http_context = nioruntime_util::lockw!(http_context)?;
 		http_context.stats.conns += 1;
 		http_context.stats.connects += 1;
 
-		let mut map = http_context.map.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-			error
-		})?;
+		let mut map = nioruntime_util::lockw!(http_context.map)?;
 
 		map.insert(id, Arc::new(RwLock::new(ConnData::new(wh, http_config))));
 		Ok(())
@@ -1905,8 +1901,8 @@ impl HttpServer {
 		wh: WriteHandle,
 	) -> Result<(), Error> {
 		let (conn_data, mappings, extensions) = {
-			let http_context = nioruntime_util::lockw!(http_context);
-			let mut map = nioruntime_util::lockw!(http_context.map);
+			let http_context = nioruntime_util::lockw!(http_context)?;
+			let mut map = nioruntime_util::lockw!(http_context.map)?;
 
 			let conn_data = map.get_mut(&wh.get_connection_id());
 
@@ -1932,11 +1928,7 @@ impl HttpServer {
 		};
 
 		let log_items = {
-			let mut conn_data = conn_data.write().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("unexpected error: {}", e.to_string())).into();
-				error
-			})?;
+			let mut conn_data = nioruntime_util::lockw!(conn_data)?;
 			let conn_data_is_async = conn_data.is_async.clone();
 
 			let start_time = *START_TIME;
@@ -1969,7 +1961,7 @@ impl HttpServer {
 		};
 
 		{
-			let mut http_context = nioruntime_util::lockw!(http_context);
+			let mut http_context = nioruntime_util::lockw!(http_context)?;
 			http_context.stats.requests += log_items.len().try_into().unwrap_or(0);
 			for item in &log_items {
 				if item.elapsed != 0 {
@@ -2032,7 +2024,7 @@ impl HttpServer {
 		}
 
 		{
-			let is_async = *nioruntime_util::lockr!(conn_data.is_async);
+			let is_async = *nioruntime_util::lockr!(conn_data.is_async)?;
 			if is_async {
 				return Ok(log_vec);
 			}
@@ -2249,7 +2241,8 @@ impl HttpServer {
 						(*conn_data).begin_request_time = since_start.as_nanos();
 						if mappings.get(uri).is_some() || extensions.get(&extension).is_some() {
 							{
-								let mut callback_state = nioruntime_util::lockw!(wh.callback_state);
+								let mut callback_state =
+									nioruntime_util::lockw!(wh.callback_state)?;
 								*callback_state = State::Init;
 							}
 							(config.callback)(
@@ -2272,7 +2265,7 @@ impl HttpServer {
 						}
 
 						let elapsed = {
-							let is_async = *nioruntime_util::lockr!(conn_data.is_async);
+							let is_async = *nioruntime_util::lockr!(conn_data.is_async)?;
 							if !is_async {
 								let start_time = *START_TIME;
 								let since_start =
@@ -2309,7 +2302,7 @@ impl HttpServer {
 			}
 
 			{
-				let is_async = *nioruntime_util::lockr!(conn_data.is_async);
+				let is_async = *nioruntime_util::lockr!(conn_data.is_async)?;
 				if is_async {
 					break; // don't process the next page if we're in async mode
 				}
@@ -2469,11 +2462,11 @@ impl HttpServer {
 		_http_config: HttpConfig,
 		id: u128,
 	) -> Result<(), Error> {
-		let mut http_context = nioruntime_util::lockw!(http_context);
+		let mut http_context = nioruntime_util::lockw!(http_context)?;
 
 		http_context.stats.conns -= 1;
 
-		let mut map = nioruntime_util::lockw!(http_context.map);
+		let mut map = nioruntime_util::lockw!(http_context.map)?;
 
 		map.remove(&id);
 		Ok(())

@@ -171,7 +171,7 @@ impl WriteHandle {
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	) -> Self {
 		let callback_state = {
-			let guarded_data = guarded_data.write().unwrap();
+			let guarded_data = nioruntime_util::lockw!(guarded_data).unwrap();
 			guarded_data.callback_state.clone()
 		};
 		WriteHandle {
@@ -193,7 +193,7 @@ impl WriteHandle {
 	/// Close the connection associated with this write handle.
 	pub fn close(&self) -> Result<(), Error> {
 		let buf = [0u8; BUFFER_SIZE];
-		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data);
+		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data)?;
 		let wbuffer = WriteBuffer {
 			buffer: buf.clone(),
 			offset: 0,
@@ -208,7 +208,7 @@ impl WriteHandle {
 	}
 
 	pub fn async_recheck(&self) -> Result<(), Error> {
-		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data);
+		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data)?;
 		let conn = ConnectionInfo {
 			handle: self.fd,
 			connection_id: self.connection_id,
@@ -231,7 +231,7 @@ impl WriteHandle {
 			Some(tls_conn) => {
 				let mut wbuf = vec![];
 				{
-					let mut tls_conn = nioruntime_util::lockw!(tls_conn);
+					let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 					let mut start = 0;
 					loop {
 						let mut end = data.len();
@@ -252,7 +252,7 @@ impl WriteHandle {
 				Some(tls_conn) => {
 					let mut wbuf = vec![];
 					{
-						let mut tls_conn = nioruntime_util::lockw!(tls_conn);
+						let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 						let mut start = 0;
 						loop {
 							let mut end = data.len();
@@ -281,7 +281,7 @@ impl WriteHandle {
 			return Ok(());
 		}
 		let mut buf = [0u8; BUFFER_SIZE];
-		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data);
+		let mut guarded_data = nioruntime_util::lockw!(self.guarded_data)?;
 		let mut start = 0;
 		let len = data.len();
 		let mut end = if len > BUFFER_SIZE { BUFFER_SIZE } else { len };
@@ -510,7 +510,7 @@ where
 	) -> Result<WriteHandle, Error> {
 		// make sure we have a client on_read handler configured
 		{
-			let callbacks = nioruntime_util::lockr!(self.callbacks);
+			let callbacks = nioruntime_util::lockr!(self.callbacks)?;
 
 			match callbacks.on_client_read {
 				Some(_) => {}
@@ -609,7 +609,7 @@ where
 	pub fn add_tcp_stream(&mut self, stream: &TcpStream) -> Result<WriteHandle, Error> {
 		// make sure we have a client on_read handler configured
 		{
-			let callbacks = nioruntime_util::lockr!(self.callbacks);
+			let callbacks = nioruntime_util::lockr!(self.callbacks)?;
 
 			match callbacks.on_client_read {
 				Some(_) => {}
@@ -738,7 +738,7 @@ where
 	/// }
 	/// ```
 	pub fn set_on_read(&mut self, on_read: F) -> Result<(), Error> {
-		let mut callbacks = nioruntime_util::lockw!(self.callbacks);
+		let mut callbacks = nioruntime_util::lockw!(self.callbacks)?;
 
 		callbacks.on_read = Some(Box::pin(on_read));
 
@@ -778,7 +778,7 @@ where
 	/// }
 	/// ```
 	pub fn set_on_accept(&mut self, on_accept: G) -> Result<(), Error> {
-		let mut callbacks = nioruntime_util::lockw!(self.callbacks);
+		let mut callbacks = nioruntime_util::lockw!(self.callbacks)?;
 
 		callbacks.on_accept = Some(Box::pin(on_accept));
 
@@ -815,7 +815,7 @@ where
 	/// }
 	/// ```
 	pub fn set_on_close(&mut self, on_close: H) -> Result<(), Error> {
-		let mut callbacks = nioruntime_util::lockw!(self.callbacks);
+		let mut callbacks = nioruntime_util::lockw!(self.callbacks)?;
 
 		callbacks.on_close = Some(Box::pin(on_close));
 
@@ -853,7 +853,7 @@ where
 	/// }
 	/// ```
 	pub fn set_on_client_read(&mut self, on_client_read: K) -> Result<(), Error> {
-		let mut callbacks = nioruntime_util::lockw!(self.callbacks);
+		let mut callbacks = nioruntime_util::lockw!(self.callbacks)?;
 
 		callbacks.on_client_read = Some(Box::pin(on_client_read));
 
@@ -927,7 +927,7 @@ where
 		}
 		for i in 0..self.guarded_data.len() {
 			let (rx, tx) = self.build_pipe(i)?;
-			let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[i]);
+			let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[i])?;
 			guarded_data.wakeup_tx = tx;
 			guarded_data.wakeup_rx = rx;
 		}
@@ -940,7 +940,7 @@ where
 	/// does not close any registered sockets. That is the responsibility of the user.
 	pub fn stop(&self) -> Result<(), Error> {
 		for i in 0..self.guarded_data.len() {
-			let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[i]);
+			let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[i])?;
 			guarded_data.stop = true;
 			guarded_data.wakeup()?;
 		}
@@ -1008,7 +1008,7 @@ where
 	}
 
 	fn ensure_handlers(&self) -> Result<(), Error> {
-		let callbacks = nioruntime_util::lockr!(self.callbacks);
+		let callbacks = nioruntime_util::lockr!(self.callbacks)?;
 
 		match callbacks.on_read {
 			Some(_) => {}
@@ -1071,12 +1071,12 @@ where
 		{
 			match atype {
 				ActionType::AddListener => {
-					let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[0]);
+					let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[0])?;
 					guarded_data.nconns.push(conn);
 					guarded_data.wakeup()?;
 				}
 				ActionType::AddStream | ActionType::AddTlsStream => {
-					let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[gd_index]);
+					let mut guarded_data = nioruntime_util::lockw!(self.guarded_data[gd_index])?;
 					guarded_data.nconns.push(conn);
 					guarded_data.wakeup()?;
 				}
@@ -1126,7 +1126,7 @@ where
 		#[cfg(windows)]
 		let selectors_clone = selectors[0] as u64;
 		let guarded_data = self.guarded_data[0].clone();
-		let callbacks = nioruntime_util::lockr!(self.callbacks);
+		let callbacks = nioruntime_util::lockr!(self.callbacks)?;
 		let mut guarded_data_vec = vec![];
 		for i in 1..self.guarded_data.len() {
 			guarded_data_vec.push(self.guarded_data[i].clone());
@@ -1184,8 +1184,8 @@ where
 
 			// add wakeup fd
 			{
-				let guarded_data = nioruntime_util::lockw!(guarded_data);
-				let mut input_events = nioruntime_util::lockw!(input_events);
+				let guarded_data = nioruntime_util::lockw!(guarded_data)?;
+				let mut input_events = nioruntime_util::lockw!(input_events)?;
 
 				input_events.push(GenericEvent {
 					fd: guarded_data.wakeup_rx,
@@ -1244,7 +1244,7 @@ where
 				});
 
 				{
-					let guarded_data = guarded_data.write().unwrap();
+					let guarded_data = nioruntime_util::lockw!(guarded_data).unwrap();
 					if guarded_data.stop {
 						break;
 					}
@@ -1282,7 +1282,7 @@ where
 		let nconns;
 		let cconns;
 		{
-			let mut guarded_data = nioruntime_util::lockw!(guarded_data);
+			let mut guarded_data = nioruntime_util::lockw!(guarded_data)?;
 			stop = guarded_data.stop;
 			nconns = guarded_data.nconns.clone();
 			cconns = guarded_data.cconns.clone();
@@ -1302,7 +1302,7 @@ where
 			}
 		}
 
-		let _lock = nioruntime_util::lockw!(global_lock);
+		let _lock = nioruntime_util::lockw!(global_lock)?;
 		for conn in cconns {
 			let connection_id = conn.connection_id;
 			let fd = conn.handle;
@@ -1352,7 +1352,7 @@ where
 			}
 
 			let res = {
-				let _lock = nioruntime_util::lockw!(global_lock);
+				let _lock = nioruntime_util::lockw!(global_lock)?;
 				#[cfg(unix)]
 				let res = unsafe {
 					accept(
@@ -1450,7 +1450,7 @@ where
 				(on_accept)(connection_id, wh)?;
 				cid_map.insert(res.into(), connection_id);
 				{
-					let mut guarded_data_next = nioruntime_util::lockw!(guarded_data_next);
+					let mut guarded_data_next = nioruntime_util::lockw!(guarded_data_next)?;
 
 					guarded_data_next.nconns.push(ConnectionInfo {
 						handle: res.into(),
@@ -1486,7 +1486,7 @@ where
 
 		// add wakeup fd
 		{
-			let guarded_data = nioruntime_util::lockw!(guarded_data);
+			let guarded_data = nioruntime_util::lockw!(guarded_data)?;
 			input_events.push(GenericEvent {
 				fd: guarded_data.wakeup_rx,
 				etype: GenericEventType::AddReadLT,
@@ -1523,7 +1523,7 @@ where
 				wakeup,
 			)?;
 			{
-				let mut guarded_data = nioruntime_util::lockw!(guarded_data);
+				let mut guarded_data = nioruntime_util::lockw!(guarded_data)?;
 				if guarded_data.wakeup_scheduled {
 					wakeup = true;
 					guarded_data.wakeup_scheduled = false;
@@ -1566,7 +1566,7 @@ where
 		let stop;
 		let aconns;
 		{
-			let mut guarded_data = nioruntime_util::lockw!(guarded_data);
+			let mut guarded_data = nioruntime_util::lockw!(guarded_data)?;
 			stop = guarded_data.stop;
 			nconns = guarded_data.nconns.clone();
 			aconns = guarded_data.aconns.clone();
@@ -1720,7 +1720,7 @@ where
 				write_buffers.remove(&connection_id);
 				Self::remove_handle(selector, fd, filter_set)?;
 
-				let mut listener_guarded_data = nioruntime_util::lockw!(listener_guarded_data);
+				let mut listener_guarded_data = nioruntime_util::lockw!(listener_guarded_data)?;
 				listener_guarded_data.cconns.push(ConnectionInfo {
 					handle: fd,
 					connection_id,
@@ -1803,7 +1803,7 @@ where
 						Self::remove_handle(selector, fd, filter_set)?;
 
 						let mut listener_guarded_data =
-							nioruntime_util::lockw!(listener_guarded_data);
+							nioruntime_util::lockw!(listener_guarded_data)?;
 						listener_guarded_data.cconns.push(ConnectionInfo {
 							handle: fd,
 							connection_id,
@@ -1837,7 +1837,7 @@ where
 		connection_id_map: &mut HashMap<u128, ConnectionInfo>,
 	) -> Result<(), Error> {
 		let write_queue = {
-			let mut guarded_data = nioruntime_util::lockw!(guarded_data);
+			let mut guarded_data = nioruntime_util::lockw!(guarded_data)?;
 			let ret = guarded_data.write_queue.clone();
 			guarded_data.write_queue.clear();
 			ret
@@ -1976,7 +1976,7 @@ where
 			)?;
 
 			{
-				let mut guarded_data = nioruntime_util::lockw!(guarded_data);
+				let mut guarded_data = nioruntime_util::lockw!(guarded_data)?;
 				if guarded_data.wakeup_scheduled {
 					wakeup = true;
 					guarded_data.wakeup_scheduled = false;
@@ -2209,7 +2209,7 @@ where
 		let len = Self::do_read(handle, buf, global_lock.clone())?;
 		let mut wbuf = vec![];
 		{
-			let mut tls_conn = nioruntime_util::lockw!(tls_conn);
+			let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 
 			tls_conn.read_tls(&mut &buf[0..len.try_into().unwrap_or(0)])?;
 
@@ -2258,7 +2258,7 @@ where
 		let len = Self::do_read(handle, buf, global_lock.clone())?;
 		let mut wbuf = vec![];
 		{
-			let mut tls_conn = nioruntime_util::lockw!(tls_conn);
+			let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 
 			tls_conn.read_tls(&mut &buf[0..len.try_into().unwrap_or(0)])?;
 
@@ -2301,7 +2301,7 @@ where
 		buf: &mut [u8],
 		global_lock: Arc<RwLock<bool>>,
 	) -> Result<isize, Error> {
-		let _lock = nioruntime_util::lockr!(global_lock);
+		let _lock = nioruntime_util::lockr!(global_lock)?;
 		#[cfg(unix)]
 		let len = {
 			let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
@@ -2908,7 +2908,7 @@ fn write_data(
 	buf: &mut [u8],
 	global_lock: &Arc<RwLock<bool>>,
 ) -> Result<isize, Error> {
-	let _lock = nioruntime_util::lockr!(global_lock);
+	let _lock = nioruntime_util::lockr!(global_lock)?;
 	write_bytes(handle, buf)
 }
 

@@ -12,6 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
 mod error;
 
 pub use crate::error::{Error, ErrorKind};
+
+lazy_static::lazy_static! {
+		pub static ref LOCK_MONITOR: Arc<RwLock<HashMap<u128, LockInfo>>> =
+				Arc::new(RwLock::new(HashMap::new()));
+}
+
+#[derive(Debug)]
+pub struct LockInfo {
+	pub bt: backtrace::Backtrace,
+	pub time: u128,
+	pub id: u128,
+}

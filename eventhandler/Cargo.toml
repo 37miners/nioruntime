@@ -28,6 +28,7 @@ futures = "0.3.0"
 rustls = "0.20.2"
 rustls-pemfile = "0.2.0"
 webpki-roots = "0.22"
+backtrace = "0.3.63"
 
 nioruntime_util = { path = "../util"  }
 nioruntime_log  = { path = "../log"   }

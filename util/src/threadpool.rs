@@ -47,28 +47,15 @@ impl StaticThreadPool {
 	pub fn new() -> Result<Self, Error> {
 		let tp = ThreadPoolImpl::new();
 		let id: u128 = rand::random::<u128>();
-		let mut stp = STATIC_THREAD_POOL.write().map_err(|e| {
-			let error: Error = ErrorKind::InternalError(format!(
-				"static thread pool lock error: {}",
-				e.to_string()
-			))
-			.into();
-			error
-		})?;
+		let mut stp = crate::lockw!(STATIC_THREAD_POOL)?;
+
 		stp.insert(id, tp);
 
 		Ok(StaticThreadPool { id })
 	}
 
 	pub fn set_on_panic(&mut self, on_panic: OnPanic) -> Result<(), Error> {
-		let mut stp = STATIC_THREAD_POOL.write().map_err(|e| {
-			let error: Error = ErrorKind::InternalError(format!(
-				"static thread pool lock error: {}",
-				e.to_string()
-			))
-			.into();
-			error
-		})?;
+		let mut stp = crate::lockw!(STATIC_THREAD_POOL)?;
 
 		let tp = stp.get_mut(&self.id);
 		match tp {
@@ -90,14 +77,7 @@ impl StaticThreadPool {
 	///
 	/// * `size` - The number of threads for this thread pool to start.
 	pub fn start(&self, size: usize) -> Result<(), Error> {
-		let mut stp = STATIC_THREAD_POOL.write().map_err(|e| {
-			let error: Error = ErrorKind::InternalError(format!(
-				"static thread pool lock error: {}",
-				e.to_string()
-			))
-			.into();
-			error
-		})?;
+		let mut stp = crate::lockw!(STATIC_THREAD_POOL)?;
 
 		let tp = stp.get_mut(&self.id);
 		match tp {
@@ -117,14 +97,7 @@ impl StaticThreadPool {
 	/// Stop this thread pool free all resources used by the thread pool and terminate
 	/// all running threads.
 	pub fn stop(&self) -> Result<(), Error> {
-		let stp = STATIC_THREAD_POOL.write().map_err(|e| {
-			let error: Error = ErrorKind::InternalError(format!(
-				"static thread pool lock error: {}",
-				e.to_string()
-			))
-			.into();
-			error
-		})?;
+		let stp = crate::lockw!(STATIC_THREAD_POOL)?;
 
 		let tp = stp.get(&self.id);
 		match tp {
@@ -149,7 +122,7 @@ impl StaticThreadPool {
 	where
 		F: Future<Output = ()> + Send + Sync + 'static,
 	{
-		let stp = crate::lockr!(STATIC_THREAD_POOL);
+		let stp = crate::lockr!(STATIC_THREAD_POOL)?;
 
 		let tp = stp.get(&self.id);
 		match tp {

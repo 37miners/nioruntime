@@ -22,69 +22,6 @@ use std::fmt::Display;
 use std::num::ParseIntError;
 use std::str::Utf8Error;
 
-/// A macro that is used to lock a mutex and return the appropriate error if the lock is poisoned.
-/// This code was used in many places, and this macro simplifies it.
-#[macro_export]
-macro_rules! lock {
-	($a:expr) => {
-		$a.lock().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
-			error
-		})?;
-	};
-}
-
-/// A macro that is used to lock a rwlock in write mode and return the appropriate error if the lock is poisoned.
-/// This code was used in many places, and this macro simplifies it.
-#[macro_export]
-macro_rules! lockw {
-	($a:expr) => {
-		$a.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
-			error
-		})?;
-	};
-}
-
-/// A macro that is used to lock a rwlock in read mode and return the appropriate error if the lock is poisoned.
-/// This code was used in many places, and this macro simplifies it.
-#[macro_export]
-macro_rules! lockr {
-	($a:expr) => {
-		$a.read().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
-			error
-		})?;
-	};
-}
-
-/// A macro that is used to lock a rwlock in read mode ignoring poison locks
-/// This code was used in many places, and this macro simplifies it.
-#[macro_export]
-macro_rules! lockrp {
-	($a:expr) => {
-		match $a.read() {
-			Ok(data) => data,
-			Err(e) => e.into_inner(),
-		}
-	};
-}
-
-/// A macro that is used to lock a rwlock in write mode ignoring poison locks
-/// This code was used in many places, and this macro simplifies it.
-#[macro_export]
-macro_rules! lockwp {
-	($a:expr) => {
-		match $a.write() {
-			Ok(data) => data,
-			Err(e) => e.into_inner(),
-		}
-	};
-}
-
 /// A macro that is used to lock a rwlock in write mode ignoring poison locks
 /// This code was used in many places, and this macro simplifies it.
 

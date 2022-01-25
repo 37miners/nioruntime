@@ -29,26 +29,176 @@ macro_rules! lock {
 /// This code was used in many places, and this macro simplifies it.
 #[macro_export]
 macro_rules! lockw {
-	($a:expr) => {
-		$a.write().map_err(|e| {
+	($a:expr) => {{
+		let do_try_lock = true;
+		let mut is_locked = false;
+		let id: u128 = rand::random();
+
+		if do_try_lock {
+			match $a.try_write() {
+				Ok(_) => {}
+				Err(_) => {
+					is_locked = true;
+					let bt = backtrace::Backtrace::new();
+					let time = std::time::SystemTime::now()
+						.duration_since(std::time::UNIX_EPOCH)
+						.unwrap()
+						.as_millis();
+					let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+						.write()
+						.map_err(|e| {
+							let error: Error =
+								ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+									.into();
+							error
+						})
+						.unwrap();
+					lock_monitor.insert(id, nioruntime_err::LockInfo { id, bt, time });
+					match lock_monitor.get(&0) {
+						Some(_) => {}
+						None => {
+							let bt = backtrace::Backtrace::new();
+							lock_monitor.insert(0, nioruntime_err::LockInfo { id, bt, time });
+							std::thread::spawn(move || loop {
+								std::thread::sleep(std::time::Duration::from_millis(10000));
+								let lock_monitor = match nioruntime_err::LOCK_MONITOR.read() {
+									Ok(lock_monitor) => lock_monitor,
+									Err(e) => {
+										println!("Warning error obtaining read lock: {}", e);
+										continue;
+									}
+								};
+
+								for (k, v) in &*lock_monitor {
+									if *k != 0 {
+										let time_now = std::time::SystemTime::now()
+											.duration_since(std::time::UNIX_EPOCH)
+											.unwrap_or(std::time::Duration::from_millis(0))
+											.as_millis();
+										let e = time_now - v.time;
+										if e > 1000 {
+											println!(
+												"potential deadlock detected. k={:?},e={},v={:?}",
+												k, e, v,
+											);
+										}
+									}
+								}
+							});
+						}
+					};
+				}
+			}
+		}
+		let res = $a.write().map_err(|e| {
 			let error: Error =
 				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
 			error
-		})?;
-	};
+		});
+
+		if is_locked {
+			let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+				.write()
+				.map_err(|e| {
+					let error: Error =
+						ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+					error
+				})
+				.unwrap();
+
+			(*lock_monitor).remove(&id);
+		}
+
+		res
+	}};
 }
 
 /// A macro that is used to lock a rwlock in read mode and return the appropriate error if the lock is poisoned.
 /// This code was used in many places, and this macro simplifies it.
 #[macro_export]
 macro_rules! lockr {
-	($a:expr) => {
-		$a.read().map_err(|e| {
+	($a:expr) => {{
+		let do_try_lock = true;
+		let mut is_locked = false;
+		let id: u128 = rand::random();
+
+		if do_try_lock {
+			match $a.try_read() {
+				Ok(_) => {}
+				Err(_) => {
+					is_locked = true;
+					let bt = backtrace::Backtrace::new();
+					let time = std::time::SystemTime::now()
+						.duration_since(std::time::UNIX_EPOCH)
+						.unwrap()
+						.as_millis();
+					let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+						.write()
+						.map_err(|e| {
+							let error: Error =
+								ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+									.into();
+							error
+						})
+						.unwrap();
+					lock_monitor.insert(id, nioruntime_err::LockInfo { id, bt, time });
+					match lock_monitor.get(&0) {
+						Some(_) => {}
+						None => {
+							let bt = backtrace::Backtrace::new();
+							lock_monitor.insert(0, nioruntime_err::LockInfo { id, bt, time });
+							std::thread::spawn(move || loop {
+								std::thread::sleep(std::time::Duration::from_millis(10000));
+								let lock_monitor = match nioruntime_err::LOCK_MONITOR.read() {
+									Ok(lock_monitor) => lock_monitor,
+									Err(e) => {
+										println!("Warning error obtaining read lock: {}", e);
+										continue;
+									}
+								};
+
+								for (k, v) in &*lock_monitor {
+									if *k != 0 {
+										let time_now = std::time::SystemTime::now()
+											.duration_since(std::time::UNIX_EPOCH)
+											.unwrap_or(std::time::Duration::from_millis(0))
+											.as_millis();
+										let e = time_now - v.time;
+										if e > 1000 {
+											println!(
+												"potential deadlock detected. k={:?},e={},v={:?}",
+												k, e, v,
+											);
+										}
+									}
+								}
+							});
+						}
+					};
+				}
+			}
+		}
+		let res = $a.read().map_err(|e| {
 			let error: Error =
 				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
 			error
-		})?
-	};
+		});
+
+		if is_locked {
+			let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+				.write()
+				.map_err(|e| {
+					let error: Error =
+						ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+					error
+				})
+				.unwrap();
+
+			(*lock_monitor).remove(&id);
+		}
+
+		res
+	}};
 }
 
 /// A macro that is used to lock a rwlock in read mode ignoring poison locks
