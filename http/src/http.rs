@@ -1917,12 +1917,6 @@ impl HttpServer {
 					http_context.api_extensions.clone(),
 				),
 				None => {
-					if len == 0 {
-						// this is typically an async_recheck that happened
-						// after the connection closed. To avoid poluting the logs
-						// we return here
-						return Ok(());
-					}
 					log_multi!(
 						ERROR,
 						MAIN_LOG,

@@ -1575,15 +1575,20 @@ where
 		}
 
 		for conn in aconns {
-			let wh = WriteHandle::new(
-				conn.handle,
-				guarded_data.clone(),
-				conn.connection_id,
-				global_lock.clone(),
-				conn.tls_client,
-				conn.tls_server,
-			);
-			(on_read)(&[0u8; 0], 0, wh)?;
+			match connection_id_map.get(&conn.connection_id) {
+				Some(_) => {
+					let wh = WriteHandle::new(
+						conn.handle,
+						guarded_data.clone(),
+						conn.connection_id,
+						global_lock.clone(),
+						conn.tls_client,
+						conn.tls_server,
+					);
+					(on_read)(&[0u8; 0], 0, wh)?;
+				}
+				None => {} // already closed
+			}
 		}
 
 		for conn in nconns {
