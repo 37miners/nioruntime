@@ -30,7 +30,7 @@ macro_rules! lock {
 #[macro_export]
 macro_rules! lockw {
 	($a:expr) => {{
-		let do_try_lock = true;
+		let do_try_lock = if cfg!(debug_assertions) { true } else { false };
 		let mut is_locked = false;
 		let id: u128 = std::time::SystemTime::now()
 			.duration_since(std::time::UNIX_EPOCH)
@@ -121,7 +121,7 @@ macro_rules! lockw {
 #[macro_export]
 macro_rules! lockr {
 	($a:expr) => {{
-		let do_try_lock = true;
+		let do_try_lock = if cfg!(debug_assertions) { true } else { false };
 		let mut is_locked = false;
 		let id: u128 = rand::random();
 
