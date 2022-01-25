@@ -780,20 +780,23 @@ impl HttpServer {
 		std::thread::spawn(move || loop {
 			std::thread::sleep(std::time::Duration::from_millis(100));
 			{
-				let http_context = match nioruntime_util::lockr!(http_context_clone4) {
-					Ok(http_context) => http_context,
-					Err(e) => {
-						log_multi!(
-							ERROR,
-							MAIN_LOG,
-							"unexpected error obtaining lock on http_context: {}",
-							e.to_string()
-						);
-						break;
-					}
+				let stop = {
+					let http_context = match nioruntime_util::lockr!(http_context_clone4) {
+						Ok(http_context) => http_context,
+						Err(e) => {
+							log_multi!(
+								ERROR,
+								MAIN_LOG,
+								"unexpected error obtaining lock on http_context: {}",
+								e.to_string()
+							);
+							break;
+						}
+					};
+					http_context.stop
 				};
 
-				if http_context.stop {
+				if stop {
 					log_multi!(INFO, MAIN_LOG, "Stopping HttpServer");
 					let stop_res = eh.stop();
 					match stop_res {

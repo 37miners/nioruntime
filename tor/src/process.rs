@@ -275,16 +275,24 @@ impl TorProcess {
 				}
 				Err(_) => {
 					{
-						let mut status = nioruntime_util::lockw!(status)?;
+						let do_kill = {
+							let mut status = nioruntime_util::lockw!(status)?;
 
-						if status.status == self.completion_percent {
-							return Ok(self);
-						}
-						let delay = Self::timenow() - status.last;
-						if delay > 10_000 {
-							status.status = 0;
+							if status.status == self.completion_percent {
+								return Ok(self);
+							}
+							let delay = Self::timenow() - status.last;
+							if delay > 10_000 {
+								status.status = 0;
+								start_tor = true;
+								true
+							} else {
+								false
+							}
+						};
+
+						if do_kill {
 							self.kill().unwrap_or(());
-							start_tor = true;
 						}
 					}
 					continue;
