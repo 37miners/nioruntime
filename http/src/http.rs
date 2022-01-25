@@ -1782,61 +1782,60 @@ impl HttpServer {
 			let conn_data = e.into_inner();
 
 			{
-				let callback_state = nioruntime_util::lockr!(conn_data.wh.callback_state);
-				if callback_state.is_ok() {
-					let callback_state = callback_state.unwrap();
-					if *callback_state == State::Init {
-						let res = Self::write_headers(
-							&conn_data.wh,
-							&conn_data.config,
-							true,
-							true,
-							false,
-							vec![],
-							None,
-						);
-						match res {
-							Ok(_) => {}
-							Err(e) => {
-								log_multi!(
-									ERROR,
-									MAIN_LOG,
-									"error writing headers: {}",
-									e.to_string(),
-								);
-							}
+				let state_is_init = {
+					match nioruntime_util::lockr!(conn_data.wh.callback_state) {
+						Ok(state) => *state == State::Init,
+						Err(_) => false,
+					}
+				};
+				if state_is_init {
+					let res = Self::write_headers(
+						&conn_data.wh,
+						&conn_data.config,
+						true,
+						true,
+						false,
+						vec![],
+						None,
+					);
+					match res {
+						Ok(_) => {}
+						Err(e) => {
+							log_multi!(ERROR, MAIN_LOG, "error writing headers: {}", e.to_string(),);
 						}
 					}
 				}
 			}
 			{
-				let callback_state = nioruntime_util::lockr!(conn_data.wh.callback_state);
-				if callback_state.is_ok() {
-					let callback_state = callback_state.unwrap();
-					if *callback_state == State::HeadersChunked {
-						let byte_msg = format!(
-							"</br>{}</br>Internal Server Error. See logs for details.",
-							HEADER
-						);
-						let byte_msg = byte_msg.as_bytes();
-						let msg = format!("{:X}\r\n", byte_msg.len());
-						let _ = conn_data.wh.write(msg.as_bytes());
-						let _ = conn_data.wh.write(&byte_msg);
-						let _ = conn_data.wh.write("\r\n0\r\n\r\n".as_bytes());
-					} else {
-						let res = conn_data
-							.wh
-							.write("Internal Server Error. See logs for details.".as_bytes());
-						match res {
-							Ok(_) => {}
-							Err(e) => {
-								log_multi!(
-									ERROR,
-									MAIN_LOG,
-									"error writing panic message: {}",
-									e.to_string(),
-								);
-							}
+				let state_is_headers_chunked = {
+					match nioruntime_util::lockr!(conn_data.wh.callback_state) {
+						Ok(state) => *state == State::HeadersChunked,
+						Err(_) => false,
+					}
+				};
+				if state_is_headers_chunked {
+					let byte_msg = format!(
+						"</br>{}</br>Internal Server Error. See logs for details.",
+						HEADER
+					);
+					let byte_msg = byte_msg.as_bytes();
+					let msg = format!("{:X}\r\n", byte_msg.len());
+					let _ = conn_data.wh.write(msg.as_bytes());
+					let _ = conn_data.wh.write(&byte_msg);
+					let _ = conn_data.wh.write("\r\n0\r\n\r\n".as_bytes());
+				} else {
+					let res = conn_data
+						.wh
+						.write("Internal Server Error. See logs for details.".as_bytes());
+					match res {
+						Ok(_) => {}
+						Err(e) => {
+							log_multi!(
+								ERROR,
+								MAIN_LOG,
+								"error writing panic message: {}",
+								e.to_string(),
+							);
 						}
 					}
 				}
