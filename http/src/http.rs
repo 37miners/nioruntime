@@ -38,7 +38,6 @@ use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
-use std::num::ParseIntError;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
@@ -131,6 +130,16 @@ pub enum HttpVersion {
 	V11,
 	V10,
 	V09,
+}
+
+struct HeaderInfo {
+	method: HttpMethod,
+	http_version: HttpVersion,
+	uri: String,
+	query: String,
+	sep_headers_vec: Vec<(Vec<u8>, Vec<u8>)>,
+	keep_alive: bool,
+	content_len: usize,
 }
 
 fn index_of(pattern: &Vec<u8>, data: &Vec<u8>) -> Option<usize> {
@@ -2027,6 +2036,184 @@ impl HttpServer {
 		Ok(())
 	}
 
+	fn parse_headers(
+		conn_data: &mut ConnData,
+		wh: &WriteHandle,
+		buffer: Vec<u8>,
+		config: &HttpConfig,
+		end_buf: &mut usize,
+	) -> Result<Option<HeaderInfo>, Error> {
+		let connection_id = conn_data.wh.get_connection_id();
+
+		let len = buffer.len();
+		let is_get = match index_of(&HTTP_GET.to_vec(), &buffer[0..4].to_vec()) {
+			None => false,
+			Some(index) => index == 0,
+		};
+		let is_post = if is_get {
+			false
+		} else {
+			match index_of(&HTTP_POST.to_vec(), &buffer[0..4].to_vec()) {
+				None => false,
+				Some(index) => index == 0,
+			}
+		};
+
+		if !is_get && !is_post {
+			// we only support GET/POST for now.
+			warn!(
+				"invalid request on connection_id = {}, data = '{:?}'",
+				connection_id,
+				std::str::from_utf8(&conn_data.buffer[0..len]),
+			);
+			Self::send_bad_request_error(&wh, "Only GET/POST supported")?;
+			return Ok(None);
+		}
+		let method = if is_get {
+			HttpMethod::Get
+		} else {
+			HttpMethod::Post
+		};
+
+		let mut space_count = 0;
+		let mut uri = vec![];
+		let mut http_ver_string = vec![];
+
+		for j in 0..len {
+			if conn_data.buffer[j] == ' ' as u8
+				|| conn_data.buffer[j] == '\r' as u8
+				|| conn_data.buffer[j] == '\n' as u8
+			{
+				space_count += 1;
+			}
+			if space_count == 1 {
+				if conn_data.buffer[j] != ' ' as u8 {
+					uri.push(conn_data.buffer[j]);
+				}
+			} else if space_count == 2 {
+				if conn_data.buffer[j] != ' ' as u8 {
+					http_ver_string.push(conn_data.buffer[j]);
+				}
+			} else if space_count > 2 {
+				break;
+			}
+		}
+
+		let mut keep_alive = false;
+		let http_ver_string = std::str::from_utf8(&http_ver_string[..])?;
+		let http_version = if http_ver_string == "HTTP/1.1" {
+			HttpVersion::V11
+		} else if http_ver_string == "HTTP/2.0" {
+			HttpVersion::V20
+		} else if http_ver_string == "HTTP/1.0" {
+			keep_alive = false;
+			HttpVersion::V10
+		} else {
+			// we don't know so go with 0.9 and turn off keep-alive
+			keep_alive = false;
+			HttpVersion::V09
+		};
+
+		// get headers
+		let mut nl_count = 0;
+		let mut headers_vec = vec![];
+		for j in 0..len {
+			if conn_data.buffer[j] == '\n' as u8 {
+				nl_count += 1;
+				if j + 2 < len
+					&& conn_data.buffer[j + 1] == '\r' as u8
+					&& conn_data.buffer[j + 2] == '\n' as u8
+				{
+					break;
+				}
+				headers_vec.push(vec![]);
+			}
+			if conn_data.buffer[j] != '\n' as u8 && nl_count > 0 {
+				headers_vec[nl_count - 1].push(conn_data.buffer[j]);
+			}
+		}
+
+		let mut sep_headers_vec = vec![];
+		let headers_vec_len = headers_vec.len();
+		let mut content_len: usize = 0;
+		for j in 0..headers_vec_len {
+			let header_j_len = headers_vec[j].len();
+			sep_headers_vec.push((vec![], vec![]));
+			let mut found_sep = false;
+			let mut found_sep_plus_1 = false;
+			for k in 0..header_j_len {
+				if !found_sep && headers_vec[j][k] == ':' as u8 {
+					found_sep = true;
+				} else if !found_sep {
+					sep_headers_vec[j].0.push(headers_vec[j][k]);
+				} else {
+					if found_sep_plus_1 {
+						if headers_vec[j][k] != '\r' as u8 && headers_vec[j][k] != '\n' as u8 {
+							sep_headers_vec[j].1.push(headers_vec[j][k]);
+						}
+					}
+					found_sep_plus_1 = true;
+				}
+			}
+
+			let header = std::str::from_utf8(&sep_headers_vec[j].0[..])?;
+			let value = std::str::from_utf8(&sep_headers_vec[j].1[..])?;
+
+			if header == "Connection" && value == "keep-alive" {
+				keep_alive = true;
+			}
+
+			if header == "Content-Length" {
+				content_len = value.parse()?;
+
+				if content_len > config.max_content_length {
+					Self::send_bad_request_error(
+						&wh,
+						&format!(
+							"content length exceeded. max = {}, cur = {}",
+							config.max_content_length, content_len
+						),
+					)?;
+					return Ok(None);
+				}
+
+				*end_buf += content_len;
+				if *end_buf >= len {
+					// we don't have enough data
+					// return here and wait for more
+					conn_data.needed_len = *end_buf;
+					return Ok(None);
+				}
+			}
+		}
+
+		let mut query_string = vec![];
+		let mut uri_path = vec![];
+		let mut start_query = false;
+		for j in 0..uri.len() {
+			if !start_query && uri[j] != '?' as u8 {
+				uri_path.push(uri[j]);
+			} else if !start_query && uri[j] == '?' as u8 {
+				start_query = true;
+			} else {
+				query_string.push(uri[j]);
+			}
+		}
+
+		let uri = std::str::from_utf8(&uri_path[..])?.to_string();
+		let query = std::str::from_utf8(&query_string[..])?.to_string();
+
+		Ok(Some(HeaderInfo {
+			method,
+			http_version,
+			uri,
+			query,
+			sep_headers_vec,
+			keep_alive,
+			content_len,
+		}))
+	}
+
 	// try to process a page. If a page was processed return true, otherwise, false.
 	fn try_process_page(
 		conn_data: &mut RwLockWriteGuard<ConnData>,
@@ -2036,13 +2223,11 @@ impl HttpServer {
 		extensions: &HashSet<String>,
 		wh: &WriteHandle,
 	) -> Result<bool, Error> {
-		let connection_id = conn_data.wh.get_connection_id();
 		let mut page_processed = false;
 		let mut end_buf;
 		let start_buf;
 		let len = conn_data.buffer.len();
 		let buffer = conn_data.buffer[0..len].to_vec();
-		let mut has_content = false;
 		let end_headers = index_of(&END_HEADERS.to_vec(), &buffer);
 
 		if len < 6 {
@@ -2055,194 +2240,33 @@ impl HttpServer {
 			Some(end_headers) => {
 				start_buf = end_headers + 4;
 				end_buf = end_headers + 3;
-				let is_get = match index_of(&HTTP_GET.to_vec(), &buffer[0..4].to_vec()) {
-					None => false,
-					Some(index) => index == 0,
-				};
-				let is_post = if is_get {
-					false
-				} else {
-					match index_of(&HTTP_POST.to_vec(), &buffer[0..4].to_vec()) {
-						None => false,
-						Some(index) => index == 0,
+
+				let header_info = Self::parse_headers(conn_data, wh, buffer, config, &mut end_buf)?;
+
+				let header_info = match header_info {
+					Some(header_info) => header_info,
+					None => {
+						return Ok(false);
 					}
 				};
-
-				if !is_get && !is_post {
-					// we only support GET/POST for now.
-					warn!(
-						"invalid request on connection_id = {}, data = '{:?}'",
-						connection_id,
-						std::str::from_utf8(&conn_data.buffer[0..len]),
-					);
-					Self::send_bad_request_error(&wh, "Only GET/POST supported")?;
-					return Ok(false);
-				}
-				let method = if is_get {
-					HttpMethod::Get
-				} else {
-					HttpMethod::Post
-				};
-
-				let mut space_count = 0;
-				let mut uri = vec![];
-				let mut http_ver_string = vec![];
-
-				for j in 0..len {
-					if conn_data.buffer[j] == ' ' as u8
-						|| conn_data.buffer[j] == '\r' as u8
-						|| conn_data.buffer[j] == '\n' as u8
-					{
-						space_count += 1;
-					}
-					if space_count == 1 {
-						if conn_data.buffer[j] != ' ' as u8 {
-							uri.push(conn_data.buffer[j]);
-						}
-					} else if space_count == 2 {
-						if conn_data.buffer[j] != ' ' as u8 {
-							http_ver_string.push(conn_data.buffer[j]);
-						}
-					} else if space_count > 2 {
-						break;
-					}
-				}
-
-				let mut keep_alive = false;
-				let http_ver_string = std::str::from_utf8(&http_ver_string[..])?;
-				let http_version = if http_ver_string == "HTTP/1.1" {
-					HttpVersion::V11
-				} else if http_ver_string == "HTTP/2.0" {
-					HttpVersion::V20
-				} else if http_ver_string == "HTTP/1.0" {
-					keep_alive = false;
-					HttpVersion::V10
-				} else {
-					// we don't know so go with 0.9 and turn off keep-alive
-					keep_alive = false;
-					HttpVersion::V09
-				};
-
-				// get headers
-				let mut nl_count = 0;
-				let mut headers_vec = vec![];
-				for j in 0..len {
-					if conn_data.buffer[j] == '\n' as u8 {
-						nl_count += 1;
-						if j + 2 < len
-							&& conn_data.buffer[j + 1] == '\r' as u8
-							&& conn_data.buffer[j + 2] == '\n' as u8
-						{
-							break;
-						}
-						headers_vec.push(vec![]);
-					}
-					if conn_data.buffer[j] != '\n' as u8 && nl_count > 0 {
-						headers_vec[nl_count - 1].push(conn_data.buffer[j]);
-					}
-				}
-
-				let mut sep_headers_vec = vec![];
-				let headers_vec_len = headers_vec.len();
-				for j in 0..headers_vec_len {
-					let header_j_len = headers_vec[j].len();
-					sep_headers_vec.push((vec![], vec![]));
-					let mut found_sep = false;
-					let mut found_sep_plus_1 = false;
-					for k in 0..header_j_len {
-						if !found_sep && headers_vec[j][k] == ':' as u8 {
-							found_sep = true;
-						} else if !found_sep {
-							sep_headers_vec[j].0.push(headers_vec[j][k]);
-						} else {
-							if found_sep_plus_1 {
-								if headers_vec[j][k] != '\r' as u8
-									&& headers_vec[j][k] != '\n' as u8
-								{
-									sep_headers_vec[j].1.push(headers_vec[j][k]);
-								}
-							}
-							found_sep_plus_1 = true;
-						}
-					}
-
-					let header = std::str::from_utf8(&sep_headers_vec[j].0[..])?;
-					let value = std::str::from_utf8(&sep_headers_vec[j].1[..])?;
-
-					if header == "Connection" && value == "keep-alive" {
-						keep_alive = true;
-					}
-
-					if header == "Content-Length" {
-						has_content = true;
-						let content_len: Result<usize, ParseIntError> = value.parse();
-
-						match content_len {
-							Ok(content_len) => {
-								if content_len > config.max_content_length {
-									Self::send_bad_request_error(
-										&wh,
-										&format!(
-											"content length exceeded. max = {}, cur = {}",
-											config.max_content_length, content_len
-										),
-									)?;
-									return Ok(false);
-								}
-								end_buf += content_len;
-								if end_buf >= len {
-									// we don't have enough data
-									// return here and wait for more
-									conn_data.needed_len = end_buf;
-									return Ok(false);
-								}
-							}
-							Err(e) => {
-								log_multi!(
-									ERROR,
-									MAIN_LOG,
-									"Invalid content-len: {}, value={}",
-									e.to_string(),
-									value,
-								);
-							}
-						}
-					}
-				}
 
 				// headers process complete we know we have a full page
 				page_processed = true;
-
-				let mut query_string = vec![];
-				let mut uri_path = vec![];
-				let mut start_query = false;
-				for j in 0..uri.len() {
-					if !start_query && uri[j] != '?' as u8 {
-						uri_path.push(uri[j]);
-					} else if !start_query && uri[j] == '?' as u8 {
-						start_query = true;
-					} else {
-						query_string.push(uri[j]);
-					}
-				}
-
-				let uri = std::str::from_utf8(&uri_path[..])?;
-				let query = std::str::from_utf8(&query_string[..])?;
 
 				if config.debug {
 					log_multi!(
 						DEBUG,
 						MAIN_LOG,
 						"method={:?},uri={},query={}",
-						method,
-						uri,
-						query
+						header_info.method,
+						header_info.uri,
+						header_info.query
 					);
 				}
 
-				let last_dot = uri.rfind('.');
+				let last_dot = header_info.uri.rfind('.');
 				let extension = match last_dot {
-					Some(pos) => &uri[(pos + 1)..],
+					Some(pos) => &header_info.uri[(pos + 1)..],
 					None => "",
 				}
 				.to_lowercase();
@@ -2250,7 +2274,8 @@ impl HttpServer {
 				let start_time = *START_TIME;
 				let since_start = Instant::now().duration_since(start_time);
 				(*conn_data).begin_request_time = since_start.as_nanos();
-				if mappings.get(uri).is_some() || extensions.get(&extension).is_some() {
+				if mappings.get(&header_info.uri).is_some() || extensions.get(&extension).is_some()
+				{
 					{
 						let mut callback_state = nioruntime_util::lockw!(wh.callback_state)?;
 						*callback_state = State::Init;
@@ -2258,20 +2283,26 @@ impl HttpServer {
 					(config.callback)(
 						conn_data.is_async.clone(),
 						conn_data,
-						has_content,
+						header_info.content_len != 0,
 						start_buf,
 						end_buf + 1,
-						method.clone(),
+						header_info.method.clone(),
 						config.clone(),
 						wh.clone(),
-						http_version,
-						uri,
-						query,
-						sep_headers_vec.clone(),
-						keep_alive,
+						header_info.http_version,
+						&header_info.uri,
+						&header_info.query,
+						header_info.sep_headers_vec.clone(),
+						header_info.keep_alive,
 					)?;
 				} else {
-					Self::send_response(&config, &wh, http_version, uri, keep_alive)?;
+					Self::send_response(
+						&config,
+						&wh,
+						header_info.http_version,
+						&header_info.uri,
+						header_info.keep_alive,
+					)?;
 				}
 
 				let elapsed = {
@@ -2288,10 +2319,10 @@ impl HttpServer {
 				};
 
 				log_vec.push(RequestLogItem::new(
-					uri.to_string(),
-					query.to_string(),
-					sep_headers_vec,
-					method,
+					header_info.uri,
+					header_info.query,
+					header_info.sep_headers_vec,
+					header_info.method,
 					elapsed,
 					false,
 				));
@@ -2342,15 +2373,27 @@ impl HttpServer {
 		}
 		// keep trying to process as many pages as we can with this data.
 		loop {
-			if !Self::try_process_page(
+			match Self::try_process_page(
 				conn_data,
 				&mut log_vec,
 				&config,
 				&mappings,
 				&extensions,
 				&wh,
-			)? {
-				break;
+			) {
+				Ok(processed) => {
+					if !processed {
+						break;
+					}
+				}
+				Err(e) => {
+					warn!("An error occurred while processing page: {}", e);
+					Self::send_bad_request_error(
+						&wh,
+						&format!("An error occurred while processing request. See Logs."),
+					)?;
+					break;
+				}
 			}
 
 			if *nioruntime_util::lockr!(conn_data.is_async)? {
