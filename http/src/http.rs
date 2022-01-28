@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::process_websocket_data;
 use bytefmt;
 use chrono::prelude::*;
 use dirs;
@@ -30,6 +31,8 @@ use nioruntime_tor::process as tor_process;
 use nioruntime_tor::process::TorProcess;
 use nioruntime_util::threadpool::OnPanic;
 use num_format::{Locale, ToFormattedString};
+use sha1::Digest;
+use sha1::Sha1;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -87,6 +90,13 @@ const MAX_CHUNK_SIZE: u64 = 10 * 1024 * 1024;
 const HTTP_GET: &[u8] = &['G' as u8, 'E' as u8, 'T' as u8];
 const HTTP_POST: &[u8] = &['P' as u8, 'O' as u8, 'S' as u8, 'T' as u8];
 const END_HEADERS: &[u8] = &['\r' as u8, '\n' as u8, '\r' as u8, '\n' as u8];
+const CONNECTION_HEADER: &[u8] = "Connection".as_bytes();
+const KEEP_ALIVE: &[u8] = "keep-alive".as_bytes();
+const CONTENT_LENGTH: &[u8] = "Content-Length".as_bytes();
+const WEBSOCKET: &[u8] = "websocket".as_bytes();
+const UPGRADE: &[u8] = "Upgrade".as_bytes();
+const WEBSOCKET_KEY: &[u8] = "Sec-WebSocket-Key".as_bytes();
+const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Clone)]
 struct RequestLogItem {
@@ -140,6 +150,8 @@ struct HeaderInfo {
 	sep_headers_vec: Vec<(Vec<u8>, Vec<u8>)>,
 	keep_alive: bool,
 	content_len: usize,
+	is_websocket: bool,
+	websocket_key: Option<String>,
 }
 
 fn index_of(pattern: &Vec<u8>, data: &Vec<u8>) -> Option<usize> {
@@ -338,6 +350,7 @@ pub struct ConnData {
 	needed_len: usize,
 	is_async: Arc<RwLock<bool>>,
 	begin_request_time: u128,
+	is_websocket: bool,
 }
 
 impl ConnData {
@@ -353,11 +366,12 @@ impl ConnData {
 			needed_len: 0,
 			is_async: Arc::new(RwLock::new(false)),
 			begin_request_time: 0,
+			is_websocket: false,
 		}
 	}
 
-	pub fn get_buffer(&self) -> Vec<u8> {
-		self.buffer.clone()
+	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
+		&mut self.buffer
 	}
 }
 
@@ -796,8 +810,17 @@ impl HttpServer {
 		let mut eh = EventHandler::new(http_config.evh_config.clone());
 		eh.set_on_panic(http_config.on_panic)?;
 
+		let sha1 = sha1::Sha1::new();
 		eh.set_on_read(move |buf, len, wh| {
-			Self::process_read(http_context.clone(), http_config.clone(), buf, len, wh)
+			let sha1 = sha1.clone();
+			Self::process_read(
+				http_context.clone(),
+				http_config.clone(),
+				buf,
+				len,
+				wh,
+				sha1,
+			)
 		})?;
 		eh.set_on_accept(move |id, wh| {
 			Self::process_accept(
@@ -1940,6 +1963,7 @@ impl HttpServer {
 		buf: &[u8],
 		len: usize,
 		wh: WriteHandle,
+		sha1: Sha1,
 	) -> Result<(), Error> {
 		let (conn_data, mappings, extensions) = {
 			let http_context = nioruntime_util::lockw!(http_context)?;
@@ -1985,6 +2009,7 @@ impl HttpServer {
 				wh,
 				mappings,
 				extensions,
+				sha1,
 			) {
 				Ok(log_item) => log_item,
 				Err(e) => {
@@ -2044,6 +2069,7 @@ impl HttpServer {
 		end_buf: &mut usize,
 	) -> Result<Option<HeaderInfo>, Error> {
 		let connection_id = conn_data.wh.get_connection_id();
+		let mut websocket_key = None;
 
 		let len = buffer.len();
 		let is_get = match index_of(&HTTP_GET.to_vec(), &buffer[0..4].to_vec()) {
@@ -2117,6 +2143,7 @@ impl HttpServer {
 		// get headers
 		let mut nl_count = 0;
 		let mut headers_vec = vec![];
+		let mut is_websocket = false;
 		for j in 0..len {
 			if conn_data.buffer[j] == '\n' as u8 {
 				nl_count += 1;
@@ -2156,15 +2183,12 @@ impl HttpServer {
 				}
 			}
 
-			let header = std::str::from_utf8(&sep_headers_vec[j].0[..])?;
-			let value = std::str::from_utf8(&sep_headers_vec[j].1[..])?;
-
-			if header == "Connection" && value == "keep-alive" {
-				keep_alive = true;
-			}
-
-			if header == "Content-Length" {
-				content_len = value.parse()?;
+			if sep_headers_vec[j].0 == CONNECTION_HEADER.to_vec() {
+				if sep_headers_vec[j].1 == KEEP_ALIVE.to_vec() {
+					keep_alive = true;
+				}
+			} else if sep_headers_vec[j].0 == CONTENT_LENGTH {
+				content_len = std::str::from_utf8(&sep_headers_vec[j].1[..])?.parse()?;
 
 				if content_len > config.max_content_length {
 					Self::send_bad_request_error(
@@ -2184,6 +2208,12 @@ impl HttpServer {
 					conn_data.needed_len = *end_buf;
 					return Ok(None);
 				}
+			} else if sep_headers_vec[j].0 == UPGRADE {
+				if sep_headers_vec[j].1 == WEBSOCKET {
+					is_websocket = true;
+				}
+			} else if sep_headers_vec[j].0 == WEBSOCKET_KEY {
+				websocket_key = Some(std::str::from_utf8(&sep_headers_vec[j].1)?.to_string());
 			}
 		}
 
@@ -2211,6 +2241,8 @@ impl HttpServer {
 			sep_headers_vec,
 			keep_alive,
 			content_len,
+			is_websocket,
+			websocket_key,
 		}))
 	}
 
@@ -2222,6 +2254,7 @@ impl HttpServer {
 		mappings: &HashSet<String>,
 		extensions: &HashSet<String>,
 		wh: &WriteHandle,
+		sha1: Sha1,
 	) -> Result<bool, Error> {
 		let mut page_processed = false;
 		let mut end_buf;
@@ -2249,6 +2282,22 @@ impl HttpServer {
 						return Ok(false);
 					}
 				};
+
+				if header_info.is_websocket {
+					// return false. no page processing follows.
+					// and mark the conn_data as websocket
+					conn_data.is_websocket = true;
+					conn_data.buffer.drain(0..len);
+
+					match header_info.websocket_key {
+						Some(key) => Self::send_websocket_handshake_response(&wh, key, sha1)?,
+						None => Self::send_bad_request_error(
+							&wh,
+							&format!("Websocket request had no key"),
+						)?,
+					}
+					return Ok(false);
+				}
 
 				// headers process complete we know we have a full page
 				page_processed = true;
@@ -2340,7 +2389,13 @@ impl HttpServer {
 		wh: WriteHandle,
 		mappings: HashSet<String>,
 		extensions: HashSet<String>,
+		sha1: Sha1,
 	) -> Result<Vec<RequestLogItem>, Error> {
+		if conn_data.is_websocket {
+			process_websocket_data(conn_data)?;
+			return Ok(vec![]);
+		}
+
 		let mut log_vec = vec![];
 		if (*conn_data).begin_request_time != 0 {
 			// async request completing
@@ -2380,6 +2435,7 @@ impl HttpServer {
 				&mappings,
 				&extensions,
 				&wh,
+				sha1.clone(),
 			) {
 				Ok(processed) => {
 					if !processed {
@@ -2402,6 +2458,22 @@ impl HttpServer {
 		}
 
 		Ok(log_vec)
+	}
+
+	fn send_websocket_handshake_response(
+		wh: &WriteHandle,
+		key: String,
+		mut sha1: Sha1,
+	) -> Result<(), Error> {
+		let hash = format!("{}{}", key, WEBSOCKET_GUID);
+		sha1.update(hash.as_bytes());
+		let msg = format!(
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSet-WebSocket-Accept: {}\r\n\r\n",
+			base64::encode(&sha1.finalize()[..]),
+		);
+		let response = msg.as_bytes();
+		wh.write(response)?;
+		Ok(())
 	}
 
 	fn send_bad_request_error(wh: &WriteHandle, message: &str) -> Result<(), Error> {

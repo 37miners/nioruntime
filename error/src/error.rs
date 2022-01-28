@@ -15,10 +15,12 @@
 use failure::{Backtrace, Context, Fail};
 #[cfg(unix)]
 use nix::errno::Errno;
+use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Display;
 use std::num::ParseIntError;
+use std::num::TryFromIntError;
 use std::str::Utf8Error;
 use std::sync::mpsc::RecvError;
 use std::sync::MutexGuard;
@@ -125,6 +127,9 @@ pub enum ErrorKind {
 	/// Configuration
 	#[fail(display = "Configuration Error: {}", _0)]
 	Configuration(String),
+	/// InvalidWebSocketOpCode
+	#[fail(display = "InvalidWebSocketOpCode Error: {}", _0)]
+	InvalidWebSocketOpCode(String),
 }
 
 impl Display for Error {
@@ -283,6 +288,22 @@ impl From<std::time::SystemTimeError> for Error {
 				"system time error: {}",
 				e
 			))),
+		}
+	}
+}
+
+impl From<TryFromIntError> for Error {
+	fn from(e: TryFromIntError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("TryFromIntError: {}", e))),
+		}
+	}
+}
+
+impl From<Infallible> for Error {
+	fn from(e: Infallible) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::InternalError(format!("Infallible: {}", e))),
 		}
 	}
 }

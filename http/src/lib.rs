@@ -13,7 +13,10 @@
 // limitations under the License.
 
 mod http;
+mod websocket;
 
 pub use crate::http::{
 	ConnData, HttpConfig, HttpMethod, HttpServer, HttpVersion, State, WriteHandle,
 };
+
+pub use crate::websocket::process_websocket_data;
