@@ -216,6 +216,7 @@ fn real_main() -> Result<(), Error> {
 		.get_matches();
 	let client = args.is_present("client");
 	let debug = args.is_present("debug");
+	let print_headers = args.is_present("print_headers");
 	let threads = args.is_present("threads");
 	let count = args.is_present("count");
 	let itt = args.is_present("itt");
@@ -287,6 +288,7 @@ fn real_main() -> Result<(), Error> {
 	if http {
 		let config = HttpConfig {
 			debug,
+			print_headers,
 			tor_port: tor,
 			host,
 			port: http_port,

@@ -127,9 +127,9 @@ pub enum ErrorKind {
 	/// Configuration
 	#[fail(display = "Configuration Error: {}", _0)]
 	Configuration(String),
-	/// InvalidWebSocketOpCode
-	#[fail(display = "InvalidWebSocketOpCode Error: {}", _0)]
-	InvalidWebSocketOpCode(String),
+	/// WebsocketError
+	#[fail(display = "WebSocket Error: {}", _0)]
+	WebSocketError(String),
 }
 
 impl Display for Error {

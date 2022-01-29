@@ -47,6 +47,11 @@ args:
         short: d
         long: debug
         takes_value: false
+    - print_headers:
+        help: Whether to print debugging information about headers
+        short: y
+        long: print_headers
+        takes_value: false
     - certs:
         help: TLS certificate file location
         short: e

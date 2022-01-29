@@ -16,7 +16,9 @@ mod http;
 mod websocket;
 
 pub use crate::http::{
-	ConnData, HttpConfig, HttpMethod, HttpServer, HttpVersion, State, WriteHandle,
+	ConnData, HttpConfig, HttpMethod, HttpServer, HttpVersion, State, WriteHandle, WsHandler,
 };
 
-pub use crate::websocket::process_websocket_data;
+pub use crate::websocket::{
+	process_websocket_data, send_websocket_message, WebSocketMessage, WebSocketMessageType,
+};

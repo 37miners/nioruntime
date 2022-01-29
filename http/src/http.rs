@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::process_websocket_data;
+use crate::{process_websocket_data, send_websocket_message};
+use crate::{WebSocketMessage, WebSocketMessageType};
 use bytefmt;
 use chrono::prelude::*;
 use dirs;
@@ -134,7 +135,7 @@ pub enum HttpMethod {
 	Post,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum HttpVersion {
 	V20,
 	V11,
@@ -142,16 +143,27 @@ pub enum HttpVersion {
 	V09,
 }
 
-struct HeaderInfo {
-	method: HttpMethod,
-	http_version: HttpVersion,
-	uri: String,
-	query: String,
-	sep_headers_vec: Vec<(Vec<u8>, Vec<u8>)>,
-	keep_alive: bool,
-	content_len: usize,
-	is_websocket: bool,
-	websocket_key: Option<String>,
+/// Header information about the request. May be used by WebSockets.
+#[derive(PartialEq, Debug)]
+pub struct HeaderInfo {
+	/// The HttpMethod of the request. Currently only Get/Post are supported
+	pub method: HttpMethod,
+	/// The Http Version for this request
+	pub http_version: HttpVersion,
+	/// The URI of the request
+	pub uri: String,
+	/// The query of the request
+	pub query: String,
+	/// The request headers
+	pub sep_headers_vec: Vec<(Vec<u8>, Vec<u8>)>,
+	/// Whether this request is a "keep-alive" request.
+	pub keep_alive: bool,
+	/// The length of the content.
+	pub content_len: usize,
+	/// Is this a websocket?
+	pub is_websocket: bool,
+	/// optional websocket key if supplied by the client.
+	pub websocket_key: Option<String>,
 }
 
 fn index_of(pattern: &Vec<u8>, data: &Vec<u8>) -> Option<usize> {
@@ -179,6 +191,12 @@ fn index_of(pattern: &Vec<u8>, data: &Vec<u8>) -> Option<usize> {
 }
 
 type Housekeeper = fn() -> Result<(), Error>;
+
+pub type WsHandler = fn(conn_data: &mut ConnData, message: WebSocketMessage) -> Result<bool, Error>;
+
+fn empty_ws_handler(_conn_data: &mut ConnData, _message: WebSocketMessage) -> Result<bool, Error> {
+	Ok(true)
+}
 
 type Callback = fn(
 	Arc<RwLock<bool>>,
@@ -284,6 +302,8 @@ pub struct HttpConfig {
 	pub read_timeout: u128,
 	/// The callback used for APIs. This is specified by the rustlet project for example.
 	pub callback: Callback,
+	/// The callback used for WebSockets. This is specified by the rustlet project for example.
+	pub ws_handler: WsHandler,
 	/// The handler for panics that occur in the thread pool.
 	pub on_panic: OnPanic,
 	/// The handler that is called every second by the Housekeeper thread.
@@ -300,6 +320,8 @@ pub struct HttpConfig {
 	pub max_content_length: usize,
 	/// Whether or not to print debugging information to stdout.
 	pub debug: bool,
+	/// A debugging option to print headers on all requests
+	pub print_headers: bool,
 }
 
 impl Default for HttpConfig {
@@ -330,11 +352,13 @@ impl Default for HttpConfig {
 			max_content_length: 1024 * 1024,              // 1 mb
 			evh_config: EventHandlerConfig::default(),
 			callback: empty_callback,
+			ws_handler: empty_ws_handler,
 			on_panic: empty_on_panic,
 			on_housekeeper: empty_housekeeper,
 			max_log_queue: 100_000,
 			tor_port: 0,
 			debug: false,
+			print_headers: false,
 		}
 	}
 }
@@ -372,6 +396,14 @@ impl ConnData {
 
 	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
 		&mut self.buffer
+	}
+
+	pub fn get_connection_id(&mut self) -> u128 {
+		self.wh.get_connection_id()
+	}
+
+	pub fn get_wh(&mut self) -> &mut WriteHandle {
+		&mut self.wh
 	}
 }
 
@@ -776,6 +808,9 @@ impl HttpServer {
 
 		if self.config.debug {
 			log_multi!(WARN, MAIN_LOG, "WARNING! flag set:    'debug'");
+		}
+		if self.config.print_headers {
+			log_multi!(WARN, MAIN_LOG, "WARNING! flag set:    'print_headers'");
 		}
 		if self.config.delete_request_rotation {
 			log_multi!(
@@ -2009,6 +2044,7 @@ impl HttpServer {
 				wh,
 				mappings,
 				extensions,
+				&http_config.ws_handler,
 				sha1,
 			) {
 				Ok(log_item) => log_item,
@@ -2290,7 +2326,36 @@ impl HttpServer {
 					conn_data.buffer.drain(0..len);
 
 					match header_info.websocket_key {
-						Some(key) => Self::send_websocket_handshake_response(&wh, key, sha1)?,
+						Some(ref key) => {
+							let connection_id = conn_data.get_connection_id();
+							let key = key.to_string();
+							match (config.ws_handler)(
+								conn_data,
+								WebSocketMessage {
+									mtype: WebSocketMessageType::Open,
+									payload: vec![],
+									connection_id,
+									mask: false,
+									header_info: Some(header_info),
+								},
+							)? {
+								true => Self::send_websocket_handshake_response(&wh, key, sha1)?,
+								false => {
+									// if handler returns false, close connection.
+									send_websocket_message(
+										conn_data,
+										&WebSocketMessage {
+											mtype: WebSocketMessageType::Close,
+											payload: vec![],
+											connection_id,
+											mask: false,
+											header_info: None,
+										},
+									)?;
+									conn_data.wh.close()?;
+								}
+							}
+						}
 						None => Self::send_bad_request_error(
 							&wh,
 							&format!("Websocket request had no key"),
@@ -2304,13 +2369,21 @@ impl HttpServer {
 
 				if config.debug {
 					log_multi!(
-						DEBUG,
+						INFO,
 						MAIN_LOG,
 						"method={:?},uri={},query={}",
 						header_info.method,
 						header_info.uri,
 						header_info.query
 					);
+				}
+
+				if config.print_headers {
+					for header in &header_info.sep_headers_vec {
+						let header_name = std::str::from_utf8(&header.0)?;
+						let header_value = std::str::from_utf8(&header.1)?;
+						log_multi!(INFO, MAIN_LOG, "header[{}] = {}", header_name, header_value,);
+					}
 				}
 
 				let last_dot = header_info.uri.rfind('.');
@@ -2389,10 +2462,11 @@ impl HttpServer {
 		wh: WriteHandle,
 		mappings: HashSet<String>,
 		extensions: HashSet<String>,
+		ws_handler: &WsHandler,
 		sha1: Sha1,
 	) -> Result<Vec<RequestLogItem>, Error> {
 		if conn_data.is_websocket {
-			process_websocket_data(conn_data)?;
+			process_websocket_data(conn_data, ws_handler)?;
 			return Ok(vec![]);
 		}
 
@@ -2468,7 +2542,7 @@ impl HttpServer {
 		let hash = format!("{}{}", key, WEBSOCKET_GUID);
 		sha1.update(hash.as_bytes());
 		let msg = format!(
-			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSet-WebSocket-Accept: {}\r\n\r\n",
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
 			base64::encode(&sha1.finalize()[..]),
 		);
 		let response = msg.as_bytes();
