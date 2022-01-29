@@ -144,7 +144,7 @@ pub enum HttpVersion {
 }
 
 /// Header information about the request. May be used by WebSockets.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct HeaderInfo {
 	/// The HttpMethod of the request. Currently only Get/Post are supported
 	pub method: HttpMethod,
@@ -365,6 +365,7 @@ impl Default for HttpConfig {
 
 /// Connection Data used internally
 /// It is held in a lock that is used to determine if the thread has panicked.
+#[derive(Clone)]
 pub struct ConnData {
 	buffer: Vec<u8>,
 	wh: WriteHandle,
@@ -375,6 +376,7 @@ pub struct ConnData {
 	is_async: Arc<RwLock<bool>>,
 	begin_request_time: u128,
 	is_websocket: bool,
+	data: Option<u128>,
 }
 
 impl ConnData {
@@ -391,19 +393,29 @@ impl ConnData {
 			is_async: Arc::new(RwLock::new(false)),
 			begin_request_time: 0,
 			is_websocket: false,
+			data: None,
 		}
+	}
+
+	pub fn set_data(&mut self, data: u128) -> Result<(), Error> {
+		self.data = Some(data);
+		Ok(())
+	}
+
+	pub fn get_data(&self) -> Option<u128> {
+		self.data
 	}
 
 	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
 		&mut self.buffer
 	}
 
-	pub fn get_connection_id(&mut self) -> u128 {
+	pub fn get_connection_id(&self) -> u128 {
 		self.wh.get_connection_id()
 	}
 
-	pub fn get_wh(&mut self) -> &mut WriteHandle {
-		&mut self.wh
+	pub fn get_wh(&self) -> &WriteHandle {
+		&self.wh
 	}
 }
 
@@ -2349,6 +2361,7 @@ impl HttpServer {
 											header_info: None,
 										},
 									)?;
+									Self::send_forbidden(&wh)?;
 									conn_data.wh.close()?;
 								}
 							}
@@ -2529,6 +2542,13 @@ impl HttpServer {
 		}
 
 		Ok(log_vec)
+	}
+
+	fn send_forbidden(wh: &WriteHandle) -> Result<(), Error> {
+		let msg = format!("HTTP/1.1 403 Forbidden\r\n\r\n",);
+		let response = msg.as_bytes();
+		wh.write(response)?;
+		Ok(())
 	}
 
 	fn send_websocket_handshake_response(

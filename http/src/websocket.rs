@@ -22,7 +22,7 @@ use std::convert::TryInto;
 
 info!();
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum WebSocketMessageType {
 	Text,
 	Binary,
@@ -32,7 +32,7 @@ pub enum WebSocketMessageType {
 	Open,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct WebSocketMessage {
 	pub mtype: WebSocketMessageType,
 	pub payload: Vec<u8>,
@@ -365,19 +365,6 @@ fn build_message(
 		mask = header.mask;
 	}
 
-	match mtype {
-		WebSocketMessageType::Ping | WebSocketMessageType::Pong | WebSocketMessageType::Close => {
-			if payload.len() > 0 {
-				return Err(ErrorKind::WebSocketError(format!(
-					"messagetype '{:?}' may not have a payload.",
-					mtype
-				))
-				.into());
-			}
-		}
-		_ => {}
-	}
-
 	Ok(WebSocketMessage {
 		mtype,
 		payload,
@@ -387,7 +374,7 @@ fn build_message(
 }
 
 pub fn send_websocket_message(
-	conn_data: &mut ConnData,
+	conn_data: &ConnData,
 	message: &WebSocketMessage,
 ) -> Result<(), Error> {
 	let message: Vec<u8> = message.into();
