@@ -991,44 +991,6 @@ mod tests {
 			},],
 		);
 
-		// send Ping with a payload which should result in an error
-		let mut data = [0u8; 19];
-		data[0] = 137;
-		data[1] = 255;
-		data[2] = 0;
-		data[3] = 0;
-		data[4] = 0;
-		data[5] = 0;
-		data[6] = 0;
-		data[7] = 0;
-		data[8] = 0;
-		data[9] = 5;
-		data[10] = 1;
-		data[11] = 1;
-		data[12] = 1;
-		data[13] = 1;
-		data[14] = 1;
-		data[15] = 2;
-		data[16] = 3;
-		data[17] = 4;
-		data[18] = 5;
-
-		let header = get_frame_header_info(&mut data.to_vec()).unwrap();
-		assert_eq!(
-			header,
-			Some(FrameHeaderInfo {
-				ftype: Ping,
-				mask: true,
-				fin: true,
-				payload_len: 5,
-				masking_key: 16843009,
-				start_content: 14,
-			})
-		);
-
-		let messages = build_messages(&mut data[..].to_vec());
-		assert_eq!(messages.is_err(), true);
-
 		// send Ping without a payload
 		let mut data = [0u8; 6];
 		data[0] = 137;
