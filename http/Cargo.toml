@@ -19,7 +19,7 @@ nioruntime_err  = { path = "../error"        }
 
 grin_secp256k1zkp = { git = "https://github.com/bitcoinmw/rust-secp256k1-zkp", features = ["bullet-proof-sizing"] }
 
-ed25519-dalek = "1"
+ed25519-dalek = "1.0.1"
 rand = "0.6.0"
 chrono = "0.4.7"
 dirs = "3.0.2"

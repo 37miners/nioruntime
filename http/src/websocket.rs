@@ -401,7 +401,7 @@ pub fn process_websocket_data(
 ) -> Result<(), Error> {
 	let buffer = conn_data.get_buffer();
 	let len = buffer.len();
-	info!("websocket.rs data[{}] = {:?}", len, buffer);
+	debug!("websocket.rs data[{}] = {:?}", len, buffer);
 	let messages = build_messages(buffer)?;
 
 	// send the messages to the callback.
