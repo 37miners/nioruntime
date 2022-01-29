@@ -376,6 +376,7 @@ pub struct ConnData {
 	is_async: Arc<RwLock<bool>>,
 	begin_request_time: u128,
 	is_websocket: bool,
+	is_closed_websocket: bool,
 	data: Option<u128>,
 }
 
@@ -393,6 +394,7 @@ impl ConnData {
 			is_async: Arc::new(RwLock::new(false)),
 			begin_request_time: 0,
 			is_websocket: false,
+			is_closed_websocket: false,
 			data: None,
 		}
 	}
@@ -1784,71 +1786,78 @@ impl HttpServer {
 		let mut idledisc_incr = 0;
 		let mut rtimeout_incr = 0;
 
+		let mut del_list = vec![];
+
 		{
-			let mut del_list = vec![];
-
+			let mut varr: Vec<(u128, Arc<RwLock<ConnData>>)> = vec![];
 			{
-				let mut varr: Vec<(u128, Arc<RwLock<ConnData>>)> = vec![];
-				{
-					let http_context = nioruntime_util::lockr!(http_context)?;
-					let map = { nioruntime_util::lockr!(http_context.map)? };
+				let http_context = nioruntime_util::lockr!(http_context)?;
+				let map = { nioruntime_util::lockr!(http_context.map)? };
 
-					for (k, v) in &*map {
-						varr.push((k.clone(), v.clone()));
-					}
+				for (k, v) in &*map {
+					varr.push((k.clone(), v.clone()));
 				}
+			}
 
-				let start_time = *START_TIME;
-				let since_start = Instant::now().duration_since(start_time);
-				let time_now = since_start.as_millis();
-				let last_request_timeout = http_config.last_request_timeout;
-				let read_timeout = http_config.read_timeout;
+			let start_time = *START_TIME;
+			let since_start = Instant::now().duration_since(start_time);
+			let time_now = since_start.as_millis();
+			let last_request_timeout = http_config.last_request_timeout;
+			let read_timeout = http_config.read_timeout;
 
-				for (k, v) in &varr {
-					let (idledisc, rtimeout) = match Self::check_idle(
-						time_now,
-						v,
-						last_request_timeout,
-						read_timeout,
-					) {
+			for (k, v) in &varr {
+				let (idledisc, rtimeout) =
+					match Self::check_idle(time_now, v, last_request_timeout, read_timeout) {
 						Ok(x) => x,
 						Err(e) => {
 							del_list.push(k.clone());
 							log_multi!(
-                                                                        ERROR,
-                                                                        MAIN_LOG,
-                                                                        "error in check_idle (possible thread panic) ConnData for {}, err={}",
-                                                                        k,
-                                                                        e.to_string(),
-                                                                );
+							ERROR,
+							MAIN_LOG,
+							"error in check_idle (possible thread panic) ConnData for {}, err={}",
+							k,
+							e.to_string(),
+						);
 							(false, false)
 						}
 					};
 
-					if idledisc {
-						idledisc_incr += 1;
-					}
-					if rtimeout {
-						rtimeout_incr += 1;
-					}
+				if idledisc {
+					idledisc_incr += 1;
+				}
+				if rtimeout {
+					rtimeout_incr += 1;
 				}
 			}
+		}
 
-			let stop;
-			{
-				let http_context = nioruntime_util::lockr!(http_context)?;
-				let mut map = {
-					stop = http_context.stop;
-					nioruntime_util::lockw!(http_context.map)?
-				};
-				for d in del_list {
-					map.remove(&d);
+		let stop;
+		let conn_data_list = {
+			let mut ret = vec![];
+			let http_context = nioruntime_util::lockr!(http_context)?;
+			let mut map = {
+				stop = http_context.stop;
+				nioruntime_util::lockw!(http_context.map)?
+			};
+			for d in del_list {
+				let conn_data = map.remove(&d);
+				ret.push(conn_data);
+			}
+
+			ret
+		};
+
+		for conn_data in conn_data_list {
+			match conn_data {
+				Some(conn_data) => {
+					Self::close_conn_data(&mut *nioruntime_util::lockw!(conn_data)?, http_config)?;
 				}
+				None => {}
 			}
+		}
 
-			if stop {
-				return Ok(true);
-			}
+		if stop {
+			return Ok(true);
 		}
 
 		if idledisc_incr > 0 || rtimeout_incr > 0 {
@@ -2476,7 +2485,28 @@ impl HttpServer {
 		sha1: Sha1,
 	) -> Result<Vec<RequestLogItem>, Error> {
 		if conn_data.is_websocket {
-			process_websocket_data(conn_data, ws_handler)?;
+			match process_websocket_data(conn_data, ws_handler) {
+				Ok(_) => {}
+				Err(e) => {
+					log_multi!(
+						WARN,
+						MAIN_LOG,
+						"Processing websocket messages generated error: {}",
+						e,
+					);
+
+					Self::close_conn_data(conn_data, &config)?;
+
+					let close_message = WebSocketMessage {
+						mtype: WebSocketMessageType::Close,
+						payload: vec![],
+						mask: false,
+						header_info: None,
+					};
+					let _ = send_websocket_message(conn_data, &close_message);
+					let _ = conn_data.get_wh().close();
+				}
+			}
 			return Ok(vec![]);
 		}
 
@@ -2713,13 +2743,37 @@ impl HttpServer {
 
 	fn process_close(
 		http_context: Arc<RwLock<HttpContext>>,
-		_http_config: HttpConfig,
+		http_config: HttpConfig,
 		id: u128,
 	) -> Result<(), Error> {
-		let mut http_context = nioruntime_util::lockw!(http_context)?;
-		http_context.stats.conns -= 1;
-		let mut map = nioruntime_util::lockw!(http_context.map)?;
-		map.remove(&id);
+		let conn_data = {
+			let mut http_context = nioruntime_util::lockw!(http_context)?;
+			http_context.stats.conns -= 1;
+			let mut map = nioruntime_util::lockw!(http_context.map)?;
+			map.remove(&id)
+		};
+
+		match conn_data {
+			Some(conn_data) => {
+				Self::close_conn_data(&mut *nioruntime_util::lockw!(conn_data)?, &http_config)?;
+			}
+			None => {}
+		}
+
+		Ok(())
+	}
+
+	fn close_conn_data(conn_data: &mut ConnData, config: &HttpConfig) -> Result<(), Error> {
+		if conn_data.is_websocket && !conn_data.is_closed_websocket {
+			let close_message = WebSocketMessage {
+				mtype: WebSocketMessageType::Close,
+				payload: vec![],
+				mask: false,
+				header_info: None,
+			};
+			(config.ws_handler)(conn_data, close_message)?;
+			conn_data.is_closed_websocket = true;
+		}
 
 		Ok(())
 	}
