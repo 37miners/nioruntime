@@ -2327,14 +2327,12 @@ impl HttpServer {
 
 					match header_info.websocket_key {
 						Some(ref key) => {
-							let connection_id = conn_data.get_connection_id();
 							let key = key.to_string();
 							match (config.ws_handler)(
 								conn_data,
 								WebSocketMessage {
 									mtype: WebSocketMessageType::Open,
 									payload: vec![],
-									connection_id,
 									mask: false,
 									header_info: Some(header_info),
 								},
@@ -2347,7 +2345,6 @@ impl HttpServer {
 										&WebSocketMessage {
 											mtype: WebSocketMessageType::Close,
 											payload: vec![],
-											connection_id,
 											mask: false,
 											header_info: None,
 										},

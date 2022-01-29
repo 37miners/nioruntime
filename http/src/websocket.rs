@@ -36,7 +36,6 @@ pub enum WebSocketMessageType {
 pub struct WebSocketMessage {
 	pub mtype: WebSocketMessageType,
 	pub payload: Vec<u8>,
-	pub connection_id: u128,
 	pub mask: bool,
 	pub header_info: Option<HeaderInfo>,
 }
@@ -268,10 +267,7 @@ fn get_frame_header_info(buffer: &mut Vec<u8>) -> Result<Option<FrameHeaderInfo>
 	}))
 }
 
-fn build_messages(
-	buffer: &mut Vec<u8>,
-	connection_id: u128,
-) -> Result<Vec<WebSocketMessage>, Error> {
+fn build_messages(buffer: &mut Vec<u8>) -> Result<Vec<WebSocketMessage>, Error> {
 	let mut ret = vec![];
 	let mut headers = vec![];
 	let mut offset = 0;
@@ -295,7 +291,7 @@ fn build_messages(
 					headers.push((header, offset));
 					offset += end_content;
 					// process the existing frames
-					let message = build_message(headers, buffer.to_vec(), connection_id)?;
+					let message = build_message(headers, buffer.to_vec())?;
 					ret.push(message);
 					headers = vec![];
 
@@ -331,7 +327,6 @@ fn build_messages(
 fn build_message(
 	frames: Vec<(FrameHeaderInfo, usize)>,
 	buffer: Vec<u8>,
-	connection_id: u128,
 ) -> Result<WebSocketMessage, Error> {
 	// append each frame of the message content into a single message for processing
 	let mut payload = vec![];
@@ -386,7 +381,6 @@ fn build_message(
 	Ok(WebSocketMessage {
 		mtype,
 		payload,
-		connection_id,
 		mask,
 		header_info: None,
 	})
@@ -405,11 +399,10 @@ pub fn process_websocket_data(
 	conn_data: &mut ConnData,
 	ws_handler: &WsHandler,
 ) -> Result<(), Error> {
-	let connection_id = conn_data.get_connection_id();
 	let buffer = conn_data.get_buffer();
 	let len = buffer.len();
 	info!("websocket.rs data[{}] = {:?}", len, buffer);
-	let messages = build_messages(buffer, connection_id)?;
+	let messages = build_messages(buffer)?;
 
 	// send the messages to the callback.
 	for message in messages {
@@ -422,7 +415,6 @@ pub fn process_websocket_data(
 					&WebSocketMessage {
 						mtype: WebSocketMessageType::Close,
 						payload: vec![],
-						connection_id,
 						mask: false,
 						header_info: None,
 					},
@@ -803,21 +795,19 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![
 				WebSocketMessage {
 					payload: vec![1, 2, 3, 4, 5],
 					mtype: WebSocketMessageType::Text,
-					connection_id: 0,
 					mask: true,
 					header_info: None,
 				},
 				WebSocketMessage {
 					payload: vec![100],
 					mtype: WebSocketMessageType::Text,
-					connection_id: 0,
 					mask: true,
 					header_info: None,
 				},
@@ -866,13 +856,12 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![1, 2, 3, 4, 5, 100],
 				mtype: WebSocketMessageType::Text,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			},],
@@ -920,7 +909,7 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(messages.len(), 0);
 
 		// test masking key
@@ -958,13 +947,12 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![0, 3, 2, 5, 4],
 				mtype: WebSocketMessageType::Text,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			},],
@@ -1005,13 +993,12 @@ mod tests {
 			}),
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![0, 3, 2, 5, 4],
 				mtype: WebSocketMessageType::Binary,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			},],
@@ -1052,7 +1039,7 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0);
+		let messages = build_messages(&mut data[..].to_vec());
 		assert_eq!(messages.is_err(), true);
 
 		// send Ping without a payload
@@ -1077,13 +1064,12 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![],
 				mtype: WebSocketMessageType::Ping,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			}],
@@ -1111,13 +1097,12 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![],
 				mtype: WebSocketMessageType::Pong,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			}],
@@ -1145,13 +1130,12 @@ mod tests {
 			})
 		);
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![WebSocketMessage {
 				payload: vec![],
 				mtype: WebSocketMessageType::Close,
-				connection_id: 0,
 				mask: true,
 				header_info: None,
 			}],
@@ -1209,42 +1193,37 @@ mod tests {
 		data[35] = 0;
 		data[36] = 0; // need 100, provided 12.
 
-		let messages = build_messages(&mut data[..].to_vec(), 0)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert_eq!(
 			messages,
 			vec![
 				WebSocketMessage {
 					payload: vec![],
 					mtype: WebSocketMessageType::Ping,
-					connection_id: 0,
 					mask: true,
 					header_info: None,
 				},
 				WebSocketMessage {
 					payload: vec![42, 43],
 					mtype: WebSocketMessageType::Text,
-					connection_id: 0,
 					mask: false,
 					header_info: None,
 				},
 				WebSocketMessage {
 					payload: vec![],
 					mtype: WebSocketMessageType::Pong,
-					connection_id: 0,
 					mask: true,
 					header_info: None,
 				},
 				WebSocketMessage {
 					payload: vec![37],
 					mtype: WebSocketMessageType::Binary,
-					connection_id: 0,
 					mask: false,
 					header_info: None,
 				},
 				WebSocketMessage {
 					payload: vec![],
 					mtype: WebSocketMessageType::Close,
-					connection_id: 0,
 					mask: false,
 					header_info: None,
 				},
@@ -1255,9 +1234,8 @@ mod tests {
 	}
 
 	fn check_message(message: WebSocketMessage) -> Result<(), Error> {
-		let connection_id = message.connection_id;
 		let data: Vec<u8> = (&message).into();
-		let messages = build_messages(&mut data[..].to_vec(), connection_id)?;
+		let messages = build_messages(&mut data[..].to_vec())?;
 		assert!(messages.len() == 1);
 
 		assert_eq!(message, messages[0]);
@@ -1270,7 +1248,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload: vec![1, 0],
 			mask: true,
-			connection_id: 0,
 			header_info: None,
 		})?;
 
@@ -1278,7 +1255,6 @@ mod tests {
 			mtype: WebSocketMessageType::Binary,
 			payload: vec![1, 0, 99, 5],
 			mask: true,
-			connection_id: 9,
 			header_info: None,
 		})?;
 
@@ -1286,7 +1262,6 @@ mod tests {
 			mtype: WebSocketMessageType::Close,
 			payload: vec![],
 			mask: false,
-			connection_id: 9,
 			header_info: None,
 		})?;
 
@@ -1294,7 +1269,6 @@ mod tests {
 			mtype: WebSocketMessageType::Ping,
 			payload: vec![],
 			mask: true,
-			connection_id: 10,
 			header_info: None,
 		})?;
 
@@ -1302,7 +1276,6 @@ mod tests {
 			mtype: WebSocketMessageType::Ping,
 			payload: vec![],
 			mask: true,
-			connection_id: 10,
 			header_info: None,
 		})?;
 
@@ -1311,7 +1284,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload,
 			mask: true,
-			connection_id: 10,
 			header_info: None,
 		})?;
 
@@ -1320,7 +1292,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload,
 			mask: true,
-			connection_id: 1,
 			header_info: None,
 		})?;
 
@@ -1329,7 +1300,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload,
 			mask: true,
-			connection_id: 2,
 			header_info: None,
 		})?;
 
@@ -1338,7 +1308,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload,
 			mask: true,
-			connection_id: 3,
 			header_info: None,
 		})?;
 
@@ -1347,7 +1316,6 @@ mod tests {
 			mtype: WebSocketMessageType::Text,
 			payload,
 			mask: true,
-			connection_id: 4,
 			header_info: None,
 		})?;
 
@@ -1362,7 +1330,6 @@ mod tests {
 				mtype: WebSocketMessageType::Binary,
 				payload,
 				mask: true,
-				connection_id: 10,
 				header_info: None,
 			})?;
 		}
