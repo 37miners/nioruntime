@@ -2485,8 +2485,8 @@ impl HttpServer {
 		sha1: Sha1,
 	) -> Result<Vec<RequestLogItem>, Error> {
 		if conn_data.is_websocket {
-			match process_websocket_data(conn_data, ws_handler) {
-				Ok(_) => {}
+			let is_close = match process_websocket_data(conn_data, ws_handler) {
+				Ok(is_closed) => is_closed,
 				Err(e) => {
 					log_multi!(
 						WARN,
@@ -2505,8 +2505,14 @@ impl HttpServer {
 					};
 					let _ = send_websocket_message(conn_data, &close_message);
 					let _ = conn_data.get_wh().close();
+					true
 				}
+			};
+
+			if is_close {
+				conn_data.is_closed_websocket = true;
 			}
+
 			return Ok(vec![]);
 		}
 

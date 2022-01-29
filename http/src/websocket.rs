@@ -382,10 +382,12 @@ pub fn send_websocket_message(
 	Ok(())
 }
 
+// returns true on close, otherwise, false
 pub fn process_websocket_data(
 	conn_data: &mut ConnData,
 	ws_handler: &WsHandler,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
+	let mut ret = false;
 	let buffer = conn_data.get_buffer();
 	let len = buffer.len();
 	debug!("websocket.rs data[{}] = {:?}", len, buffer);
@@ -393,6 +395,9 @@ pub fn process_websocket_data(
 
 	// send the messages to the callback.
 	for message in messages {
+		if message.mtype == WebSocketMessageType::Close {
+			ret = true;
+		}
 		match ws_handler(conn_data, message)? {
 			true => {}
 			false => {
@@ -413,7 +418,7 @@ pub fn process_websocket_data(
 		}
 	}
 
-	Ok(())
+	Ok(ret)
 }
 
 #[cfg(test)]
