@@ -380,11 +380,19 @@ fn build_message(
 }
 
 pub fn send_websocket_message(
-	conn_data: &ConnData,
+	conn_data: &mut ConnData,
 	message: &WebSocketMessage,
 ) -> Result<(), Error> {
-	let message: Vec<u8> = message.into();
-	conn_data.get_wh().write(&message)?;
+	match conn_data.is_ws_open() {
+		true => {
+			let message: Vec<u8> = message.into();
+			conn_data.get_wh().write(&message)?;
+		}
+		false => {
+			conn_data.add_open_queue((*message).clone())?;
+		}
+	}
+
 	Ok(())
 }
 
