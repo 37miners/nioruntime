@@ -40,6 +40,12 @@ pub struct WebSocketMessage {
 	pub header_info: Option<HeaderInfo>,
 }
 
+impl From<WebSocketMessage> for Vec<u8> {
+	fn from(ws: WebSocketMessage) -> Vec<u8> {
+		(&ws).into()
+	}
+}
+
 impl From<&WebSocketMessage> for Vec<u8> {
 	fn from(ws: &WebSocketMessage) -> Vec<u8> {
 		let mut ret: Vec<u8> = vec![];
@@ -1287,6 +1293,20 @@ mod tests {
 				header_info: None,
 			})?;
 		}
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_ser() -> Result<(), Error> {
+		let serialized_wsm: Vec<u8> = WebSocketMessage {
+			mtype: WebSocketMessageType::Binary,
+			payload: vec![1, 2, 3],
+			mask: false,
+			header_info: None,
+		}
+		.into();
+		assert_eq!(serialized_wsm, [130, 3, 1, 2, 3]);
 
 		Ok(())
 	}
