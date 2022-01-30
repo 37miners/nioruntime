@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime_log"
-version = "0.0.2-beta1"
+version = "0.0.2"
 authors = ["BMW Developers"]
 description = "utilities for nioruntime"
 license = "Apache-2.0"
