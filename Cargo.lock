@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "built",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_err"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "base64",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_evh"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "errno",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_http"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "base64",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_log"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "chrono",
  "failure",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_tor"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "chrono",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_util"
-version = "0.0.2"
+version = "0.0.3-beta1"
 dependencies = [
  "backtrace",
  "byteorder",
