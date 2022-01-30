@@ -616,6 +616,7 @@ macro_rules! do_log {
 
 					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
 					let _ = $log.update_show_timestamp($show_ts);
+					let _ = $log.update_show_log_level($show_ts);
 
 						if $level >= LOG_LEVEL {
                                         		match $log.log_level(&format!($a), $level) {
@@ -645,6 +646,7 @@ macro_rules! do_log {
 
 					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
 					let _ = $log.update_show_timestamp($show_ts);
+					let _ = $log.update_show_log_level($show_ts);
 
 					if $level >= LOG_LEVEL {
                                         	match $log.log_level(&format!($a, $($b)*), $level) {
