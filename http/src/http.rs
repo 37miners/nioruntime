@@ -377,8 +377,6 @@ pub struct ConnData {
 	begin_request_time: u128,
 	is_websocket: bool,
 	is_closed_websocket: bool,
-	is_open_websocket: bool,
-	open_queue: Vec<WebSocketMessage>,
 	data: Option<u128>,
 }
 
@@ -397,19 +395,8 @@ impl ConnData {
 			begin_request_time: 0,
 			is_websocket: false,
 			is_closed_websocket: false,
-			is_open_websocket: false,
-			open_queue: vec![],
 			data: None,
 		}
-	}
-
-	pub fn is_ws_open(&self) -> bool {
-		self.is_open_websocket
-	}
-
-	pub fn add_open_queue(&mut self, message: WebSocketMessage) -> Result<(), Error> {
-		self.open_queue.push(message);
-		Ok(())
 	}
 
 	pub fn set_data(&mut self, data: u128) -> Result<(), Error> {
@@ -2371,18 +2358,7 @@ impl HttpServer {
 									header_info: Some(header_info),
 								},
 							)? {
-								true => {
-									Self::send_websocket_handshake_response(&wh, key, sha1)?;
-
-									// we send the enqueued messages since we're now
-									// connected to the websocket
-									conn_data.is_open_websocket = true;
-									let list = conn_data.open_queue.clone();
-									for message in list {
-										send_websocket_message(conn_data, &message)?;
-									}
-									conn_data.open_queue.clear();
-								}
+								true => Self::send_websocket_handshake_response(&wh, key, sha1)?,
 								false => {
 									// if handler returns false, close connection.
 									send_websocket_message(
