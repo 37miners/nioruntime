@@ -30,6 +30,7 @@ pub enum WebSocketMessageType {
 	Ping,
 	Pong,
 	Open,
+	Accept,
 }
 
 #[derive(Debug, PartialEq, Clone)]

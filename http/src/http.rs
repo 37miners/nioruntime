@@ -2352,13 +2352,26 @@ impl HttpServer {
 							match (config.ws_handler)(
 								conn_data,
 								WebSocketMessage {
-									mtype: WebSocketMessageType::Open,
+									mtype: WebSocketMessageType::Accept,
 									payload: vec![],
 									mask: false,
 									header_info: Some(header_info),
 								},
 							)? {
-								true => Self::send_websocket_handshake_response(&wh, key, sha1)?,
+								true => {
+									Self::send_websocket_handshake_response(&wh, key, sha1)?;
+									// now that it's accepted, send open
+
+									let _ = (config.ws_handler)(
+										conn_data,
+										WebSocketMessage {
+											mtype: WebSocketMessageType::Open,
+											payload: vec![],
+											mask: false,
+											header_info: None,
+										},
+									);
+								}
 								false => {
 									// if handler returns false, close connection.
 									send_websocket_message(
