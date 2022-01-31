@@ -2105,7 +2105,9 @@ impl HttpServer {
 				let diff = since_start - http_context.last_log_queue_overflow_message_time;
 				// print this a maximum of once per 5 seconds
 				if diff > 5_000_000 {
-					println!(
+					log_multi!(
+						WARN,
+						MAIN_LOG,
 						"WARNING: log queue overflow. More than config.max_log_queue={} items queued. Dropping item(s).",
 						http_config.max_log_queue,
 					);
