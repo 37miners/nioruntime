@@ -165,7 +165,7 @@ fn get_frame_header_info(buffer: &mut Vec<u8>) -> Result<Option<FrameHeaderInfo>
 	let start_content;
 	if len < 2 {
 		// not enough to even start parsing
-		debug!("return none 1");
+		debug!("return none 1, len = {}", len);
 		return Ok(None);
 	}
 
@@ -251,7 +251,7 @@ fn get_frame_header_info(buffer: &mut Vec<u8>) -> Result<Option<FrameHeaderInfo>
 	} else if first_payload_bits == 127 {
 		start_content = 14;
 		if len < 14 + payload_len {
-			debug!("return none 8");
+			debug!("return none 8: payload_len={},len={}", payload_len, len);
 			return Ok(None);
 		}
 		BigEndian::read_u32(&buffer[10..14])
@@ -340,6 +340,7 @@ fn build_message(
 
 	let mut masking_bytes = [0u8; 4];
 	let mut mtype = WebSocketMessageType::Text;
+	let mut itt = 0;
 	let mut mask = false;
 
 	for (header, offset) in frames {
@@ -358,18 +359,21 @@ fn build_message(
 		}
 		payload.append(&mut ndata.to_vec());
 
-		// take the type of the last frame
-		mtype = match header.ftype {
-			FrameType::Text => WebSocketMessageType::Text,
-			FrameType::Binary => WebSocketMessageType::Binary,
-			FrameType::Ping => WebSocketMessageType::Ping,
-			FrameType::Pong => WebSocketMessageType::Pong,
-			FrameType::Close => WebSocketMessageType::Close,
-			_ => WebSocketMessageType::Text,
-		};
+		// take the type of the first frame
+		if itt == 0 {
+			mtype = match header.ftype {
+				FrameType::Text => WebSocketMessageType::Text,
+				FrameType::Binary => WebSocketMessageType::Binary,
+				FrameType::Ping => WebSocketMessageType::Ping,
+				FrameType::Pong => WebSocketMessageType::Pong,
+				FrameType::Close => WebSocketMessageType::Close,
+				_ => WebSocketMessageType::Text,
+			};
 
-		// same for mask
-		mask = header.mask;
+			// same for mask
+			mask = header.mask;
+		}
+		itt += 1;
 	}
 
 	Ok(WebSocketMessage {
@@ -397,9 +401,9 @@ pub fn process_websocket_data(
 	let mut ret = false;
 	let buffer = conn_data.get_buffer();
 	let len = buffer.len();
-	debug!("websocket.rs data[{}] = {:?}", len, buffer);
+	debug!("websocket.rs data[{}]", len);
 	let messages = build_messages(buffer)?;
-
+	debug!("message count = {}", messages.len());
 	// send the messages to the callback.
 	for message in messages {
 		if message.mtype == WebSocketMessageType::Close {

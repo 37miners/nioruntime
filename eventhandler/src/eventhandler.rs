@@ -71,7 +71,7 @@ use wepoll_sys::{
 info!();
 
 const MAIN_LOG: &str = "mainlog";
-const BUFFER_SIZE: usize = 1024;
+const BUFFER_SIZE: usize = 10 * 1024;
 const TLS_CHUNKS: usize = 32768;
 const MAX_EVENTS: i32 = 100;
 #[cfg(target_os = "windows")]
