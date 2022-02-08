@@ -495,6 +495,7 @@ pub struct HttpServer {
 	listener: Option<TcpListener>,
 	onion_address: Option<String>,
 	onion_secret: Option<ExpandedSecretKey>,
+	onion_bytes: Option<[u8; 64]>,
 	pub http_context: Option<Arc<RwLock<HttpContext>>>,
 	_tor_process: Option<Arc<RwLock<TorProcess>>>,
 }
@@ -537,9 +538,14 @@ impl HttpServer {
 			listener: None,
 			onion_address: None,
 			onion_secret: None,
+			onion_bytes: None,
 			http_context: None,
 			_tor_process: None,
 		}
+	}
+
+	pub fn secret_bytes(&self) -> Result<[u8; 64], Error> {
+		Ok(*self.onion_bytes.as_ref().unwrap_or(&[0u8; 64]))
 	}
 
 	pub fn tor_sign(&self, message: &[u8]) -> Result<[u8; 64], Error> {
@@ -704,6 +710,7 @@ impl HttpServer {
 			let mut buffer = vec![0; metadata.len() as usize];
 			f.read(&mut buffer)?;
 			let secret_bytes = &buffer[32..];
+			self.onion_bytes = Some(secret_bytes.try_into()?);
 			self.onion_secret = Some(ExpandedSecretKey::from_bytes(secret_bytes)?);
 		}
 
@@ -949,7 +956,6 @@ impl HttpServer {
 				..Default::default()
 			}
 		)?;
-
 		Ok(())
 	}
 
