@@ -545,7 +545,10 @@ impl HttpServer {
 	}
 
 	pub fn secret_bytes(&self) -> Result<[u8; 64], Error> {
-		Ok(*self.onion_bytes.as_ref().unwrap_or(&[0u8; 64]))
+		match self.onion_bytes.as_ref() {
+			Some(secret_bytes) => Ok(*secret_bytes),
+			None => Err(ErrorKind::NotOnion(format!("tor not configured.")).into()),
+		}
 	}
 
 	pub fn tor_sign(&self, message: &[u8]) -> Result<[u8; 64], Error> {
