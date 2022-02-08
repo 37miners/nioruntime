@@ -274,7 +274,7 @@ fn get_frame_header_info(buffer: &mut Vec<u8>) -> Result<Option<FrameHeaderInfo>
 	}))
 }
 
-fn build_messages(buffer: &mut Vec<u8>) -> Result<Vec<WebSocketMessage>, Error> {
+pub fn build_messages(buffer: &mut Vec<u8>) -> Result<Vec<WebSocketMessage>, Error> {
 	let mut ret = vec![];
 	let mut headers = vec![];
 	let mut offset = 0;

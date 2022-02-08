@@ -20,5 +20,6 @@ pub use crate::http::{
 };
 
 pub use crate::websocket::{
-	process_websocket_data, send_websocket_message, WebSocketMessage, WebSocketMessageType,
+	build_messages, process_websocket_data, send_websocket_message, WebSocketMessage,
+	WebSocketMessageType,
 };
