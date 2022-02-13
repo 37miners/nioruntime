@@ -230,8 +230,31 @@ impl LogImpl {
 				.unwrap_or(0) + 3;
 		}
 
+		let mut found_logger = false;
+		let mut found_frame = false;
+		let mut logged_from_file = "unknown".to_string();
+		nioruntime_deps::backtrace::trace(|frame| {
+			nioruntime_deps::backtrace::resolve_frame(frame, |symbol| {
+				if let Some(filename) = symbol.filename() {
+					let filename = filename.display().to_string();
+					let lineno = match symbol.lineno() {
+						Some(lineno) => lineno.to_string(),
+						None => "".to_string(),
+					};
+					if filename.find("nioruntime/log/src/logger.rs").is_some() {
+						found_logger = true;
+					}
+					if filename.find("nioruntime/log/src/logger.rs").is_none() && found_logger {
+						logged_from_file = format!("{}:{}", filename, lineno);
+						found_frame = true;
+					}
+				}
+			});
+			!found_frame
+		});
+
 		let line_num_text = if self.config.show_line_num {
-			format!("[{}:{}]: ", file!(), line!())
+			format!("[{}]: ", logged_from_file)
 		} else {
 			"".to_string()
 		};
@@ -690,7 +713,7 @@ mod tests {
 		log.log(INFO, "0123")?;
 
 		let text = std::fs::read_to_string(".test_log.nio/test6.log")?;
-		assert_eq!(text.find("logger.rs"), Some(32));
+		assert_eq!(text.find("]: 0").unwrap() > 20, true);
 
 		// with show_log_level too
 		let mut log = Log::new();
@@ -705,7 +728,7 @@ mod tests {
 		log.log(INFO, "0123")?;
 
 		let text = std::fs::read_to_string(".test_log.nio/test7.log")?;
-		assert_eq!(text.find("logger.rs"), Some(39));
+		assert_eq!(text.find("]: 0").unwrap() > 20, true);
 
 		// update format
 		let mut log = Log::new();
@@ -722,17 +745,17 @@ mod tests {
 		assert_eq!(log.get_show_log_level()?, true);
 		assert_eq!(log.get_show_line_num()?, true);
 		log.log(INFO, "1line")?;
-		log.update_show_timestamp(false)?;
-		assert_eq!(log.get_show_timestamp()?, false);
+		log.update_show_line_num(false)?;
+		assert_eq!(log.get_show_timestamp()?, true);
 		assert_eq!(log.get_show_log_level()?, true);
-		assert_eq!(log.get_show_line_num()?, true);
+		assert_eq!(log.get_show_line_num()?, false);
 		log.log(INFO, "2line")?;
 		log.update_show_log_level(false)?;
-		assert_eq!(log.get_show_timestamp()?, false);
+		assert_eq!(log.get_show_timestamp()?, true);
 		assert_eq!(log.get_show_log_level()?, false);
-		assert_eq!(log.get_show_line_num()?, true);
+		assert_eq!(log.get_show_line_num()?, false);
 		log.log(INFO, "3line")?;
-		log.update_show_line_num(false)?;
+		log.update_show_timestamp(false)?;
 		assert_eq!(log.get_show_timestamp()?, false);
 		assert_eq!(log.get_show_log_level()?, false);
 		assert_eq!(log.get_show_line_num()?, false);
@@ -762,13 +785,13 @@ mod tests {
 		let split: Vec<&str> = text.split("\n").collect();
 
 		assert_eq!(split.len(), 8);
-		assert_eq!(split[0].find("1line"), Some(55));
-		assert_eq!(split[1].find("2line"), Some(32));
-		assert_eq!(split[2].find("3line"), Some(25));
+		assert_eq!(split[0].find("1line").unwrap() > 55, true);
+		assert_eq!(split[1].find("2line"), Some(30));
+		assert_eq!(split[2].find("3line"), Some(23));
 		assert_eq!(split[3].find("4line"), Some(0));
 		assert_eq!(split[4].find("5line"), Some(7));
 		assert_eq!(split[5].find("6line"), Some(30));
-		assert_eq!(split[6].find("7line"), Some(55));
+		assert_eq!(split[6].find("7line").unwrap() > 55, true);
 		assert_eq!(split[7].find("8line"), None); // empty last line
 
 		// file header
