@@ -1,0 +1,26 @@
+[package]
+name = "nioruntime_deps"
+version = "0.0.3-beta1"
+authors = ["37 Miners, LLC"]
+description = "dependencies for nioruntime"
+license = "Apache-2.0"
+repository = "https://github.com/37miners/nioruntime"
+keywords = [ "rustlet", "nioruntime", "concord" ]
+exclude = ["**/*.nio"]
+edition = "2018"
+
+[dependencies]
+failure = "0.1"
+failure_derive = "0.1"
+futures = "0.3.0"
+lazy_static = "1.4.0"
+nix = "0.22.0"
+chrono = "0.4"
+rand = "0.8.4"
+ed25519-dalek = "1"
+serde = { version = "1.0", features = ["derive"] }
+byteorder = "1"
+bytes = "0.5"
+rustls = "0.20.0-beta1"
+base64 = "0.13.0"
+backtrace = "0.3.63"

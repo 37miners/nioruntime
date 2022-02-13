@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod logger;
+use nioruntime_deps::chrono;
+use nioruntime_deps::lazy_static;
+use nioruntime_deps::rand;
+use nioruntime_err;
 
-pub use crate::logger::{Log, LogConfig, RotationStatus, STATIC_LOG};
+mod logger;
+mod macros;
+
+pub use crate::logger::{Log, LogConfig, RotationStatus};
 pub use crate::logger::{DEBUG, ERROR, FATAL, INFO, TRACE, WARN};
+pub use crate::macros::STATIC_LOG;

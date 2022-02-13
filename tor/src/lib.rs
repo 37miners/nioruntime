@@ -18,8 +18,7 @@ use std::sync::{Arc, Mutex};
 
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
-extern crate log;
+
 pub use secp256k1zkp as secp;
 
 pub mod config;

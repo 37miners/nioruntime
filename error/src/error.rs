@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use failure::{Backtrace, Context, Fail};
+use crate::failure::{Backtrace, Context, Fail};
 #[cfg(unix)]
-use nix::errno::Errno;
+use crate::nix::errno::Errno;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
@@ -59,8 +59,8 @@ pub enum ErrorKind {
 	#[fail(display = "Setup Error: {}", _0)]
 	SetupError(String),
 	/// Log not configured
-	#[fail(display = "Log not configured Error: {}", _0)]
-	LogNotConfigured(String),
+	#[fail(display = "Log configuration Error: {}", _0)]
+	LogConfigurationError(String),
 	/// OsString error
 	#[fail(display = "OsString Error: {}", _0)]
 	OsStringError(String),
@@ -214,8 +214,8 @@ impl From<ParseIntError> for Error {
 	}
 }
 
-impl From<rustls::Error> for Error {
-	fn from(e: rustls::Error) -> Error {
+impl From<crate::rustls::Error> for Error {
+	fn from(e: crate::rustls::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::TLSError(format!("{}", e))),
 		}
@@ -230,8 +230,8 @@ impl From<RecvError> for Error {
 	}
 }
 
-impl From<failure::Context<ErrorKind>> for Error {
-	fn from(e: failure::Context<ErrorKind>) -> Error {
+impl From<crate::failure::Context<ErrorKind>> for Error {
+	fn from(e: crate::failure::Context<ErrorKind>) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
 		}
@@ -254,8 +254,8 @@ impl From<std::string::FromUtf8Error> for Error {
 	}
 }
 
-impl From<base64::DecodeError> for Error {
-	fn from(e: base64::DecodeError) -> Error {
+impl From<crate::base64::DecodeError> for Error {
+	fn from(e: crate::base64::DecodeError) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::InternalError(format!("Base64 error: {}", e))),
 		}
@@ -273,8 +273,8 @@ impl From<std::array::TryFromSliceError> for Error {
 	}
 }
 
-impl From<ed25519_dalek::ed25519::Error> for Error {
-	fn from(e: ed25519_dalek::ed25519::Error) -> Error {
+impl From<crate::ed25519_dalek::ed25519::Error> for Error {
+	fn from(e: crate::ed25519_dalek::ed25519::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::InternalError(format!("dalek error: {}", e))),
 		}

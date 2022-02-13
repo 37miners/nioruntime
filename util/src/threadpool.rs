@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::executor::block_on;
-use lazy_static::lazy_static;
+use crate::backtrace;
+use crate::futures::executor::block_on;
+use crate::lazy_static::lazy_static;
+use crate::rand;
 use nioruntime_err::{Error, ErrorKind};
-use rand;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

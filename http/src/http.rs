@@ -1511,7 +1511,7 @@ impl HttpServer {
 			let mut auto_rotate_complete = false;
 			{
 				let static_log = &STATIC_LOG;
-				let log_map = static_log.lock();
+				let log_map = static_log.write();
 
 				match log_map {
 					Ok(mut log_map) => {
@@ -1671,7 +1671,7 @@ impl HttpServer {
 			let mut auto_rotate_complete = false;
 			{
 				let static_log = &STATIC_LOG;
-				let log_map = static_log.lock();
+				let log_map = static_log.write();
 
 				match log_map {
 					Ok(mut log_map) => {
@@ -1783,7 +1783,7 @@ impl HttpServer {
 			log_line = format!("{}{}", log_line, http_config.request_log_separator_char,);
 		}
 
-		log.log(&log_line)?;
+		log.log_level(&log_line, INFO)?;
 
 		Ok(())
 	}

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub use crate as niorumtime_util;
+
 /// A macro that is used to lock a mutex and return the appropriate error if the lock is poisoned.
 /// This code was used in many places, and this macro simplifies it.
 #[macro_export]
@@ -47,7 +49,7 @@ macro_rules! lockw {
 						.duration_since(std::time::UNIX_EPOCH)
 						.unwrap()
 						.as_millis();
-					let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+					let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 						.write()
 						.map_err(|e| {
 							let error: Error =
@@ -56,15 +58,15 @@ macro_rules! lockw {
 							error
 						})
 						.unwrap();
-					lock_monitor.insert(id, nioruntime_err::LockInfo { id, bt, time });
+					lock_monitor.insert(id, nioruntime_deps::LockInfo { id, bt, time });
 					match lock_monitor.get(&0) {
 						Some(_) => {}
 						None => {
 							let bt = backtrace::Backtrace::new();
-							lock_monitor.insert(0, nioruntime_err::LockInfo { id, bt, time });
+							lock_monitor.insert(0, nioruntime_deps::LockInfo { id, bt, time });
 							std::thread::spawn(move || loop {
 								std::thread::sleep(std::time::Duration::from_millis(10000));
-								let lock_monitor = match nioruntime_err::LOCK_MONITOR.read() {
+								let lock_monitor = match nioruntime_deps::LOCK_MONITOR.read() {
 									Ok(lock_monitor) => lock_monitor,
 									Err(e) => {
 										println!("Warning error obtaining read lock: {}", e);
@@ -100,7 +102,7 @@ macro_rules! lockw {
 		});
 
 		if is_locked {
-			let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+			let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 				.write()
 				.map_err(|e| {
 					let error: Error =
@@ -135,7 +137,7 @@ macro_rules! lockr {
 						.duration_since(std::time::UNIX_EPOCH)
 						.unwrap()
 						.as_millis();
-					let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+					let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 						.write()
 						.map_err(|e| {
 							let error: Error =
@@ -144,15 +146,15 @@ macro_rules! lockr {
 							error
 						})
 						.unwrap();
-					lock_monitor.insert(id, nioruntime_err::LockInfo { id, bt, time });
+					lock_monitor.insert(id, nioruntime_deps::LockInfo { id, bt, time });
 					match lock_monitor.get(&0) {
 						Some(_) => {}
 						None => {
 							let bt = backtrace::Backtrace::new();
-							lock_monitor.insert(0, nioruntime_err::LockInfo { id, bt, time });
+							lock_monitor.insert(0, nioruntime_deps::LockInfo { id, bt, time });
 							std::thread::spawn(move || loop {
 								std::thread::sleep(std::time::Duration::from_millis(10000));
-								let lock_monitor = match nioruntime_err::LOCK_MONITOR.read() {
+								let lock_monitor = match nioruntime_deps::LOCK_MONITOR.read() {
 									Ok(lock_monitor) => lock_monitor,
 									Err(e) => {
 										println!("Warning error obtaining read lock: {}", e);
@@ -188,7 +190,7 @@ macro_rules! lockr {
 		});
 
 		if is_locked {
-			let mut lock_monitor = nioruntime_err::LOCK_MONITOR
+			let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 				.write()
 				.map_err(|e| {
 					let error: Error =

@@ -16,6 +16,7 @@ nioruntime_evh  = { path = "../eventhandler" }
 nioruntime_log  = { path = "../log"          }
 nioruntime_tor  = { path = "../tor"          }
 nioruntime_err  = { path = "../error"        }
+nioruntime_deps = { path = "../deps" }
 
 grin_secp256k1zkp = { git = "https://github.com/bitcoinmw/rust-secp256k1-zkp", features = ["bullet-proof-sizing"] }
 

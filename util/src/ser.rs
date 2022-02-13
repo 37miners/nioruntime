@@ -19,8 +19,8 @@
 //! To use it simply implement `Writeable` or `Readable` and then use the
 //! `serialize` or `deserialize` functions on them as appropriate.
 
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
-use bytes::Buf;
+use crate::byteorder::{BigEndian, ByteOrder, ReadBytesExt};
+use crate::bytes::Buf;
 use nioruntime_err::{Error, ErrorKind};
 use std::io::{self, Read, Write};
 use std::marker;

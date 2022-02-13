@@ -12,15 +12,5 @@ edition = "2018"
 [dependencies]
 
 nioruntime_err = { path = "../error" }
+nioruntime_deps = { path = "../deps" }
 
-failure = "0.1"
-failure_derive = "0.1"
-futures = "0.3.0"
-lazy_static = "1.4.0"
-nix = "0.22.0"
-chrono = "0.4"
-rand = "0.8.4"
-serde = { version = "1.0", features = ["derive"] }
-byteorder = "1"
-bytes = "0.5"
-backtrace = "0.3.63"

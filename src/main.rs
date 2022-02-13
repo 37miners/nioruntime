@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-debug!();
-
 use byte_tools::copy;
 use byteorder::{LittleEndian, ReadBytesExt};
 use clap::load_yaml;
@@ -35,6 +33,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+debug!();
 
 const MAX_BUF: usize = 100_000;
 

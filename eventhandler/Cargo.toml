@@ -33,3 +33,4 @@ backtrace = "0.3.63"
 nioruntime_util = { path = "../util"  }
 nioruntime_log  = { path = "../log"   }
 nioruntime_err  = { path = "../error" }
+nioruntime_deps = { path = "../deps" }

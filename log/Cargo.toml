@@ -1,22 +1,15 @@
 [package]
 name = "nioruntime_log"
 version = "0.0.3-beta1"
-authors = ["BMW Developers"]
-description = "utilities for nioruntime"
+authors = ["37 Miners, LLC"]
+description = "nioruntime logging utilities"
 license = "Apache-2.0"
 repository = "https://github.com/37miners/nioruntime"
-keywords = [ "crypto", "nioruntime", "mimblewimble" ]
+keywords = [ "rustlet", "nioruntime", "concord" ]
 exclude = ["**/*.nio"]
 edition = "2018"
 
 [dependencies]
 
-nioruntime_util = { path = "../util" }
-nioruntime_err = { path = "../error" }
-failure = "0.1"
-failure_derive = "0.1"
-futures = "0.3.0"
-lazy_static = "1.4.0"
-nix = "0.22.0"
-chrono = "0.4"
-rand = "0.8.4"
+nioruntime_deps = { path = "../deps"  }
+nioruntime_err  = { path = "../error" }

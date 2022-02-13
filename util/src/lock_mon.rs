@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod macros;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-pub mod ser;
-pub mod threadpool;
+crate::lazy_static::lazy_static! {
+				pub static ref LOCK_MONITOR: Arc<RwLock<HashMap<u128, LockInfo>>> =
+								Arc::new(RwLock::new(HashMap::new()));
+}
 
-pub use nioruntime_deps;
-use nioruntime_deps::backtrace;
-use nioruntime_deps::byteorder;
-use nioruntime_deps::bytes;
-use nioruntime_deps::futures;
-use nioruntime_deps::lazy_static;
-use nioruntime_deps::rand;
+#[derive(Debug)]
+pub struct LockInfo {
+	pub bt: crate::backtrace::Backtrace,
+	pub time: u128,
+	pub id: u128,
+}

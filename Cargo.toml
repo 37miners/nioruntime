@@ -12,10 +12,11 @@ build = "src/build/build.rs"
 edition = "2018"
 
 [workspace]
-members = ["log", "http", "eventhandler", "util", "error"]
+members = ["http", "eventhandler", "util", "error", "deps", "log"]
 
 [dependencies]
 
+nioruntime_deps = { path = "./deps"         }
 nioruntime_log  = { path = "./log"          }
 nioruntime_http = { path = "./http"         }
 nioruntime_util = { path = "./util"         }

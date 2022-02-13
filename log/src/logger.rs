@@ -16,846 +16,63 @@
 
 //! A logging library.
 
-use chrono::{DateTime, Local, Utc};
-use lazy_static::lazy_static;
-use nioruntime_err::{Error, ErrorKind};
-use std::collections::HashMap;
+use crate::chrono::{DateTime, Local, Utc};
+use crate::nioruntime_err::{Error, ErrorKind};
+use crate::rand::random;
 use std::convert::TryInto;
 use std::fs::{canonicalize, metadata, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Instant;
 
+/// Trace level of logging. Should be used for very frequent logging that is only used to debug.
 pub const TRACE: i32 = 0;
+/// Debug level of logging. Should only be used for debugging information.
 pub const DEBUG: i32 = 1;
+/// Info level of logging. For displaying information that is generally useful to the user.
 pub const INFO: i32 = 2;
+/// Warn level of logging. Used to warn of a possible problem.
 pub const WARN: i32 = 3;
+/// Error level of logging. Used to indicate an error has occured that the user should know about.
 pub const ERROR: i32 = 4;
+/// Fatal level of logging. Used to indicate a fatal error has occured and that the program might
+/// have halted.
 pub const FATAL: i32 = 5;
-pub const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
-lazy_static! {
-	/// This is the static holder of all log objects. Generally this
-	/// should not be called directly. See [`log`] instead.
-	pub static ref STATIC_LOG: Arc<Mutex<HashMap<String, Log>>> = Arc::new(Mutex::new(HashMap::new()));
-	static ref START_TIME: Instant = Instant::now();
-}
+const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
-/// Log at the 'fatal' (5) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`trace`] [`debug`], [`info`], [`warn`], or [`error`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// fatal!(); // set log level to fatal "5"
-///
-/// let abc = 123;
-/// fatal!("my value = {}", abc);
-/// fatal!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-
-macro_rules! fatal {
-        () => {
-                nioruntime_log::do_log!(nioruntime_log::FATAL);
-        };
-        ($a:expr) => {
-                {
-                        nioruntime_log::log!(nioruntime_log::FATAL, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log!(nioruntime_log::FATAL, $a, $($b)*);
-                }
-        };
-}
-
-/// Just like [`fatal`], but with no timestamp.
-#[macro_export]
-macro_rules! fatal_no_ts {
-        ($a:expr) => {
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::FATAL, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::FATAL, $a, $($b)*);
-                }
-        };
-}
-
-/// Log at the 'error' (4) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`trace`], [`debug`], [`info`], [`warn`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// error!(); // set log level to error "4"
-///
-/// let abc = 123;
-/// error!("my value = {}", abc);
-/// error!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! error {
-        () => {
-                nioruntime_log::do_log!(nioruntime_log::ERROR);
-        };
-        ($a:expr) => {
-                {
-                        nioruntime_log::log!(nioruntime_log::ERROR, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log!(nioruntime_log::ERROR, $a, $($b)*);
-                }
-        };
-}
-
-/// Just like [`error`], but with no timestamp.
-#[macro_export]
-macro_rules! error_no_ts {
-        ($a:expr) => {
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::ERROR, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::ERROR, $a, $($b)*);
-                }
-        };
-}
-
-/// Log at the 'warn' (3) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`trace`], [`debug`], [`info`], [`error`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// warn!(); // set log level to warn "3"
-///
-/// let abc = 123;
-/// warn!("my value = {}", abc);
-/// warn!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! warn {
-        () => {
-                nioruntime_log::do_log!(nioruntime_log::WARN);
-        };
-        ($a:expr) => {
-		{
-                	nioruntime_log::log!(nioruntime_log::WARN, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	nioruntime_log::log!(nioruntime_log::WARN, $a, $($b)*);
-		}
-        };
-}
-
-/// Just like [`warn`], but with no timestamp.
-#[macro_export]
-macro_rules! warn_no_ts {
-        ($a:expr) => {
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::WARN, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::WARN, $a, $($b)*);
-		}
-        };
-}
-
-/// Log at the 'info' (2) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`trace`], [`debug`], [`warn`], [`error`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// info!(); // set log level to info "2"
-///
-/// let abc = 123;
-/// info!("my value = {}", abc);
-/// info!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! info {
-	() => {
-		nioruntime_log::do_log!(nioruntime_log::INFO);
-	};
-        ($a:expr) => {
-                {
-                	nioruntime_log::log!(nioruntime_log::INFO, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	nioruntime_log::log!(nioruntime_log::INFO, $a, $($b)*);
-		}
-        };
-}
-
-/// Just like [`info`], but with no timestamp.
-#[macro_export]
-macro_rules! info_no_ts {
-        ($a:expr) => {
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::INFO, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::INFO, $a, $($b)*);
-		}
-        };
-}
-
-/// Log at the 'debug' (1) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`trace`], [`info`], [`warn`], [`error`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// debug!(); // set log level to debug "1"
-///
-/// let abc = 123;
-/// debug!("my value = {}", abc);
-/// debug!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! debug {
-	() => {
-		nioruntime_log::do_log!(nioruntime_log::DEBUG);
-	};
-        ($a:expr) => {
-                {
-                	log!(nioruntime_log::DEBUG, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	log!(nioruntime_log::DEBUG, $a, $($b)*);
-		}
-        };
-}
-
-/// Just like [`debug`], but with no timestamp.
-#[macro_export]
-macro_rules! debug_no_ts {
-        ($a:expr) => {
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::DEBUG, $a);
-		}
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                	nioruntime_log::log_no_ts!(nioruntime_log::DEBUG, $a, $($b)*);
-		}
-        };
-}
-
-/// Log at the 'trace' (0) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
-/// Also see [`debug`], [`info`], [`warn`], [`error`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// trace!(); // set log level to trace "0"
-///
-/// let abc = 123;
-/// trace!("my value = {}", abc);
-/// trace!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! trace {
-        () => {
-                nioruntime_log::do_log!(nioruntime_log::TRACE);
-        };
-        ($a:expr) => {
-                {
-                        nioruntime_log::log!(nioruntime_log::TRACE, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log!(nioruntime_log::TRACE, $a, $($b)*);
-                }
-        };
-}
-
-/// Just like [`trace`], but with no timestamp.
-#[macro_export]
-macro_rules! trace_no_ts {
-        ($a:expr) => {
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::TRACE, $a);
-                }
-        };
-        ($a:expr,$($b:tt)*)=>{
-                {
-                        nioruntime_log::log_no_ts!(nioruntime_log::TRACE, $a, $($b)*);
-                }
-        };
-}
-
-/// log_multi is identical to [`log`] except that the name of the logger is specified instead of using
-/// the default logger.
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-/// // log level must be set before calling any logging function.
-/// // typically it is done at the top of a file so that it's easy to change.
-/// // but it can be done at any level or scope. The inner scope prevails.
-/// info!();
-///
-/// let abc = 123;
-/// log_multi!(nioruntime_log::WARN, "logger2", "hi");
-/// log_multi!(nioruntime_log::WARN, "logger2", "value = {}", abc);
-///
-/// ```
-#[macro_export]
-macro_rules! log_multi {
-	($level:expr, $a:expr, $b:expr) => {
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.lock();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => {
-						nioruntime_log::do_log!($level, true, log, $b);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						nioruntime_log::do_log!($level, true, log, $b);
-						log_map.insert($a.to_string(), log);
-					}
-				}
-			},
-			Err(e) => {
-				println!(
-					"Error: could not log '{}' due to PoisonError: {}",
-					format!($b),
-					e.to_string()
-				);
-			}
-		}
-	};
-	($level:expr, $a:expr,$b:expr,$($c:tt)*)=>{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.lock();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => {
-						nioruntime_log::do_log!($level, true, log, $b, $($c)*);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						nioruntime_log::do_log!($level, true, log, $b, $($c)*);
-						log_map.insert($a.to_string(), log);
-					}
-				}
-			},
-			Err(e) => {
-				println!(
-					"Error: could not log '{}' due to PoisonError: {}",
-					format!($b, $($c)*),
-					e.to_string()
-				);
-			},
-		}
-	};
-}
-
-/// The main logging macro. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros. The first
-/// parameter is the log level. To avoid specifying level, see [`trace`], [`debug`],
-/// [`info`], [`warn`], [`error`], or [`fatal`].
-/// # Examples
-/// ```
-/// use nioruntime_log::*;
-///
-/// info!(); // set log level to info "2"
-///
-/// let abc = 123;
-/// log!(nioruntime_log::INFO, "my value = {}", abc);
-/// log!(nioruntime_log::INFO, "hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
-/// ```
-#[macro_export]
-macro_rules! log {
-	($level:expr, $a:expr)=>{
-		{
-                	const DEFAULT_LOG: &str = "default";
-                	let static_log = &nioruntime_log::STATIC_LOG;
-                	let mut log_map = static_log.lock();
-			match log_map {
-				Ok(mut log_map) => {
-                	let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-                	match log {
-                        	Some(log) => {
-                                	nioruntime_log::do_log!($level, true, log, $a);
-                        	},
-                        	None => {
-                                	let mut log = nioruntime_log::Log::new();
-                                	nioruntime_log::do_log!($level, true, log, $a);
-                                	log_map.insert(DEFAULT_LOG.to_string(), log);
-                        	}
-                	}
-				},
-				Err(e) => {
-                                        println!(
-                                                "Error: could not log '{}' due to PoisonError: {}",
-                                                format!($a),
-                                                e.to_string()
-                                        );
-				},
-			}
-		}
-    	};
-	($level:expr, $a:expr,$($b:tt)*)=>{
-		{
-                        const DEFAULT_LOG: &str = "default";
-                        let static_log = &nioruntime_log::STATIC_LOG;
-                        let mut log_map = static_log.lock().unwrap();
-                        let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-                        match log {
-                                Some(log) => {
-                                        nioruntime_log::do_log!($level, true, log, $a, $($b)*);
-                                },
-                                None => {
-                                        let mut log = nioruntime_log::Log::new();
-                                        nioruntime_log::do_log!($level, true, log, $a, $($b)*);
-                                        log_map.insert(DEFAULT_LOG.to_string(), log);
-                                }
-                        }
-		}
-	}
-}
-
-/// Identical to [`log_no_ts`] except that the name of the logger is specified instead of using
-/// the default logger.
-/// # Examples
-///
-/// ```
-/// use nioruntime_log::*;
-///
-/// info!();
-///
-/// log_no_ts_multi!(2, "nondefaultlogger", "hi");
-/// log_no_ts_multi!(2, "nondefaultlogger", "value = {}", 123);
-/// ```
-///
-#[macro_export]
-macro_rules! log_no_ts_multi {
-        ($level:expr, $a:expr, $b:expr)=>{
-                {
-                        let static_log = &nioruntime_log::STATIC_LOG;
-                        let mut log_map = static_log.lock().unwrap();
-                        let log = log_map.get_mut($a);
-                        match log {
-                                Some(log) => {
-                                        { nioruntime_log::do_log!($level, false, log, $b); }
-                                },
-                                None => {
-                                        let mut log = nioruntime_log::Log::new();
-                                        { nioruntime_log::do_log!($level, false, log, $b); }
-                                        log_map.insert($a.to_string(), log);
-                                }
-                        }
-                }
-        };
-        ($level:expr, $a:expr,$b:expr,$($c:tt)*)=>{
-                {
-                        let static_log = &nioruntime_log::STATIC_LOG;
-                        let mut log_map = static_log.lock().unwrap();
-                        let log = log_map.get_mut($a);
-                        match log {
-                                Some(log) => {
-                                        { nioruntime_log::do_log!($level, false, log, $b, $($c)*) }
-                                },
-                                None => {
-                                        let mut log = nioruntime_log::Log::new();
-                                        { nioruntime_log::do_log!($level, false, log, $b, $($c)*) }
-                                        log_map.insert($a.to_string(), log);
-                                }
-                        }
-                }
-        };
-}
-
-/// Log using the default logger and don't print a timestamp. See [`log`] for more details on logging.
-/// # Examples
-///
-/// ```
-/// use nioruntime_log::*;
-///
-/// debug!();
-///
-/// log!(2, "hi");
-/// log_no_ts!(2, "message here");
-/// log_no_ts!(3, "my value = {}", 1);
-/// log!(2, "more data");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: hi
-/// // message here
-/// // my value = 1
-/// // [2021-08-09 19:41:37]: more data
-/// ```
-#[macro_export]
-macro_rules! log_no_ts {
-	($level:expr, $a:expr)=>{
-                {
-                        const DEFAULT_LOG: &str = "default";
-                        let static_log = &nioruntime_log::STATIC_LOG;
-                        let mut log_map = static_log.lock().unwrap();
-                        let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-                        match log {
-                                Some(log) => {
-                                        { nioruntime_log::do_log!($level, false, log, $a); }
-                                },
-                                None => {
-                                        let mut log = nioruntime_log::Log::new();
-                                        { nioruntime_log::do_log!($level, false, log, $a); }
-                                        log_map.insert(DEFAULT_LOG.to_string(), log);
-                                }
-                        }
-                }
-	};
-	($level:expr, $a:expr,$($b:tt)*)=>{
-		{
-
-                        const DEFAULT_LOG: &str = "default";
-                        let static_log = &nioruntime_log::STATIC_LOG;
-                        let mut log_map = static_log.lock().unwrap();
-                        let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-                        match log {
-                                Some(log) => {
-                                        { nioruntime_log::do_log!($level, false, log, $a, $($b)*) }
-                                },
-                                None => {
-                                        let mut log = nioruntime_log::Log::new();
-                                        { nioruntime_log::do_log!($level, false, log, $a, $($b)*) }
-                                        log_map.insert(DEFAULT_LOG.to_string(), log);
-                                }
-                        }
-		}
-	};
-}
-
-/// Generally, this macro should not be used directly. It is used by the other macros. See [`log`] or [`info`] instead.
-#[macro_export]
-macro_rules! do_log {
-        ($level:expr)=>{
-					const LOG_LEVEL: i32 = $level;
-	};
-        ($level:expr, $show_ts:expr, $log:expr, $a:expr)=>{
-			{
-                                        // if not configured, use defaults
-                                        if !$log.is_configured() {
-                                                $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
-                                        }
-
-					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-
-					if $show_ts == false {
-						let _ = $log.update_show_timestamp($show_ts);
-						let _ = $log.update_show_log_level($show_ts);
-					}
-
-					if $level >= LOG_LEVEL {
-                                       		match $log.log_level(&format!($a), $level) {
-                                               		Ok(_) => {},
-                                               		Err(e) => {
-                                                       		println!(
-                                                               		"Logging of '{}' resulted in Error: {}",
-                                                               		format!($a),
-                                                               		e.to_string(),
-                                                       		);
-                                               		}
-                                       		}
-					}
-
-					let _ = $log.update_show_log_level(cur_show_log_level);
-					// always set to showing timestamp (as default)
-					let _ = $log.update_show_timestamp(true);
-
-			}
-        };
-        ($level:expr, $show_ts:expr, $log:expr, $a:expr, $($b:tt)*)=>{
-			{
-                                        // if not configured, use defaults
-                                        if !$log.is_configured() {
-                                                $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
-                                        }
-
-					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-					if $show_ts == false {
-						let _ = $log.update_show_timestamp($show_ts);
-						let _ = $log.update_show_log_level($show_ts);
-					}
-
-					if $level >= LOG_LEVEL {
-                                        	match $log.log_level(&format!($a, $($b)*), $level) {
-                                                	Ok(_) => {},
-                                                	Err(e) => {
-                                                        	println!(
-                                                                	"Logging of '{}' resulted in Error: {}",
-                                                                	format!($a, $($b)*),
-                                                                	e.to_string(),
-                                                        	);
-                                                	}
-                                        	}
-					}
-
-                                        let _ = $log.update_show_log_level(cur_show_log_level);
-                                        // always set to showing timestamp (as default)
-                                        let _ = $log.update_show_timestamp(true);
-			}
-        };
-}
-
-/// get_config_multi get's the LogConfig structure for the specified logger
-///
-/// A sample get_config_multi! call might look something like this:
-///
-/// ```
-/// use nioruntime_log::*;
-///
-/// info!();
-/// const MAIN_LOG: &str = "mainlog";
-///
-/// log_multi!(INFO, MAIN_LOG, "test");
-/// let mut config = get_config_multi!(MAIN_LOG).unwrap();
-///
-/// // print to stdout as well as log
-/// config.show_stdout = true;
-/// log_config_multi!(MAIN_LOG, config.clone());
-///
-///
-/// log_multi!(
-/// 	INFO,
-/// 	MAIN_LOG,
-/// 	"print to stdout as well",
-/// );
-///
-/// config.show_stdout = false;
-/// log_config_multi!(MAIN_LOG, config);
-///
-/// log_multi!(
-/// 	INFO,
-///	MAIN_LOG,
-/// 	"print only to log file",
-/// );
-/// ```
-///
-/// For full details on all parameters of LogConfig see [`LogConfig`].
-#[macro_export]
-macro_rules! get_config_multi {
-	($a:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.lock();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => match &log.params {
-						Some(params) => Ok(params.config.clone()),
-						None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
-							"no params found".to_string(),
-						)),
-					},
-					None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
-						"no config found".to_string(),
-					)),
-				}
-			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
-			.into()),
-		}
-	}};
-}
-
-/// log_config_multi is identical to [`log_config`] except that the name of the logger is specified instead of using
-/// the default logger.
-///
-/// A sample log_config_multi! call might look something like this:
-///
-/// ```
-/// use nioruntime_log::*;
-///
-/// info!();
-///
-/// log_config_multi!(
-///     "nondefaultlogger",
-///     LogConfig {
-///         max_age_millis: 10000, // set log rotations to every 10 seconds
-///         max_size: 10000, // set log rotations to every 10,000 bytes
-///         ..Default::default()
-///     }
-/// );
-/// ```
-///
-/// For full details on all parameters of LogConfig see [`LogConfig`].
-#[macro_export]
-macro_rules! log_config_multi {
-	($a:expr, $b:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.lock();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => log.config_with_object($b),
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						let ret = log.config_with_object($b);
-						log_map.insert($a.to_string(), log);
-						ret
-					}
-				}
-			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
-			.into()),
-		}
-	}};
-}
-
-/// This macro may be used to configure logging. If it is not called. The default LogConfig is used.
-/// By default logging is only done to stdout.
-/// A sample log_config! call might look something like this:
-///
-/// ```
-/// use nioruntime_log::*;
-///
-/// info!();
-///
-/// log_config!(nioruntime_log::LogConfig {
-/// 	max_age_millis: 10000, // set log rotations to every 10 seconds
-/// 	max_size: 10000, // set log rotations to every 10,000 bytes
-/// 	..Default::default()
-/// });
-/// ```
-/// For full details on all parameters of LogConfig see [`LogConfig`].
-#[macro_export]
-macro_rules! log_config {
-	($a:expr) => {{
-		const DEFAULT_LOG: &str = "default";
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.lock();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-				match log {
-					Some(log) => log.config_with_object($a),
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						let ret = log.config_with_object($a);
-						log_map.insert(DEFAULT_LOG.to_string(), log);
-						ret
-					}
-				}
-			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
-			.into()),
-		}
-	}};
-}
-
-/// The main logging object
+/// The main logging object. Usually this is used through macros.
 pub struct Log {
-	pub params: Option<LogParams>,
+	params: Option<LogImpl>,
 }
 
-/// The data that is held by the Log object
-pub struct LogParams {
+/// The data that is held by the Log object.
+struct LogImpl {
 	file: Option<File>,
 	cur_size: u64,
-	init_age_millis: u128,
-	pub config: LogConfig,
+	last_rotation: Instant,
+	config: LogConfig,
 	has_rotated: bool,
 }
 
+/// Result of a [`Log::rotation_status`] function call.
+#[derive(Debug, PartialEq)]
 pub enum RotationStatus {
+	/// A rotation is not needed.
 	NotNeeded,
+	/// A rotation is needed.
 	Needed,
+	/// A rotation has occurred automatically.
 	AutoRotated,
 }
 
-/// Log Config object.
+/// Log Config object. Passed into the [`Log::init`] function.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
 	/// The path to the log file. By default, logging is only printed to standard output.
-	/// This default behaviour is acheived by setting file_path to an empty string.
+	/// This default behaviour is acheived by setting file_path to None.
 	/// If you wish to log to a file, this parameter must be set to a valid path.
-	pub file_path: String,
+	pub file_path: Option<String>,
 	/// The maximum size in bytes of the log file before a log rotation occurs. By default,
 	/// this is set to 10485760 bytes (10 mb). After a log rotation, a new file named:
 	/// <log_name>.r_<month>_<day>_<year>_<hour>-<minute>-<second>_<random_number>.log
@@ -872,18 +89,23 @@ pub struct LogConfig {
 	pub file_header: String,
 	/// Whether or not to show the timestamp. By default, this is set to true.
 	pub show_timestamp: bool,
-	/// Whether or not to print the log lines to standard output. By default, this is set to true.
+	/// Whether or not to print the log lines to standard output. Default is true.
 	pub show_stdout: bool,
-	/// delete the rotated log immidiately (only used for testing)
+	/// delete the rotated log immidiately (only used for testing). Default is false.
 	pub delete_rotation: bool,
-	/// display the log level
+	/// display the log level. Default is true.
 	pub show_log_level: bool,
+	/// display the line number and file name that the log request came from. Default is true.
+	pub show_line_num: bool,
+	/// automatically rotate the log file. Default is true.
+	pub auto_rotate: bool,
 }
 
+/// Return a default logging object.
 impl Default for LogConfig {
 	fn default() -> Self {
 		LogConfig {
-			file_path: "".to_string(),
+			file_path: None,
 			max_size: 1024 * 1024 * 10,     // 10 mb
 			max_age_millis: 60 * 60 * 1000, // 1 hr
 			file_header: "".to_string(),
@@ -891,59 +113,77 @@ impl Default for LogConfig {
 			show_stdout: true,
 			delete_rotation: false,
 			show_log_level: true,
+			show_line_num: true,
+			auto_rotate: true,
 		}
 	}
 }
 
-impl LogParams {
+impl LogImpl {
 	/// This function rotates logs
 	pub fn rotate(&mut self) -> Result<(), Error> {
+		// get date and create a custom rotation file name.
 		let now: DateTime<Utc> = Utc::now();
 		let rotation_string = now.format(".r_%m_%d_%Y_%T").to_string().replace(":", "-");
-		let file_path = match self.config.file_path.rfind(".") {
-			Some(pos) => &self.config.file_path[0..pos],
-			_ => &self.config.file_path,
+		let original_file_path = match &self.config.file_path {
+			Some(file_path) => file_path,
+			None => {
+				// not logging to disk. No need to rotate
+				return Ok(());
+			}
 		};
-		let file_path = format!(
+		let new_file_path = match original_file_path.rfind(".") {
+			Some(pos) => &original_file_path[0..pos],
+			_ => &original_file_path,
+		};
+
+		let new_file_path = format!(
 			"{}{}_{}.log",
-			file_path,
+			new_file_path,
 			rotation_string,
-			rand::random::<u64>(),
+			random::<u64>(),
 		);
+
+		// if delete rotation is set (testing) the log rotation is deleted.
 		if self.config.delete_rotation {
-			std::fs::remove_file(&self.config.file_path)?;
+			std::fs::remove_file(&original_file_path)?;
 		} else {
-			std::fs::rename(&self.config.file_path, file_path.clone())?;
+			std::fs::rename(&original_file_path, new_file_path.clone())?;
 		}
+
+		// open the original log file location which has been renamed and continue logging.
 		self.file = Some(
 			OpenOptions::new()
 				.append(true)
 				.create(true)
-				.open(&self.config.file_path)?,
+				.open(&original_file_path)?,
 		);
 
-		let start_time = *START_TIME;
-		let time_now = Instant::now().duration_since(start_time).as_millis();
-
-		let mut file = self.file.as_ref().unwrap();
-		let line_bytes = self.config.file_header.as_bytes();
-		if line_bytes.len() > 0 {
-			file.write(line_bytes)?;
-			file.write(&[10u8])?; // new line
+		// If there's a file header, write it to the new file.
+		match self.file.as_ref() {
+			Some(mut file) => {
+				let line_bytes = self.config.file_header.as_bytes();
+				if line_bytes.len() > 0 {
+					file.write(line_bytes)?;
+					file.write(&[10u8])?; // new line
+				}
+				self.last_rotation = Instant::now();
+				self.cur_size = self.config.file_header.len() as u64 + 1;
+			}
+			None => {}
 		}
-		self.init_age_millis = time_now;
-		self.cur_size = self.config.file_header.len() as u64 + 1;
 
 		Ok(())
 	}
 
+	/// Get the [`RotationStatus`] of the log.
 	pub fn rotation_status(&mut self) -> Result<RotationStatus, Error> {
 		// get current time
-		let start_time = *START_TIME;
-		let time_now = Instant::now().duration_since(start_time).as_millis();
+		let instant_now = Instant::now();
 		if self.file.is_some()
 			&& (self.cur_size >= self.config.max_size
-				|| time_now.saturating_sub(self.init_age_millis) > self.config.max_age_millis)
+				|| instant_now.duration_since(self.last_rotation).as_millis()
+					> self.config.max_age_millis)
 		{
 			Ok(RotationStatus::Needed)
 		} else if self.has_rotated {
@@ -956,6 +196,20 @@ impl LogParams {
 
 	/// The actual logging function, handles rotation if needed
 	pub fn log(&mut self, line: &str, level: i32) -> Result<(), Error> {
+		// get current time
+		let instant_now = Instant::now();
+		let time_since_rotation = instant_now.duration_since(self.last_rotation).as_millis();
+
+		// check if rotation is needed
+		if self.config.auto_rotate
+			&& self.file.is_some()
+			&& (self.cur_size >= self.config.max_size
+				|| time_since_rotation > self.config.max_age_millis)
+		{
+			self.has_rotated = true;
+			self.rotate()?;
+		}
+
 		let line_bytes = line.as_bytes(); // get line as bytes
 		self.cur_size += line_bytes.len() as u64 + 1; // increment cur_size
 		if self.config.show_timestamp {
@@ -971,18 +225,13 @@ impl LogParams {
 				.try_into()
 				.unwrap_or(0) + 3;
 		}
-		// get current time
-		let start_time = *START_TIME;
-		let time_now = Instant::now().duration_since(start_time).as_millis();
 
-		// check if rotation is needed
-		if self.file.is_some()
-			&& (self.cur_size >= self.config.max_size
-				|| time_now.saturating_sub(self.init_age_millis) > self.config.max_age_millis)
-		{
-			self.has_rotated = true;
-			self.rotate()?;
-		}
+		let line_num_text = if self.config.show_line_num {
+			format!("[{}:{}]: ", file!(), line!())
+		} else {
+			"".to_string()
+		};
+		self.cur_size += line_num_text.len().try_into().unwrap_or(0);
 
 		// if we're showing the timestamp, print it
 		if self.config.show_timestamp {
@@ -1013,6 +262,18 @@ impl LogParams {
 			}
 		}
 
+		if line_num_text.len() > 0 {
+			match &mut self.file {
+				Some(file) => {
+					file.write(line_num_text.as_bytes())?;
+				}
+				None => {}
+			}
+			if self.config.show_stdout {
+				print!("{}", line_num_text);
+			}
+		}
+
 		// finally log the line followed by a newline.
 		if self.file.is_some() {
 			let mut file = self.file.as_ref().unwrap();
@@ -1035,42 +296,22 @@ impl Log {
 		Log { params: None }
 	}
 
+	/// Check if the log is configured
 	pub fn is_configured(&self) -> bool {
 		self.params.is_some()
 	}
 
-	/// configure with object
-	pub fn config_with_object(&mut self, config: LogConfig) -> Result<(), Error> {
-		self.config(
-			match config.file_path.len() == 0 {
-				true => None,
-				false => Some(config.file_path),
-			},
-			config.max_size,
-			config.max_age_millis,
-			config.show_timestamp,
-			&config.file_header,
-			config.show_stdout,
-			config.delete_rotation,
-			config.show_log_level,
-		)?;
-		Ok(())
-	}
+	/// Initialize the log file with the parameters in [`LogConfig`].
+	pub fn init(&mut self, mut config: LogConfig) -> Result<(), Error> {
+		if self.is_configured() {
+			return Err(
+				ErrorKind::LogConfigurationError("Log already configured".to_string()).into(),
+			);
+		}
 
-	/// configure the log
-	pub fn config(
-		&mut self,
-		file_path: Option<String>,
-		max_size: u64,
-		max_age_millis: u128,
-		show_timestamp: bool,
-		file_header: &str,
-		show_stdout: bool,
-		delete_rotation: bool,
-		show_log_level: bool,
-	) -> Result<(), Error> {
-		// create file with append option and create option
-		let file = match file_path.clone() {
+		let has_rotated = false;
+
+		let file = match config.file_path.clone() {
 			Some(file_path) => Some(
 				OpenOptions::new()
 					.append(true)
@@ -1080,17 +321,7 @@ impl Log {
 			None => None,
 		};
 
-		// get current size of the file
-		let mut cur_size = match file_path.clone() {
-			Some(file_path) => metadata(file_path)?.len(),
-			None => 0,
-		};
-
-		// age is only relative to start logging time
-		let start_time = *START_TIME;
-		let init_age_millis = Instant::now().duration_since(start_time).as_millis();
-
-		let file_path = match file_path {
+		config.file_path = match config.file_path {
 			Some(file_path) => Some(
 				canonicalize(PathBuf::from(file_path))?
 					.into_os_string()
@@ -1099,8 +330,14 @@ impl Log {
 			None => None,
 		};
 
-		let file_header = file_header.to_string();
-		if cur_size == 0 && file_path.is_some() {
+		// get current size of the file
+		let mut cur_size = match config.file_path.clone() {
+			Some(file_path) => metadata(file_path)?.len(),
+			None => 0,
+		};
+
+		let file_header = config.file_header.to_string();
+		if cur_size == 0 && config.file_path.is_some() {
 			// add the header if the file is new
 			let line_bytes = file_header.as_bytes();
 			if line_bytes.len() > 0 {
@@ -1111,99 +348,435 @@ impl Log {
 			}
 		}
 
-		self.params = Some(LogParams {
+		let last_rotation = Instant::now();
+
+		self.params = Some(LogImpl {
+			config,
 			file,
 			cur_size,
-			init_age_millis,
-			config: LogConfig {
-				max_size,
-				file_path: file_path.unwrap_or("".to_string()),
-				max_age_millis,
-				show_timestamp,
-				file_header,
-				show_stdout,
-				delete_rotation,
-				show_log_level,
-			},
-			has_rotated: false,
+			last_rotation,
+			has_rotated,
 		});
 
 		Ok(())
 	}
 
-	// rotate the log
+	/// Rotate the log
 	pub fn rotate(&mut self) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => params.rotate(),
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
-	// check if a rotation is needed
+	/// Check if a rotation is needed
 	pub fn rotation_status(&mut self) -> Result<RotationStatus, Error> {
 		match self.params.as_mut() {
 			Some(params) => params.rotation_status(),
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
 	/// Entry point for logging
-	pub fn log(&mut self, line: &str) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.log(line, 10000)?;
-				Ok(())
-			}
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
-		}
-	}
-
-	pub fn log_level(&mut self, line: &str, level: i32) -> Result<(), Error> {
+	pub fn log(&mut self, level: i32, line: &str) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => {
 				params.log(line, level)?;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
+	/// Change the show_line_num setting to the show value.
+	pub fn update_show_line_num(&mut self, show: bool) -> Result<(), Error> {
+		match self.params.as_mut() {
+			Some(params) => {
+				params.config.show_line_num = show;
+				Ok(())
+			}
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		}
+	}
+
+	/// Get the show_line_num setting value.
+	pub fn get_show_line_num(&mut self) -> Result<bool, Error> {
+		match self.params.as_mut() {
+			Some(params) => Ok(params.config.show_line_num),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		}
+	}
+
+	/// Change the show_log_level setting to the show value.
 	pub fn update_show_log_level(&mut self, show: bool) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => {
 				params.config.show_log_level = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
+	/// Get the show_log_level setting value.
 	pub fn get_show_log_level(&mut self) -> Result<bool, Error> {
 		match self.params.as_mut() {
 			Some(params) => Ok(params.config.show_log_level),
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
-	/// Update the show_timestamp parameter for this log
+	/// Change the show_timestamp setting to the show value.
 	pub fn update_show_timestamp(&mut self, show: bool) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => {
 				params.config.show_timestamp = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
 	}
 
-	/// Update the show_stdout parameter for this log
+	/// Get the show_timestamp setting value.
+	pub fn get_show_timestamp(&mut self) -> Result<bool, Error> {
+		match self.params.as_mut() {
+			Some(params) => Ok(params.config.show_timestamp),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		}
+	}
+
+	/// Change the show_stdout setting to the show value.
 	pub fn update_show_stdout(&mut self, show: bool) -> Result<(), Error> {
 		match self.params.as_mut() {
 			Some(params) => {
 				params.config.show_stdout = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogNotConfigured("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
 		}
+	}
+
+	/// Get the show_stdout setting value.
+	pub fn get_show_stdout(&mut self) -> Result<bool, Error> {
+		match self.params.as_mut() {
+			Some(params) => Ok(params.config.show_stdout),
+			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::*;
+	use nioruntime_err::Error;
+
+	fn setup_test_dir() -> Result<(), Error> {
+		let _ = std::fs::remove_dir_all(".test_log.nio");
+		std::fs::create_dir_all(".test_log.nio")?;
+		Ok(())
+	}
+
+	fn tear_down_test_dir() -> Result<(), Error> {
+		std::fs::remove_dir_all(".test_log.nio")?;
+		Ok(())
+	}
+
+	#[test]
+	fn test_log() -> Result<(), Error> {
+		setup_test_dir()?;
+		let mut log = Log::new();
+
+		// default settings - no line num
+		let config = LogConfig {
+			file_path: Some(".test_log.nio/test1.log".to_string()),
+			show_line_num: false,
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(DEBUG, "with_level")?;
+		let text = std::fs::read_to_string(".test_log.nio/test1.log")?;
+		assert_eq!(text.chars().nth(23).unwrap(), '(');
+		assert_eq!(text.chars().nth(24).unwrap(), 'D');
+		assert_eq!(text.chars().nth(25).unwrap(), 'E');
+		assert_eq!(text.chars().nth(26).unwrap(), 'B');
+		assert_eq!(text.chars().nth(27).unwrap(), 'U');
+		assert_eq!(text.chars().nth(28).unwrap(), 'G');
+		assert_eq!(text.chars().nth(29).unwrap(), ')');
+		assert_eq!(text.chars().nth(30).unwrap(), ' ');
+		assert_eq!(text.chars().nth(31).unwrap(), 'w');
+
+		// no log level
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_log_level: false,
+			file_path: Some(".test_log.nio/test2.log".to_string()),
+			show_line_num: false,
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "test")?;
+		let text = std::fs::read_to_string(".test_log.nio/test2.log")?;
+
+		assert_eq!(text.chars().nth(23).unwrap(), 't');
+		assert_eq!(text.chars().nth(24).unwrap(), 'e');
+		assert_eq!(text.chars().nth(25).unwrap(), 's');
+		assert_eq!(text.chars().nth(26).unwrap(), 't');
+
+		// no timestamp/log level
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			file_path: Some(".test_log.nio/test3.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "test")?;
+		let text = std::fs::read_to_string(".test_log.nio/test3.log")?;
+
+		assert_eq!(text.chars().nth(0).unwrap(), 't');
+		assert_eq!(text.chars().nth(1).unwrap(), 'e');
+		assert_eq!(text.chars().nth(2).unwrap(), 's');
+		assert_eq!(text.chars().nth(3).unwrap(), 't');
+
+		// test rotation
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			max_size: 65,
+			file_path: Some(".test_log.nio/test4.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		for _ in 0..10 {
+			log.log(INFO, "01234567")?;
+		}
+
+		// there should be two files.
+		let paths = std::fs::read_dir(".test_log.nio").unwrap();
+		let mut count = 0;
+		for path in paths {
+			let path = path.unwrap().path().display().to_string();
+			if path.find(".test_log.nio/test4.log") == Some(0) {
+				let len = std::fs::metadata(path)?.len();
+				assert_eq!(len, 18);
+				count += 1;
+			} else if path.find(".test_log.nio/test4.r") == Some(0) {
+				let len = std::fs::metadata(path)?.len();
+				assert_eq!(len, 72);
+				count += 1;
+			}
+		}
+
+		assert_eq!(count, 2);
+
+		// test time based rotation
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			max_age_millis: 65,
+			file_path: Some(".test_log.nio/test5.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "0123")?;
+		log.log(DEBUG, "45678")?;
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		log.log(INFO, "9012345678")?;
+
+		// there should be two files.
+		let paths = std::fs::read_dir(".test_log.nio").unwrap();
+		let mut count = 0;
+		for path in paths {
+			let path = path.unwrap().path().display().to_string();
+			if path.find(".test_log.nio/test5.log") == Some(0) {
+				let len = std::fs::metadata(path)?.len();
+				assert_eq!(len, 11);
+				count += 1;
+			} else if path.find(".test_log.nio/test5.r") == Some(0) {
+				let len = std::fs::metadata(path)?.len();
+				assert_eq!(len, 11);
+				count += 1;
+			}
+		}
+		assert_eq!(count, 2);
+
+		// test with show line num
+		// test time based rotation
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: true,
+			show_log_level: false,
+			show_line_num: true,
+			file_path: Some(".test_log.nio/test6.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "0123")?;
+
+		let text = std::fs::read_to_string(".test_log.nio/test6.log")?;
+		assert_eq!(text.find("logger.rs"), Some(32));
+
+		// with show_log_level too
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: true,
+			show_log_level: true,
+			show_line_num: true,
+			file_path: Some(".test_log.nio/test7.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "0123")?;
+
+		let text = std::fs::read_to_string(".test_log.nio/test7.log")?;
+		assert_eq!(text.find("logger.rs"), Some(39));
+
+		// update format
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: true,
+			show_log_level: true,
+			show_line_num: true,
+			file_path: Some(".test_log.nio/test8.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		assert_eq!(log.get_show_timestamp()?, true);
+		assert_eq!(log.get_show_log_level()?, true);
+		assert_eq!(log.get_show_line_num()?, true);
+		log.log(INFO, "1line")?;
+		log.update_show_timestamp(false)?;
+		assert_eq!(log.get_show_timestamp()?, false);
+		assert_eq!(log.get_show_log_level()?, true);
+		assert_eq!(log.get_show_line_num()?, true);
+		log.log(INFO, "2line")?;
+		log.update_show_log_level(false)?;
+		assert_eq!(log.get_show_timestamp()?, false);
+		assert_eq!(log.get_show_log_level()?, false);
+		assert_eq!(log.get_show_line_num()?, true);
+		log.log(INFO, "3line")?;
+		log.update_show_line_num(false)?;
+		assert_eq!(log.get_show_timestamp()?, false);
+		assert_eq!(log.get_show_log_level()?, false);
+		assert_eq!(log.get_show_line_num()?, false);
+		log.log(INFO, "4line")?;
+		log.update_show_log_level(true)?;
+		assert_eq!(log.get_show_timestamp()?, false);
+		assert_eq!(log.get_show_log_level()?, true);
+		assert_eq!(log.get_show_line_num()?, false);
+		log.log(INFO, "5line")?;
+		log.update_show_timestamp(true)?;
+		assert_eq!(log.get_show_timestamp()?, true);
+		assert_eq!(log.get_show_log_level()?, true);
+		assert_eq!(log.get_show_line_num()?, false);
+		log.log(INFO, "6line")?;
+		log.update_show_line_num(true)?;
+		assert_eq!(log.get_show_timestamp()?, true);
+		assert_eq!(log.get_show_log_level()?, true);
+		assert_eq!(log.get_show_line_num()?, true);
+		log.log(INFO, "7line")?;
+
+		let text = std::fs::read_to_string(".test_log.nio/test8.log")?;
+		let split: Vec<&str> = text.split("\n").collect();
+
+		assert_eq!(split.len(), 8);
+		assert_eq!(split[0].find("1line"), Some(55));
+		assert_eq!(split[1].find("2line"), Some(32));
+		assert_eq!(split[2].find("3line"), Some(25));
+		assert_eq!(split[3].find("4line"), Some(0));
+		assert_eq!(split[4].find("5line"), Some(7));
+		assert_eq!(split[5].find("6line"), Some(30));
+		assert_eq!(split[6].find("7line"), Some(55));
+		assert_eq!(split[7].find("8line"), None); // empty last line
+
+		// file header
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			file_path: Some(".test_log.nio/test9.log".to_string()),
+			file_header: "myheader".to_string(),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		log.log(INFO, "1line")?;
+		log.log(INFO, "2line")?;
+		log.log(INFO, "3line")?;
+		log.log(INFO, "4line")?;
+
+		let text = std::fs::read_to_string(".test_log.nio/test9.log")?;
+		assert_eq!(
+			text,
+			"myheader\n\
+1line\n\
+2line\n\
+3line\n\
+4line\n"
+		);
+
+		// test rotation status
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			max_age_millis: 50,
+			file_path: Some(".test_log.nio/test10.log".to_string()),
+			file_header: "myheader".to_string(),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		log.log(INFO, "1line")?;
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.log(INFO, "2line")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::AutoRotated);
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.rotate()?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+
+		// with no auto-rotate
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			auto_rotate: false,
+			max_age_millis: 50,
+			file_path: Some(".test_log.nio/test10.log".to_string()),
+			file_header: "myheader".to_string(),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		log.log(INFO, "1line")?;
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.log(INFO, "2line")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.rotate()?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+
+		tear_down_test_dir()?;
+		Ok(())
 	}
 }

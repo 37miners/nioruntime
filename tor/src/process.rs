@@ -48,6 +48,7 @@
 extern crate chrono;
 
 use crate::{Error, ErrorKind};
+use nioruntime_log::*;
 use regex::Regex;
 use std::fs::{self, File};
 use std::io::Write;
@@ -61,6 +62,8 @@ use std::thread;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use sysinfo::{Process, ProcessExt, Signal};
+
+info!();
 
 #[cfg(windows)]
 const TOR_EXE_NAME: &str = "tor.exe";
