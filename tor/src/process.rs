@@ -43,7 +43,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Tor process control
-//! Derived from from from https://github.com/Dhole/rust-tor-controller.git
+//! Derived from from from <https://github.com/Dhole/rust-tor-controller.git>
 
 extern crate chrono;
 

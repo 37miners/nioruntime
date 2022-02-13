@@ -764,7 +764,7 @@ macro_rules! do_log {
 /// );
 /// ```
 ///
-/// For full details on all parameters of LogConfig see [`LogConfig`].
+/// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! get_config_multi {
 	($a:expr) => {{
@@ -810,7 +810,7 @@ macro_rules! get_config_multi {
 /// );
 /// ```
 ///
-/// For full details on all parameters of LogConfig see [`LogConfig`].
+/// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! log_config_multi {
 	($a:expr, $b:expr) => {{
@@ -853,7 +853,7 @@ macro_rules! log_config_multi {
 /// 	..Default::default()
 /// });
 /// ```
-/// For full details on all parameters of LogConfig see [`LogConfig`].
+/// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! log_config {
 	($a:expr) => {{
