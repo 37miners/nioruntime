@@ -696,7 +696,7 @@ impl HttpServer {
 				max_size: self.config.main_log_max_size,
 				show_stdout: true,
 				show_log_level: false,
-				show_line_num: false,
+				show_line_num: true,
 				..Default::default()
 			}
 		)?;
@@ -1601,6 +1601,7 @@ impl HttpServer {
 			show_timestamp: true,
 			show_stdout: false,
 			show_log_level: false,
+			show_line_num: false,
 			..Default::default()
 		})?;
 		/*
@@ -2542,7 +2543,6 @@ impl HttpServer {
 					);
 
 					Self::close_conn_data(conn_data, &config)?;
-
 					let close_message = WebSocketMessage {
 						mtype: WebSocketMessageType::Close,
 						payload: vec![],

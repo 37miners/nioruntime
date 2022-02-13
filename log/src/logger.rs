@@ -230,30 +230,35 @@ impl LogImpl {
 				.unwrap_or(0) + 3;
 		}
 
-		let mut found_logger = false;
-		let mut found_frame = false;
-		let mut logged_from_file = "unknown".to_string();
-		nioruntime_deps::backtrace::trace(|frame| {
-			nioruntime_deps::backtrace::resolve_frame(frame, |symbol| {
-				if let Some(filename) = symbol.filename() {
-					let filename = filename.display().to_string();
-					let lineno = match symbol.lineno() {
-						Some(lineno) => lineno.to_string(),
-						None => "".to_string(),
-					};
-					if filename.find("nioruntime/log/src/logger.rs").is_some() {
-						found_logger = true;
-					}
-					if filename.find("nioruntime/log/src/logger.rs").is_none() && found_logger {
-						logged_from_file = format!("{}:{}", filename, lineno);
-						found_frame = true;
-					}
-				}
-			});
-			!found_frame
-		});
-
 		let line_num_text = if self.config.show_line_num {
+			let mut found_logger = false;
+			let mut found_frame = false;
+			let mut logged_from_file = "unknown".to_string();
+			nioruntime_deps::backtrace::trace(|frame| {
+				nioruntime_deps::backtrace::resolve_frame(frame, |symbol| {
+					if let Some(filename) = symbol.filename() {
+						let filename = filename.display().to_string();
+						let lineno = match symbol.lineno() {
+							Some(lineno) => lineno.to_string(),
+							None => "".to_string(),
+						};
+						if filename.find("nioruntime/log/src/logger.rs").is_some() {
+							found_logger = true;
+						}
+						if filename.find("nioruntime/log/src/logger.rs").is_none() && found_logger {
+							logged_from_file = format!("{}:{}", filename, lineno);
+							found_frame = true;
+						}
+					}
+				});
+				!found_frame
+			});
+
+			let len = logged_from_file.len();
+			if len > 20 {
+				let start = len - 20;
+				logged_from_file = format!("..{}", &logged_from_file[start..]);
+			}
 			format!("[{}]: ", logged_from_file)
 		} else {
 			"".to_string()
