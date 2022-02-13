@@ -25,6 +25,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
+pub enum Settings {
+	Stdout,
+	Timestamp,
+	Level,
+	LineNum,
+}
+
 /// Trace level of logging. Should be used for very frequent logging that is only used to debug.
 pub const TRACE: i32 = 0;
 /// Debug level of logging. Should only be used for debugging information.
@@ -296,6 +303,13 @@ impl Log {
 	/// Check if the log is configured
 	pub fn is_configured(&self) -> bool {
 		self.log_impl.is_some()
+	}
+
+	pub fn get_config(&self) -> Result<LogConfig, Error> {
+		match &self.log_impl {
+			Some(log_impl) => Ok(log_impl.config.clone()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
+		}
 	}
 
 	/// Initialize the log file with the parameters in [`LogConfig`].

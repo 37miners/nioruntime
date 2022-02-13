@@ -400,6 +400,84 @@ macro_rules! log_multi {
 	};
 }
 
+/// get various options for the logger
+#[macro_export]
+macro_rules! get_config_option {
+	($get_type:expr,$value:expr) => {{
+		nioruntime_log::get_log_config("default", $get_type, $value)
+	}};
+	($log:expr,$get_type:expr,$value:expr) => {{
+		let static_log = &nioruntime_log::STATIC_LOG;
+		let mut log_map = static_log.write();
+		match log_map {
+			Ok(mut log_map) => {
+				let log = log_map.get_mut($log);
+				match log {
+					Some(log) => match $get_type {
+						nioruntime_log::Settings::Stdout => log.get_show_stdout(),
+						nioruntime_log::Settings::LineNum => log.get_show_line_num(),
+						nioruntime_log::Settings::Level => log.get_show_log_level(),
+						nioruntime_log::Settings::Timestamp => log.get_show_timestamp(),
+					},
+					None => {
+						let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
+							"no config found".to_string(),
+						)
+						.into();
+						Err(error)
+					}
+				}
+			}
+			Err(_) => {
+				let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
+					"error getting log from STATIC_LOG".to_string(),
+				)
+				.into();
+				Err(error)
+			}
+		}
+	}};
+}
+
+/// set various options for the logger
+#[macro_export]
+macro_rules! set_config_option {
+	($set_type:expr,$value:expr) => {{
+		nioruntime_log::set_log_config("default", $set_type, $value)
+	}};
+	($log:expr,$set_type:expr,$value:expr) => {{
+		let static_log = &nioruntime_log::STATIC_LOG;
+		let mut log_map = static_log.write();
+		match log_map {
+			Ok(mut log_map) => {
+				let log = log_map.get_mut($log);
+				match log {
+					Some(log) => match $set_type {
+						nioruntime_log::Settings::Stdout => log.update_show_stdout($value),
+						nioruntime_log::Settings::LineNum => log.update_show_line_num($value),
+						nioruntime_log::Settings::Level => log.update_show_log_level($value),
+						nioruntime_log::Settings::Timestamp => log.update_show_timestamp($value),
+					},
+					None => {
+						let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
+							"no config found".to_string(),
+						)
+						.into();
+						Err(error)
+					}
+				}
+			}
+			Err(_) => {
+				let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
+					"error getting log from STATIC_LOG".to_string(),
+				)
+				.into();
+				Err(error)
+			}
+		}
+	}};
+}
+
 /// The main logging macro. This macro calls the default logger. To configure this
 /// logger, see [`log_config`]. It is used like the pritln/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace`], [`debug`],
@@ -590,7 +668,7 @@ macro_rules! do_log {
 			{
                                         // if not configured, use defaults
                                         if !$log.is_configured() {
-                                                $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
+                                                $log.init(nioruntime_log::LogConfig::default()).unwrap();
                                         }
 
 					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
@@ -601,7 +679,7 @@ macro_rules! do_log {
 					}
 
 					if $level >= LOG_LEVEL {
-                                       		match $log.log_level(&format!($a), $level) {
+                                       		match $log.log($level, &format!($a)) {
                                                		Ok(_) => {},
                                                		Err(e) => {
                                                        		println!(
@@ -623,7 +701,7 @@ macro_rules! do_log {
 			{
                                         // if not configured, use defaults
                                         if !$log.is_configured() {
-                                                $log.config_with_object(nioruntime_log::LogConfig::default()).unwrap();
+                                                $log.init(nioruntime_log::LogConfig::default()).unwrap();
                                         }
 
 					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
@@ -633,7 +711,7 @@ macro_rules! do_log {
 					}
 
 					if $level >= LOG_LEVEL {
-                                        	match $log.log_level(&format!($a, $($b)*), $level) {
+                                        	match $log.log($level, &format!($a, $($b)*)) {
                                                 	Ok(_) => {},
                                                 	Err(e) => {
                                                         	println!(
@@ -696,15 +774,11 @@ macro_rules! get_config_multi {
 			Ok(mut log_map) => {
 				let log = log_map.get_mut($a);
 				match log {
-					Some(log) => match &log.params {
-						Some(params) => Ok(params.config.clone()),
-						None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
-							"no params found".to_string(),
-						)),
-					},
-					None => Err(nioruntime_err::ErrorKind::LogNotConfigured(
+					Some(log) => log.get_config(),
+					None => Err(nioruntime_err::ErrorKind::LogConfigurationError(
 						"no config found".to_string(),
-					)),
+					)
+					.into()),
 				}
 			}
 			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
@@ -746,10 +820,10 @@ macro_rules! log_config_multi {
 			Ok(mut log_map) => {
 				let log = log_map.get_mut($a);
 				match log {
-					Some(log) => log.config_with_object($b),
+					Some(log) => log.init($b),
 					None => {
 						let mut log = nioruntime_log::Log::new();
-						let ret = log.config_with_object($b);
+						let ret = log.init($b);
 						log_map.insert($a.to_string(), log);
 						ret
 					}
@@ -790,10 +864,10 @@ macro_rules! log_config {
 			Ok(mut log_map) => {
 				let log = log_map.get_mut(&DEFAULT_LOG.to_string());
 				match log {
-					Some(log) => log.config_with_object($a),
+					Some(log) => log.init($a),
 					None => {
 						let mut log = nioruntime_log::Log::new();
-						let ret = log.config_with_object($a);
+						let ret = log.init($a);
 						log_map.insert(DEFAULT_LOG.to_string(), log);
 						ret
 					}

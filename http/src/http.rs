@@ -675,12 +675,28 @@ impl HttpServer {
 			Some(tls_config) => format!("'{}'", tls_config.private_key_file.clone()),
 			None => "None".to_string(),
 		};
-
+		/*
+						log_config_multi!(
+								MAIN_LOG,
+								LogConfig {
+										file_path: Some(format!("{}/logs/mainlog.log", self.config.root_dir)),
+										show_stdout: self.config.debug,
+										max_age_millis: self.config.main_log_max_age_millis,
+										max_size: self.config.main_log_max_size,
+										show_log_level: false,
+										..Default::default()
+								}
+						)?;
+		*/
 		log_config_multi!(
 			MAIN_LOG,
 			LogConfig {
-				file_path: format!("{}/logs/mainlog.log", self.config.root_dir),
+				file_path: Some(format!("{}/logs/mainlog.log", self.config.root_dir)),
+				max_age_millis: self.config.main_log_max_age_millis,
+				max_size: self.config.main_log_max_size,
+				show_stdout: true,
 				show_log_level: false,
+				show_line_num: false,
 				..Default::default()
 			}
 		)?;
@@ -947,18 +963,8 @@ impl HttpServer {
 		std::thread::spawn(move || Self::house_keeper(&http_context_clone7, &http_config_clone5));
 
 		log_multi!(INFO, MAIN_LOG, "Server Started");
+		set_config_option!(MAIN_LOG, Settings::Stdout, self.config.debug)?;
 
-		log_config_multi!(
-			MAIN_LOG,
-			LogConfig {
-				file_path: format!("{}/logs/mainlog.log", self.config.root_dir),
-				show_stdout: self.config.debug,
-				max_age_millis: self.config.main_log_max_age_millis,
-				max_size: self.config.main_log_max_size,
-				show_log_level: false,
-				..Default::default()
-			}
-		)?;
 		Ok(())
 	}
 
@@ -1386,7 +1392,7 @@ impl HttpServer {
 		log_config_multi!(
 			STATS_LOG,
 			LogConfig {
-				file_path: format!("{}/logs/statslog.log", http_config.root_dir),
+				file_path: Some(format!("{}/logs/statslog.log", http_config.root_dir)),
 				show_stdout: false,
 				file_header: file_header.clone(),
 				max_age_millis: http_config.stats_log_max_age_millis,
@@ -1571,28 +1577,44 @@ impl HttpServer {
 	) -> Result<(), Error> {
 		let mut log = Log::new();
 
-		let mut header = format!("");
+		let mut file_header = format!("");
 		let len = http_config.request_log_params.len();
 		for i in 0..len {
-			header = format!(
+			file_header = format!(
 				"{}{}{}",
-				header, http_config.request_log_separator_char, http_config.request_log_params[i],
+				file_header,
+				http_config.request_log_separator_char,
+				http_config.request_log_params[i],
 			);
 		}
-		header = format!(
+		file_header = format!(
 			"{}{}{}",
-			header, http_config.request_log_separator_char, "ProcTime"
+			file_header, http_config.request_log_separator_char, "ProcTime"
 		);
-		log.config(
-			Some(format!("{}/logs/request.log", http_config.root_dir)),
-			http_config.request_log_max_size,
-			http_config.request_log_max_age_millis,
-			true,
-			&header,
-			false,
-			http_config.delete_request_rotation,
-			false,
-		)?;
+
+		log.init(LogConfig {
+			file_path: Some(format!("{}/logs/request.log", http_config.root_dir)),
+			file_header,
+			max_size: http_config.request_log_max_size,
+			max_age_millis: http_config.request_log_max_age_millis,
+			delete_rotation: http_config.delete_request_rotation,
+			show_timestamp: true,
+			show_stdout: false,
+			show_log_level: false,
+			..Default::default()
+		})?;
+		/*
+				log.config(
+					Some(format!("{}/logs/request.log", http_config.root_dir)),
+					http_config.request_log_max_size,
+					http_config.request_log_max_age_millis,
+					true,
+					&header,
+					false,
+					http_config.delete_request_rotation,
+					false,
+				)?;
+		*/
 
 		let len = http_config.request_log_params.len();
 		let mut hash_set = HashSet::new();
@@ -1783,7 +1805,7 @@ impl HttpServer {
 			log_line = format!("{}{}", log_line, http_config.request_log_separator_char,);
 		}
 
-		log.log_level(&log_line, INFO)?;
+		log.log(INFO, &log_line)?;
 
 		Ok(())
 	}
