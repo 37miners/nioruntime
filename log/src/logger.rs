@@ -43,7 +43,7 @@ const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FA
 
 /// The main logging object. Usually this is used through macros.
 pub struct Log {
-	params: Option<LogImpl>,
+	log_impl: Option<LogImpl>,
 }
 
 /// The data that is held by the Log object.
@@ -159,19 +159,15 @@ impl LogImpl {
 				.open(&original_file_path)?,
 		);
 
-		// If there's a file header, write it to the new file.
-		match self.file.as_ref() {
-			Some(mut file) => {
-				let line_bytes = self.config.file_header.as_bytes();
-				if line_bytes.len() > 0 {
-					file.write(line_bytes)?;
-					file.write(&[10u8])?; // new line
-				}
-				self.last_rotation = Instant::now();
-				self.cur_size = self.config.file_header.len() as u64 + 1;
-			}
-			None => {}
+		// we know it exists because we returned earlir if file_path is none.
+		let mut file = self.file.as_ref().unwrap();
+		let line_bytes = self.config.file_header.as_bytes();
+		if line_bytes.len() > 0 {
+			file.write(line_bytes)?;
+			file.write(&[10u8])?; // new line
 		}
+		self.last_rotation = Instant::now();
+		self.cur_size = self.config.file_header.len() as u64 + 1;
 
 		Ok(())
 	}
@@ -185,6 +181,7 @@ impl LogImpl {
 				|| instant_now.duration_since(self.last_rotation).as_millis()
 					> self.config.max_age_millis)
 		{
+			self.has_rotated = false;
 			Ok(RotationStatus::Needed)
 		} else if self.has_rotated {
 			self.has_rotated = false;
@@ -293,12 +290,12 @@ impl LogImpl {
 impl Log {
 	/// create a new Log object
 	pub fn new() -> Log {
-		Log { params: None }
+		Log { log_impl: None }
 	}
 
 	/// Check if the log is configured
 	pub fn is_configured(&self) -> bool {
-		self.params.is_some()
+		self.log_impl.is_some()
 	}
 
 	/// Initialize the log file with the parameters in [`LogConfig`].
@@ -350,7 +347,7 @@ impl Log {
 
 		let last_rotation = Instant::now();
 
-		self.params = Some(LogImpl {
+		self.log_impl = Some(LogImpl {
 			config,
 			file,
 			cur_size,
@@ -363,112 +360,114 @@ impl Log {
 
 	/// Rotate the log
 	pub fn rotate(&mut self) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => params.rotate(),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => log_impl.rotate(),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Check if a rotation is needed
 	pub fn rotation_status(&mut self) -> Result<RotationStatus, Error> {
-		match self.params.as_mut() {
-			Some(params) => params.rotation_status(),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => log_impl.rotation_status(),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Entry point for logging
 	pub fn log(&mut self, level: i32, line: &str) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.log(line, level)?;
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.log(line, level)?;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Change the show_line_num setting to the show value.
 	pub fn update_show_line_num(&mut self, show: bool) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.config.show_line_num = show;
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.config.show_line_num = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Get the show_line_num setting value.
 	pub fn get_show_line_num(&mut self) -> Result<bool, Error> {
-		match self.params.as_mut() {
-			Some(params) => Ok(params.config.show_line_num),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => Ok(log_impl.config.show_line_num),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Change the show_log_level setting to the show value.
 	pub fn update_show_log_level(&mut self, show: bool) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.config.show_log_level = show;
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.config.show_log_level = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Get the show_log_level setting value.
 	pub fn get_show_log_level(&mut self) -> Result<bool, Error> {
-		match self.params.as_mut() {
-			Some(params) => Ok(params.config.show_log_level),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => Ok(log_impl.config.show_log_level),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Change the show_timestamp setting to the show value.
 	pub fn update_show_timestamp(&mut self, show: bool) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.config.show_timestamp = show;
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.config.show_timestamp = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Get the show_timestamp setting value.
 	pub fn get_show_timestamp(&mut self) -> Result<bool, Error> {
-		match self.params.as_mut() {
-			Some(params) => Ok(params.config.show_timestamp),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => Ok(log_impl.config.show_timestamp),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Change the show_stdout setting to the show value.
 	pub fn update_show_stdout(&mut self, show: bool) -> Result<(), Error> {
-		match self.params.as_mut() {
-			Some(params) => {
-				params.config.show_stdout = show;
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.config.show_stdout = show;
 				Ok(())
 			}
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 
 	/// Get the show_stdout setting value.
 	pub fn get_show_stdout(&mut self) -> Result<bool, Error> {
-		match self.params.as_mut() {
-			Some(params) => Ok(params.config.show_stdout),
-			None => Err(ErrorKind::LogConfigurationError("log params None".to_string()).into()),
+		match self.log_impl.as_mut() {
+			Some(log_impl) => Ok(log_impl.config.show_stdout),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use crate::logger::LogImpl;
 	use crate::*;
-	use nioruntime_err::Error;
+	use nioruntime_err::{Error, ErrorKind};
+	use std::time::Instant;
 
 	fn setup_test_dir() -> Result<(), Error> {
 		let _ = std::fs::remove_dir_all(".test_log.nio");
@@ -490,9 +489,66 @@ mod tests {
 		let config = LogConfig {
 			file_path: Some(".test_log.nio/test1.log".to_string()),
 			show_line_num: false,
+			delete_rotation: true,
+			show_stdout: false,
 			..Default::default()
 		};
+
+		// check inputs
+		assert!(!log.is_configured());
+
+		assert_eq!(
+			log.rotate().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.update_show_line_num(true).is_err());
+		assert_eq!(
+			log.update_show_line_num(true).err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.get_show_line_num().is_err());
+		assert_eq!(
+			log.get_show_line_num().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.update_show_log_level(true).is_err());
+		assert_eq!(
+			log.update_show_log_level(false).err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.get_show_log_level().is_err());
+		assert_eq!(
+			log.get_show_log_level().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.update_show_timestamp(true).is_err());
+		assert_eq!(
+			log.update_show_timestamp(false).err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.get_show_timestamp().is_err());
+		assert_eq!(
+			log.get_show_timestamp().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert_eq!(
+			log.update_show_stdout(false).err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.update_show_stdout(true).is_err());
+		assert_eq!(
+			log.get_show_stdout().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.get_show_stdout().is_err());
+		assert_eq!(
+			log.rotation_status().err().unwrap().kind(),
+			ErrorKind::LogConfigurationError("log_impl None".to_string())
+		);
+		assert!(log.rotation_status().is_err());
+
 		log.init(config)?;
+		assert!(log.is_configured());
 		log.log(DEBUG, "with_level")?;
 		let text = std::fs::read_to_string(".test_log.nio/test1.log")?;
 		assert_eq!(text.chars().nth(23).unwrap(), '(');
@@ -681,7 +737,12 @@ mod tests {
 		assert_eq!(log.get_show_timestamp()?, true);
 		assert_eq!(log.get_show_log_level()?, true);
 		assert_eq!(log.get_show_line_num()?, true);
+		assert_eq!(log.get_show_stdout()?, true);
+		log.update_show_stdout(false)?;
+		assert_eq!(log.get_show_stdout()?, false);
 		log.log(INFO, "7line")?;
+		log.update_show_stdout(true)?;
+		assert_eq!(log.get_show_stdout()?, true);
 
 		let text = std::fs::read_to_string(".test_log.nio/test8.log")?;
 		let split: Vec<&str> = text.split("\n").collect();
@@ -775,6 +836,130 @@ mod tests {
 		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
 		log.rotate()?;
 		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			auto_rotate: false,
+			max_size: 20,
+			file_path: Some(".test_log.nio/test12.log".to_string()),
+			file_header: "myheader".to_string(),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.rotate()?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			show_timestamp: false,
+			show_log_level: false,
+			show_line_num: false,
+			auto_rotate: true,
+			max_size: 5,
+			file_path: Some(".test_log.nio/test13.log".to_string()),
+			file_header: "".to_string(),
+			..Default::default()
+		};
+		log.init(config)?;
+
+		log.log(INFO, "0")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.rotate()?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.log(INFO, "01234567890")?;
+		assert_eq!(log.rotation_status()?, RotationStatus::Needed);
+		log.rotate()?;
+		assert_eq!(log.rotation_status()?, RotationStatus::NotNeeded);
+
+		// more code coverage
+		let mut log = Log::new();
+		log.init(LogConfig::default())?;
+		log.log(TRACE, "hello")?;
+		log.log(DEBUG, "hello")?;
+		log.log(INFO, "hello")?;
+		log.log(WARN, "hello")?;
+		log.log(ERROR, "hello")?;
+		log.log(FATAL, "hello")?;
+
+		let config = LogConfig {
+			file_path: None,
+			max_size: 1024 * 1024 * 10,     // 10 mb
+			max_age_millis: 60 * 60 * 1000, // 1 hr
+			file_header: "".to_string(),
+			show_timestamp: true,
+			show_stdout: true,
+			delete_rotation: false,
+			show_log_level: true,
+			show_line_num: true,
+			auto_rotate: true,
+		};
+		let mut log = Log::new();
+		log.init(config)?;
+		assert!(log.init(LogConfig::default()).is_err());
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			max_size: 10,
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(FATAL, "0123456789012345")?;
+		let mut log = Log::new();
+		let config = LogConfig {
+			max_size: 10,
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(INFO, "abcdefghijklmnopqrs")?;
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			file_path: Some(".test_log.nio/test11.log".to_string()),
+			max_size: 10,
+			delete_rotation: true,
+			..Default::default()
+		};
+		log.init(config)?;
+		log.log(FATAL, "0123456789012345")?;
+		log.log(FATAL, "0123456789012345")?;
+		log.log(FATAL, "0123456789012345")?;
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			max_size: 10,
+			delete_rotation: true,
+			..Default::default()
+		};
+		let _config = config.clone();
+		log.init(config)?;
+		log.log(FATAL, "0123456789012345")?;
+		log.log(FATAL, "0123456789012345")?;
+		log.log(FATAL, "0123456789012345")?;
+		log.rotate()?;
+
+		let _log_impl = LogImpl {
+			file: None,
+			cur_size: 1,
+			last_rotation: Instant::now(),
+			config: LogConfig::default(),
+			has_rotated: false,
+		};
 
 		tear_down_test_dir()?;
 		Ok(())
