@@ -46,7 +46,7 @@ pub const ERROR: i32 = 4;
 /// have halted.
 pub const FATAL: i32 = 5;
 
-const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
+const DISPLAY_ARRAY: [&str; 6] = ["TRCE", "DEBG", "INFO", "WARN", "ERRR", "FATL"];
 
 /// The main logging object. Usually this is used through macros.
 pub struct Log {
@@ -106,6 +106,8 @@ pub struct LogConfig {
 	pub show_line_num: bool,
 	/// automatically rotate the log file. Default is true.
 	pub auto_rotate: bool,
+	/// The maximum length of a file name when printing it to the log. The default value is 25.
+	pub max_file_name_len: usize,
 }
 
 /// Return a default logging object.
@@ -122,6 +124,7 @@ impl Default for LogConfig {
 			show_log_level: true,
 			show_line_num: true,
 			auto_rotate: true,
+			max_file_name_len: 25,
 		}
 	}
 }
@@ -172,9 +175,9 @@ impl LogImpl {
 		if line_bytes.len() > 0 {
 			file.write(line_bytes)?;
 			file.write(&[10u8])?; // new line
+			self.cur_size = line_bytes.len() as u64 + 1;
 		}
 		self.last_rotation = Instant::now();
-		self.cur_size = self.config.file_header.len() as u64 + 1;
 
 		Ok(())
 	}
@@ -255,8 +258,8 @@ impl LogImpl {
 			});
 
 			let len = logged_from_file.len();
-			if len > 20 {
-				let start = len - 20;
+			if len > self.config.max_file_name_len {
+				let start = len - self.config.max_file_name_len;
 				logged_from_file = format!("..{}", &logged_from_file[start..]);
 			}
 			format!("[{}]: ", logged_from_file)

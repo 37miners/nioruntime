@@ -58,6 +58,9 @@ pub enum ErrorKind {
 	/// Setup Error
 	#[fail(display = "Setup Error: {}", _0)]
 	SetupError(String),
+	/// EventHandlerConfigurationError
+	#[fail(display = "Event Handler configuration Error: {}", _0)]
+	EventHandlerConfigurationError(String),
 	/// Log not configured
 	#[fail(display = "Log configuration Error: {}", _0)]
 	LogConfigurationError(String),
@@ -130,6 +133,17 @@ pub enum ErrorKind {
 	/// WebsocketError
 	#[fail(display = "WebSocket Error: {}", _0)]
 	WebSocketError(String),
+	/// TimespecError
+	#[fail(display = "Kqueue timespec error: {}", _0)]
+	TimespecError(String),
+	/// KqueueError
+	#[fail(display = "Kqueue error: {}", _0)]
+	KqueueError(String),
+	/// HandleNotFoundError
+	#[fail(display = "Connection Handle was not found: {}", _0)]
+	HandleNotFoundError(String),
+	#[fail(display = "Wrong connection type: {}", _0)]
+	WrongConnectionType(String),
 }
 
 impl Display for Error {

@@ -12,45 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(any(target_os = "macos", dragonfly, freebsd, netbsd, openbsd))]
-use libc::timespec;
-#[cfg(any(target_os = "macos", dragonfly, freebsd, netbsd, openbsd))]
-use std::time::Duration;
-
 mod eventhandler;
 
-pub use crate::eventhandler::{EventHandler, EventHandlerConfig, State, TlsConfig, WriteHandle};
-
-// Some needed timespec code
-
-#[cfg(any(target_os = "macos", dragonfly, netbsd, openbsd))]
-pub(crate) fn duration_to_timespec(d: Duration) -> timespec {
-	let tv_sec = d.as_secs() as i64;
-	let tv_nsec = d.subsec_nanos() as i64;
-
-	if tv_sec.is_negative() {
-		panic!("Duration seconds is negative");
-	}
-
-	if tv_nsec.is_negative() {
-		panic!("Duration nsecs is negative");
-	}
-
-	timespec { tv_sec, tv_nsec }
-}
-
-#[cfg(all(target_os = "freebsd", target_arch = "x86"))]
-pub(crate) fn duration_to_timespec(d: Duration) -> timespec {
-	let tv_sec = d.as_secs() as i32;
-	let tv_nsec = d.subsec_nanos() as i32;
-
-	if tv_sec.is_negative() {
-		panic!("Duration seconds is negative");
-	}
-
-	if tv_nsec.is_negative() {
-		panic!("Duration nsecs is negative");
-	}
-
-	timespec { tv_sec, tv_nsec }
-}
+pub use crate::eventhandler::{ConnectionData, EventHandler, EventHandlerConfig};

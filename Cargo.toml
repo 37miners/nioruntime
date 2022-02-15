@@ -13,6 +13,7 @@ edition = "2018"
 
 [workspace]
 members = ["http", "eventhandler", "util", "error", "deps", "log"]
+exclude = ["etc/perf"]
 
 [dependencies]
 

@@ -1,0 +1,26 @@
+name: perf
+author: 37 Miners, LLC
+
+args:
+    - client:
+        help: Run the test client
+        short: c
+        long: client
+        takes_value: false
+    - count:
+        help: Number of requests to make per connection
+        short: x
+        long: count
+        value_name: count
+        takes_value: true
+    - itt:
+        help: Number of iterations
+        short: i
+        long: itt
+        value_name: itt
+        takes_value: true
+    - threads:
+        help: Number of threads
+        short: t
+        value_name: threads
+        takes_value: true
