@@ -18,13 +18,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 lazy_static! {
-		/// This is the static holder of all log objects. Generally this
-		/// should not be called directly. See [`log`] instead.
-		pub static ref STATIC_LOG: Arc<RwLock<HashMap<String, Log>>> = Arc::new(RwLock::new(HashMap::new()));
+	/// This is the static holder of all log objects. Generally this
+	/// should not be called directly. See [`log`] instead.
+	pub static ref STATIC_LOG: Arc<RwLock<HashMap<String, Log>>> = Arc::new(RwLock::new(HashMap::new()));
 }
 
 /// Log at the 'fatal' (5) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`trace`] [`debug`], [`info`], [`warn`], or [`error`].
 /// # Examples
 /// ```
@@ -39,8 +39,8 @@ lazy_static! {
 /// fatal!("hi");
 ///
 /// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// // [2022-02-15 22:58:32]: (FATL) [..e/src/ops/function.rs:227]: my value = 123
+/// // [2022-02-15 22:58:32]: (FATL) [..e/src/ops/function.rs:227]: hi
 /// ```
 #[macro_export]
 macro_rules! fatal {
@@ -662,72 +662,78 @@ macro_rules! log_no_ts {
 #[macro_export]
 macro_rules! do_log {
         ($level:expr)=>{
-					const LOG_LEVEL: i32 = $level;
+		const LOG_LEVEL: i32 = $level;
 	};
         ($level:expr, $show_ts:expr, $log:expr, $a:expr)=>{
-			{
-                                        // if not configured, use defaults
-                                        if !$log.is_configured() {
-                                                $log.init(nioruntime_log::LogConfig::default()).unwrap();
-                                        }
-
-					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-
-					if $show_ts == false {
-						let _ = $log.update_show_timestamp($show_ts);
-						let _ = $log.update_show_log_level($show_ts);
-					}
-
-					if $level >= LOG_LEVEL {
-                                       		match $log.log($level, &format!($a)) {
-                                               		Ok(_) => {},
-                                               		Err(e) => {
-                                                       		println!(
-                                                               		"Logging of '{}' resulted in Error: {}",
-                                                               		format!($a),
-                                                               		e.to_string(),
-                                                       		);
-                                               		}
-                                       		}
-					}
-
-					let _ = $log.update_show_log_level(cur_show_log_level);
-					// always set to showing timestamp (as default)
-					let _ = $log.update_show_timestamp(true);
-
+		{
+			// if not configured, use defaults
+			if !$log.is_configured() {
+				$log.init(nioruntime_log::LogConfig::default()).unwrap();
 			}
-        };
+
+			let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
+			let cur_show_line_num = $log.get_show_line_num().unwrap_or(true);
+			let cur_show_timestamp = $log.get_show_timestamp().unwrap_or(true);
+
+			if $show_ts == false {
+				let _ = $log.update_show_timestamp($show_ts);
+				let _ = $log.update_show_log_level($show_ts);
+				let _ = $log.update_show_line_num($show_ts);
+			}
+
+			if $level >= LOG_LEVEL {
+				match $log.log($level, &format!($a)) {
+					Ok(_) => {},
+					Err(e) => {
+						println!(
+							"Logging of '{}' resulted in Error: {}",
+							format!($a),
+							e.to_string(),
+						);
+					}
+				}
+			}
+
+			let _ = $log.update_show_log_level(cur_show_log_level);
+			let _ = $log.update_show_line_num(cur_show_line_num);
+			let _ = $log.update_show_timestamp(cur_show_timestamp);
+		}
+	};
         ($level:expr, $show_ts:expr, $log:expr, $a:expr, $($b:tt)*)=>{
-			{
-                                        // if not configured, use defaults
-                                        if !$log.is_configured() {
-                                                $log.init(nioruntime_log::LogConfig::default()).unwrap();
-                                        }
-
-					let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-					if $show_ts == false {
-						let _ = $log.update_show_timestamp($show_ts);
-						let _ = $log.update_show_log_level($show_ts);
-					}
-
-					if $level >= LOG_LEVEL {
-                                        	match $log.log($level, &format!($a, $($b)*)) {
-                                                	Ok(_) => {},
-                                                	Err(e) => {
-                                                        	println!(
-                                                                	"Logging of '{}' resulted in Error: {}",
-                                                                	format!($a, $($b)*),
-                                                                	e.to_string(),
-                                                        	);
-                                                	}
-                                        	}
-					}
-
-                                        let _ = $log.update_show_log_level(cur_show_log_level);
-                                        // always set to showing timestamp (as default)
-                                        let _ = $log.update_show_timestamp(true);
+		{
+			// if not configured, use defaults
+			if !$log.is_configured() {
+				$log.init(nioruntime_log::LogConfig::default()).unwrap();
 			}
-        };
+
+			let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
+			let cur_show_line_num = $log.get_show_line_num().unwrap_or(true);
+			let cur_show_timestamp = $log.get_show_timestamp().unwrap_or(true);
+
+			if $show_ts == false {
+				let _ = $log.update_show_timestamp($show_ts);
+				let _ = $log.update_show_log_level($show_ts);
+				let _ = $log.update_show_line_num($show_ts);
+			}
+
+			if $level >= LOG_LEVEL {
+				match $log.log($level, &format!($a, $($b)*)) {
+					Ok(_) => {},
+					Err(e) => {
+						println!(
+							"Logging of '{}' resulted in Error: {}",
+							format!($a, $($b)*),
+							e.to_string(),
+						);
+					}
+				}
+			}
+
+			let _ = $log.update_show_log_level(cur_show_log_level);
+			let _ = $log.update_show_line_num(cur_show_line_num);
+			let _ = $log.update_show_timestamp(cur_show_timestamp);
+		}
+	};
 }
 
 /// get_config_multi get's the LogConfig structure for the specified logger

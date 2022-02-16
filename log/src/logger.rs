@@ -16,6 +16,7 @@
 
 //! A logging library.
 
+use crate::backtrace::Backtrace;
 use crate::chrono::{DateTime, Local, Utc};
 use crate::nioruntime_err::{Error, ErrorKind};
 use crate::rand::random;
@@ -108,6 +109,8 @@ pub struct LogConfig {
 	pub auto_rotate: bool,
 	/// The maximum length of a file name when printing it to the log. The default value is 25.
 	pub max_file_name_len: usize,
+	/// Show the backtrace when log level is set to ERROR or FATAL. The default value is true.
+	pub show_bt: bool,
 }
 
 /// Return a default logging object.
@@ -124,6 +127,7 @@ impl Default for LogConfig {
 			show_log_level: true,
 			show_line_num: true,
 			auto_rotate: true,
+			show_bt: true,
 			max_file_name_len: 25,
 		}
 	}
@@ -316,11 +320,24 @@ impl LogImpl {
 			let mut file = self.file.as_ref().unwrap();
 			file.write(line_bytes)?;
 			file.write(&[10u8])?; // newline
+			if self.config.show_bt && level >= ERROR {
+				let bt = Backtrace::new();
+				let bt_text = format!("{:?}\n", bt);
+				let bt_bytes: &[u8] = bt_text.as_bytes();
+				file.write(bt_bytes)?;
+				self.cur_size += bt_bytes.len() as u64;
+			}
 		}
 
 		// if stdout is specified log to stdout too
 		if self.config.show_stdout {
 			println!("{}", line);
+			if self.config.show_bt && level >= ERROR {
+				let bt = Backtrace::new();
+				let bt_text = format!("{:?}\n", bt);
+				println!("{}", bt_text);
+				self.cur_size += bt_text.len() as u64;
+			}
 		}
 
 		Ok(())
@@ -955,6 +972,7 @@ mod tests {
 			show_line_num: true,
 			auto_rotate: true,
 			max_file_name_len: 25,
+			show_bt: true,
 		};
 		let mut log = Log::new();
 		log.init(config)?;

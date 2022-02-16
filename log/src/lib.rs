@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use nioruntime_deps::backtrace;
 use nioruntime_deps::chrono;
 use nioruntime_deps::lazy_static;
 use nioruntime_deps::rand;
