@@ -110,25 +110,28 @@ impl ConnectionData {
 		};
 
 		if res == len.try_into().unwrap_or(0) {
-			return Ok(());
+			Ok(())
 		} else if res < 0 {
-			error!("write error!");
-			return Ok(());
+			let e = errno();
+			if e.0 != libc::EAGAIN {
+				// can't write right now. Would block. Pass to selector
+				self.pass_to_selector_thread(data)
+			} else {
+				// actual write error. Return error
+
+				Err(ErrorKind::IOError(format!(
+					"failed writing to handle={},cid={} with error={}",
+					self.connection_info.handle,
+					self.get_connection_id(),
+					e
+				))
+				.into())
+			}
 		} else {
 			// otherwise, we have to pass to the other thread
 			let data = &data[res.try_into().unwrap_or(0)..];
-
-			let wb = WriteBuffer::new(self.get_connection_id(), data.to_vec(), false);
-
-			{
-				let mut guarded_data = lockw!(self.guarded_data)?;
-				guarded_data.write_queue.push(wb);
-			}
-
-			self.wakeup.wakeup()?;
+			self.pass_to_selector_thread(data)
 		}
-
-		Ok(())
 	}
 
 	pub fn close(&self) -> Result<(), Error> {
@@ -141,6 +144,17 @@ impl ConnectionData {
 
 		self.wakeup.wakeup()?;
 
+		Ok(())
+	}
+
+	fn pass_to_selector_thread(&self, data: &[u8]) -> Result<(), Error> {
+		let wb = WriteBuffer::new(self.get_connection_id(), data.to_vec(), false);
+		{
+			let mut guarded_data = lockw!(self.guarded_data)?;
+			guarded_data.write_queue.push(wb);
+		}
+
+		self.wakeup.wakeup()?;
 		Ok(())
 	}
 }
@@ -373,6 +387,7 @@ where
 					callbacks,
 					connection_id_map,
 					connection_handle_map,
+					wakeup,
 				)?,
 				EventType::Accept => {} // accepts are returned as read.
 			}
@@ -454,24 +469,65 @@ where
 		match x {
 			Some((id, handle)) => {
 				info!("rem {},{} from maps", id, handle);
-				connection_id_map.remove(&id);
+				Self::close_connection(
+					id,
+					ctx,
+					callbacks,
+					connection_id_map,
+					connection_handle_map,
+					wakeup,
+				)?;
+			}
+			None => {}
+		}
+
+		Ok(())
+	}
+
+	fn close_connection(
+		id: u128,
+		ctx: &mut Context,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		wakeup: &Wakeup,
+	) -> Result<(), Error> {
+		let handle = connection_id_map.remove(&id);
+
+		match handle {
+			Some(handle) => {
 				let connection_info = connection_handle_map.remove(&handle);
 				match connection_info {
 					Some(connection_info) => match connection_info {
-						EventConnectionInfo::ReadWriteConnection(c) => {
-							let mut is_closed = lockw!(c.is_closed)?;
-							*is_closed = true;
-							unsafe {
-								libc::close(handle);
+						EventConnectionInfo::ReadWriteConnection(ref c) => {
+							{
+								let mut is_closed = lockw!(c.is_closed)?;
+								*is_closed = true;
+								unsafe {
+									libc::close(handle);
+								}
+							}
+							match callbacks.on_close.as_ref() {
+								Some(on_close) => {
+									(on_close)(&ConnectionData::new(
+										connection_info.get_read_write_connection_info()?.clone(),
+										ctx.guarded_data.clone(),
+										wakeup.clone(),
+									))?;
+								}
+								None => warn!("no on_close callback"),
 							}
 						}
 						_ => warn!("listener closed!"),
 					},
-					None => warn!("tried to close a connection that's already closed!"),
+					None => warn!("no connection info for handle: {}", handle),
 				}
+
 				ctx.filter_set.remove(&handle);
 			}
-			None => {}
+			None => {
+				warn!("Tried to close a connection that does not exist: {}", id);
+			}
 		}
 
 		Ok(())
@@ -580,13 +636,16 @@ where
 
 	fn process_write_event(
 		event: &Event,
-		_ctx: &mut Context,
+		ctx: &mut Context,
 		_config: &EventHandlerConfig,
-		_callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		_connection_id_map: &mut HashMap<u128, Handle>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event);
+
+		let mut to_remove = vec![];
 
 		let mut connection_info = match connection_handle_map.get_mut(&event.handle) {
 			Some(connection_info) => connection_info,
@@ -601,19 +660,78 @@ where
 
 		match &mut connection_info {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
+				let connection_id = connection_info.get_connection_id();
 				info!("connection_info={:?}", connection_info);
+				let mut block = false;
+				let mut rem_count = 0;
 				for wbuf in &mut connection_info.pending_wbufs {
-					let len = write_bytes(event.handle, &mut wbuf.buf)?;
-					info!("len written = {}", len);
+					loop {
+						if wbuf.cur <= 0 {
+							rem_count += 1;
+							if wbuf.close {
+								to_remove.push(connection_id);
+								block = true;
+							}
+							break;
+						} // nothing more to write
+						match Self::write_loop(event.handle, wbuf)? {
+							WriteResult::Ok => {
+								// nothing to do, continue loop
+							}
+							WriteResult::Err => {
+								// error occured. Must close connection
+								to_remove.push(connection_id);
+								block = true;
+								break;
+							}
+							WriteResult::Block => {
+								// would block, need to let selector do other work
+								block = true;
+								break;
+							}
+						}
+					}
+
+					if block {
+						break;
+					}
 				}
-				connection_info.pending_wbufs.clear();
+
+				for _ in 0..rem_count {
+					connection_info.pending_wbufs.remove(0);
+				}
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
 				warn!("tried to write to a listener: {:?}", event);
 			}
 		}
 
+		for rem in to_remove {
+			Self::close_connection(
+				rem,
+				ctx,
+				callbacks,
+				connection_id_map,
+				connection_handle_map,
+				wakeup,
+			)?;
+		}
+
 		Ok(())
+	}
+
+	fn write_loop(handle: Handle, wbuf: &mut WriteBuffer) -> Result<WriteResult, Error> {
+		let len = write_bytes(handle, &mut wbuf.buf)?;
+		if len < 0 {
+			if errno().0 != libc::EAGAIN {
+				Ok(WriteResult::Block)
+			} else {
+				Ok(WriteResult::Err)
+			}
+		} else {
+			wbuf.cur = wbuf.cur.saturating_sub(len.try_into()?);
+			Ok(WriteResult::Ok)
+		}
 	}
 
 	#[cfg(any(target_os = "linux"))]
@@ -930,9 +1048,16 @@ where
 	}
 }
 
+enum WriteResult {
+	Ok,
+	Err,
+	Block,
+}
+
 fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	#[cfg(unix)]
 	let len = {
+		set_errno(Errno(0));
 		let cbuf: *const c_void = buf as *const _ as *const c_void;
 		unsafe { write(handle, cbuf, buf.len().into()) }
 	};
@@ -1043,18 +1168,18 @@ struct Event {
 struct WriteBuffer {
 	connection_id: u128,
 	buf: Vec<u8>,
-	_cur: usize,
-	_close: bool,
+	cur: usize,
+	close: bool,
 }
 
 impl WriteBuffer {
-	fn new(connection_id: u128, buf: Vec<u8>, _close: bool) -> Self {
-		let _cur = 0;
+	fn new(connection_id: u128, buf: Vec<u8>, close: bool) -> Self {
+		let cur = buf.len();
 		Self {
 			connection_id,
 			buf,
-			_cur,
-			_close,
+			cur,
+			close,
 		}
 	}
 }
