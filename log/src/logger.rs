@@ -176,6 +176,8 @@ impl LogImpl {
 			file.write(line_bytes)?;
 			file.write(&[10u8])?; // new line
 			self.cur_size = line_bytes.len() as u64 + 1;
+		} else {
+			self.cur_size = 0;
 		}
 		self.last_rotation = Instant::now();
 
@@ -528,9 +530,9 @@ mod tests {
 	#[test]
 	fn test_log() -> Result<(), Error> {
 		setup_test_dir()?;
-		let mut log = Log::new();
 
 		// default settings - no line num
+		let mut log = Log::new();
 		let config = LogConfig {
 			file_path: Some(".test_log.nio/test1.log".to_string()),
 			show_line_num: false,
@@ -600,11 +602,10 @@ mod tests {
 		assert_eq!(text.chars().nth(24).unwrap(), 'D');
 		assert_eq!(text.chars().nth(25).unwrap(), 'E');
 		assert_eq!(text.chars().nth(26).unwrap(), 'B');
-		assert_eq!(text.chars().nth(27).unwrap(), 'U');
-		assert_eq!(text.chars().nth(28).unwrap(), 'G');
-		assert_eq!(text.chars().nth(29).unwrap(), ')');
-		assert_eq!(text.chars().nth(30).unwrap(), ' ');
-		assert_eq!(text.chars().nth(31).unwrap(), 'w');
+		assert_eq!(text.chars().nth(27).unwrap(), 'G');
+		assert_eq!(text.chars().nth(28).unwrap(), ')');
+		assert_eq!(text.chars().nth(29).unwrap(), ' ');
+		assert_eq!(text.chars().nth(30).unwrap(), 'w');
 
 		// no log level
 		let mut log = Log::new();
@@ -953,6 +954,7 @@ mod tests {
 			show_log_level: true,
 			show_line_num: true,
 			auto_rotate: true,
+			max_file_name_len: 25,
 		};
 		let mut log = Log::new();
 		log.init(config)?;

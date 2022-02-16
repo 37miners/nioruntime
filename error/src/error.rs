@@ -144,6 +144,9 @@ pub enum ErrorKind {
 	HandleNotFoundError(String),
 	#[fail(display = "Wrong connection type: {}", _0)]
 	WrongConnectionType(String),
+	/// The connection is already closed
+	#[fail(display = "Connection is closed: {}", _0)]
+	ConnectionClosedError(String),
 }
 
 impl Display for Error {

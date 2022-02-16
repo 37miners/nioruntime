@@ -96,8 +96,18 @@ impl ConnectionData {
 			return Ok(());
 		}
 
-		// first try to write in our own thread
-		let res = write_bytes(self.connection_info.get_handle(), &data)?;
+		let res = {
+			// first try to write in our own thread, check if closed first.
+			let is_closed = lockw!(self.connection_info.is_closed)?;
+			if *is_closed {
+				return Err(ErrorKind::ConnectionClosedError(format!(
+					"connection {} already closed",
+					self.get_connection_id()
+				))
+				.into());
+			}
+			write_bytes(self.connection_info.get_handle(), &data)?
+		};
 
 		if res == len.try_into().unwrap_or(0) {
 			return Ok(());
@@ -445,9 +455,19 @@ where
 			Some((id, handle)) => {
 				info!("rem {},{} from maps", id, handle);
 				connection_id_map.remove(&id);
-				connection_handle_map.remove(&handle);
-				unsafe {
-					libc::close(handle);
+				let connection_info = connection_handle_map.remove(&handle);
+				match connection_info {
+					Some(connection_info) => match connection_info {
+						EventConnectionInfo::ReadWriteConnection(c) => {
+							let mut is_closed = lockw!(c.is_closed)?;
+							*is_closed = true;
+							unsafe {
+								libc::close(handle);
+							}
+						}
+						_ => warn!("listener closed!"),
+					},
+					None => warn!("tried to close a connection that's already closed!"),
 				}
 				ctx.filter_set.remove(&handle);
 			}
@@ -936,6 +956,7 @@ pub struct ReadWriteConnection {
 	id: u128,
 	handle: Handle,
 	pending_wbufs: Vec<WriteBuffer>,
+	is_closed: Arc<RwLock<bool>>,
 }
 
 impl ReadWriteConnection {
@@ -944,6 +965,7 @@ impl ReadWriteConnection {
 			id,
 			handle,
 			pending_wbufs: vec![],
+			is_closed: Arc::new(RwLock::new(false)),
 		}
 	}
 
