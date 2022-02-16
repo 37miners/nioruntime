@@ -47,7 +47,7 @@ pub const ERROR: i32 = 4;
 /// have halted.
 pub const FATAL: i32 = 5;
 
-const DISPLAY_ARRAY: [&str; 6] = ["TRCE", "DEBG", "INFO", "WARN", "ERRR", "FATL"];
+const DISPLAY_ARRAY: [&str; 6] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 
 /// The main logging object. Usually this is used through macros.
 pub struct Log {
@@ -619,10 +619,11 @@ mod tests {
 		assert_eq!(text.chars().nth(24).unwrap(), 'D');
 		assert_eq!(text.chars().nth(25).unwrap(), 'E');
 		assert_eq!(text.chars().nth(26).unwrap(), 'B');
-		assert_eq!(text.chars().nth(27).unwrap(), 'G');
-		assert_eq!(text.chars().nth(28).unwrap(), ')');
-		assert_eq!(text.chars().nth(29).unwrap(), ' ');
-		assert_eq!(text.chars().nth(30).unwrap(), 'w');
+		assert_eq!(text.chars().nth(27).unwrap(), 'U');
+		assert_eq!(text.chars().nth(28).unwrap(), 'G');
+		assert_eq!(text.chars().nth(29).unwrap(), ')');
+		assert_eq!(text.chars().nth(30).unwrap(), ' ');
+		assert_eq!(text.chars().nth(31).unwrap(), 'w');
 
 		// no log level
 		let mut log = Log::new();
