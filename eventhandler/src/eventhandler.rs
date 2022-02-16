@@ -15,7 +15,7 @@
 //! An event handler library.
 
 use errno::{errno, set_errno, Errno};
-use libc::{accept, c_int, c_void, fcntl, pipe, read, timespec, write};
+use libc::{accept, c_int, c_void, fcntl, pipe, read, write};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
@@ -24,8 +24,8 @@ use std::convert::TryInto;
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
+// mac/bsd variant specific deps
 #[cfg(any(
 	target_os = "macos",
 	target_os = "dragonfly",
@@ -34,7 +34,24 @@ use std::time::Duration;
 	target_os = "freebsd"
 ))]
 use kqueue_sys::{kevent, kqueue, EventFilter, EventFlag, FilterFlag};
+#[cfg(any(
+	target_os = "macos",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "freebsd"
+))]
+use libc::timespec;
+#[cfg(any(
+	target_os = "macos",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "freebsd"
+))]
+use std::time::Duration;
 
+// linux specific deps
 #[cfg(target_os = "linux")]
 use nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
@@ -637,29 +654,23 @@ where
 			}
 		}
 
-		let empty_event = EpollEvent::new(EpollFlags::empty(), 0);
-		let mut epoll_events = [empty_event; MAX_EVENTS as usize];
-		let results = epoll_wait(epollfd, &mut epoll_events, 30000000);
+		let results = epoll_wait(epollfd, &mut ctx.epoll_events, 30000000);
 
 		events.clear();
-
-		let mut ret_count_adjusted = events.len();
 
 		match results {
 			Ok(results) => {
 				if results > 0 {
 					for i in 0..results {
-						if !(epoll_events[i].events() & EpollFlags::EPOLLOUT).is_empty() {
-							ret_count_adjusted += 1;
+						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLOUT).is_empty() {
 							events.push(Event {
-								handle: epoll_events[i].data() as Handle,
+								handle: ctx.epoll_events[i].data() as Handle,
 								etype: EventType::Write,
 							});
 						}
-						if !(epoll_events[i].events() & EpollFlags::EPOLLIN).is_empty() {
-							ret_count_adjusted += 1;
+						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLIN).is_empty() {
 							events.push(Event {
-								handle: epoll_events[i].data() as Handle,
+								handle: ctx.epoll_events[i].data() as Handle,
 								etype: EventType::Read,
 							});
 						}
@@ -1088,11 +1099,17 @@ struct Context {
 	tid: usize,
 	buffer: [u8; READ_BUFFER_SIZE],
 	filter_set: HashSet<Handle>,
+	#[cfg(target_os = "linux")]
+	epoll_events: Vec<EpollEvent>,
 }
 
 impl Context {
 	fn new(tid: usize, guarded_data: Arc<RwLock<GuardedData>>) -> Result<Self, Error> {
+		#[cfg(target_os = "linux")]
+		let epoll_events = [EpollEvent::new(EpollFlags::empty(), 0); MAX_EVENTS as usize].to_vec();
 		Ok(Self {
+			#[cfg(target_os = "linux")]
+			epoll_events,
 			guarded_data,
 			filter_set: HashSet::new(),
 			add_pending: vec![],
