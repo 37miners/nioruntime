@@ -322,7 +322,7 @@ impl LogImpl {
 			file.write(&[10u8])?; // newline
 			if self.config.show_bt && level >= ERROR {
 				let bt = Backtrace::new();
-				let bt_text = format!("{:?}\n", bt);
+				let bt_text = format!("{:?}", bt);
 				let bt_bytes: &[u8] = bt_text.as_bytes();
 				file.write(bt_bytes)?;
 				self.cur_size += bt_bytes.len() as u64;
@@ -334,8 +334,8 @@ impl LogImpl {
 			println!("{}", line);
 			if self.config.show_bt && level >= ERROR {
 				let bt = Backtrace::new();
-				let bt_text = format!("{:?}\n", bt);
-				println!("{}", bt_text);
+				let bt_text = format!("{:?}", bt);
+				print!("{}", bt_text);
 				self.cur_size += bt_text.len() as u64;
 			}
 		}
