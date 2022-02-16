@@ -18,15 +18,27 @@ use errno::{errno, set_errno, Errno};
 use libc::{accept, c_int, c_void, fcntl, pipe, read, timespec, write};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::{lockr, lockw};
-use std::collections::HashMap;
+use nioruntime_util::lockw;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+#[cfg(any(
+	target_os = "macos",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "freebsd"
+))]
 use kqueue_sys::{kevent, kqueue, EventFilter, EventFlag, FilterFlag};
+
+#[cfg(target_os = "linux")]
+use nix::sys::epoll::{
+	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
+};
 
 fatal!();
 
@@ -67,14 +79,27 @@ impl ConnectionData {
 			return Ok(());
 		}
 
-		let wb = WriteBuffer::new(self.get_connection_id(), data.to_vec(), false);
+		// first try to write in our own thread
+		let res = write_bytes(self.connection_info.get_handle(), &data)?;
 
-		{
-			let mut guarded_data = lockw!(self.guarded_data)?;
-			guarded_data.write_queue.push(wb);
+		if res == len.try_into().unwrap_or(0) {
+			return Ok(());
+		} else if res < 0 {
+			error!("write error!");
+			return Ok(());
+		} else {
+			// otherwise, we have to pass to the other thread
+			let data = &data[res.try_into().unwrap_or(0)..];
+
+			let wb = WriteBuffer::new(self.get_connection_id(), data.to_vec(), false);
+
+			{
+				let mut guarded_data = lockw!(self.guarded_data)?;
+				guarded_data.write_queue.push(wb);
+			}
+
+			self.wakeup.wakeup()?;
 		}
-
-		self.wakeup.wakeup()?;
 
 		Ok(())
 	}
@@ -259,9 +284,8 @@ where
 			let connection_info =
 				EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read);
 			let connection_id = connection_info.get_connection_id();
-			let connection_info = Arc::new(RwLock::new(connection_info));
 			connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
-			connection_id_map.insert(connection_id, connection_info);
+			connection_id_map.insert(connection_id, wakeup.wakeup_handle_read);
 			ctx.input_events.push(Event {
 				handle: wakeup.wakeup_handle_read,
 				etype: EventType::Read,
@@ -296,8 +320,8 @@ where
 		events: &mut Vec<Event>,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		Self::process_new(ctx, config, connection_id_map, connection_handle_map)?;
 		Self::get_events(ctx, events)?;
@@ -305,7 +329,7 @@ where
 		for event in events {
 			match event.etype {
 				EventType::Read => {
-					let res = Self::process_read_event(
+					let _res = Self::process_read_event(
 						event,
 						ctx,
 						config,
@@ -334,8 +358,8 @@ where
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event);
@@ -351,9 +375,8 @@ where
 					.into())
 				}
 			};
-			let connection_info = lockr!(connection_info)?;
-			let _connection_id = (*connection_info).get_connection_id();
-			let handle = (*connection_info).get_handle(ctx.tid);
+			let _connection_id = connection_info.get_connection_id();
+			let handle = connection_info.get_handle(ctx.tid);
 
 			debug!("process conn_info: {:?}", connection_info);
 
@@ -409,6 +432,7 @@ where
 				unsafe {
 					libc::close(handle);
 				}
+				ctx.filter_set.remove(&handle);
 			}
 			None => {}
 		}
@@ -522,12 +546,12 @@ where
 		_ctx: &mut Context,
 		_config: &EventHandlerConfig,
 		_callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		_connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		_connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event);
 
-		let connection_info = match connection_handle_map.get_mut(&event.handle) {
+		let mut connection_info = match connection_handle_map.get_mut(&event.handle) {
 			Some(connection_info) => connection_info,
 			None => {
 				return Err(ErrorKind::HandleNotFoundError(format!(
@@ -538,8 +562,7 @@ where
 			}
 		};
 
-		let mut connection_info = lockw!(connection_info)?;
-		match &mut *connection_info {
+		match &mut connection_info {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
 				info!("connection_info={:?}", connection_info);
 				for wbuf in &mut connection_info.pending_wbufs {
@@ -556,6 +579,110 @@ where
 		Ok(())
 	}
 
+	#[cfg(any(target_os = "linux"))]
+	fn get_events(ctx: &mut Context, events: &mut Vec<Event>) -> Result<(), Error> {
+		debug!(
+			"in get events with {} events. tid={}",
+			ctx.input_events.len(),
+			ctx.tid
+		);
+
+		let epollfd = ctx.selector;
+		for evt in &ctx.input_events {
+			let mut interest = EpollFlags::empty();
+
+			if evt.etype == EventType::Read || evt.etype == EventType::Accept {
+				let fd = evt.handle;
+				interest |= EpollFlags::EPOLLIN;
+				interest |= EpollFlags::EPOLLET;
+				interest |= EpollFlags::EPOLLRDHUP;
+
+				let op = if ctx.filter_set.remove(&fd) {
+					EpollOp::EpollCtlMod
+				} else {
+					EpollOp::EpollCtlAdd
+				};
+				ctx.filter_set.insert(fd);
+
+				let mut event = EpollEvent::new(interest, evt.handle.try_into().unwrap_or(0));
+				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
+				match res {
+					Ok(_) => {}
+					Err(e) => error!("Error epoll_ctl2: {}, fd={}, op={:?}", e, fd, op),
+				}
+			} else if evt.etype == EventType::Write {
+				let fd = evt.handle;
+				interest |= EpollFlags::EPOLLOUT;
+				interest |= EpollFlags::EPOLLIN;
+				interest |= EpollFlags::EPOLLRDHUP;
+				interest |= EpollFlags::EPOLLET;
+
+				let op = if ctx.filter_set.remove(&fd) {
+					EpollOp::EpollCtlMod
+				} else {
+					EpollOp::EpollCtlAdd
+				};
+				ctx.filter_set.insert(fd);
+
+				let mut event = EpollEvent::new(interest, evt.handle.try_into().unwrap_or(0));
+				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
+				match res {
+					Ok(_) => {}
+					Err(e) => error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op),
+				}
+			} else {
+				return Err(
+					ErrorKind::InternalError(format!("unexpected etype: {:?}", evt.etype)).into(),
+				);
+			}
+		}
+
+		let empty_event = EpollEvent::new(EpollFlags::empty(), 0);
+		let mut epoll_events = [empty_event; MAX_EVENTS as usize];
+		let results = epoll_wait(epollfd, &mut epoll_events, 30000000);
+
+		events.clear();
+
+		let mut ret_count_adjusted = events.len();
+
+		match results {
+			Ok(results) => {
+				if results > 0 {
+					for i in 0..results {
+						if !(epoll_events[i].events() & EpollFlags::EPOLLOUT).is_empty() {
+							ret_count_adjusted += 1;
+							events.push(Event {
+								handle: epoll_events[i].data() as Handle,
+								etype: EventType::Write,
+							});
+						}
+						if !(epoll_events[i].events() & EpollFlags::EPOLLIN).is_empty() {
+							ret_count_adjusted += 1;
+							events.push(Event {
+								handle: epoll_events[i].data() as Handle,
+								etype: EventType::Read,
+							});
+						}
+					}
+				}
+			}
+			Err(e) => {
+				error!("Error with epoll wait = {}", e.to_string());
+			}
+		}
+
+		ctx.input_events.clear();
+
+		Ok(())
+	}
+
+	#[cfg(any(
+		target_os = "macos",
+		target_os = "dragonfly",
+		target_os = "netbsd",
+		target_os = "openbsd",
+		target_os = "freebsd"
+	))]
 	fn get_events(ctx: &mut Context, events: &mut Vec<Event>) -> Result<(), Error> {
 		debug!(
 			"in get events with {} events. tid={}",
@@ -678,8 +805,8 @@ where
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
-		connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		{
 			let mut guarded_data = lockw!(ctx.guarded_data)?;
@@ -693,6 +820,7 @@ where
 			"adding pending conns: {:?} on tid={}",
 			ctx.add_pending, ctx.tid
 		);
+
 		Self::process_pending(ctx, connection_id_map, connection_handle_map)?;
 		ctx.add_pending.clear();
 
@@ -704,15 +832,14 @@ where
 
 	fn process_nwrites(
 		ctx: &mut Context,
-		connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		_connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len());
 		for wbuf in &ctx.nwrites {
-			match connection_id_map.get_mut(&wbuf.connection_id) {
-				Some(conn_info) => {
-					let mut conn_info = lockw!(conn_info)?;
-					match &mut *conn_info {
+			match connection_id_map.get(&wbuf.connection_id) {
+				Some(handle) => match connection_handle_map.get_mut(handle) {
+					Some(conn_info) => match conn_info {
 						EventConnectionInfo::ReadWriteConnection(item) => {
 							item.pending_wbufs.push(wbuf.clone());
 							info!("pushing wbuf to item = {:?}", item);
@@ -724,8 +851,11 @@ where
 						EventConnectionInfo::ListenerConnection(item) => {
 							warn!("Got a write request on listener: {:?}", item);
 						}
+					},
+					None => {
+						warn!("Handle not found for connection_id!");
 					}
-				}
+				},
 				None => {
 					trace!("Attempt to write on closed connection: {:?}", wbuf);
 				} // connection already disconnected
@@ -737,25 +867,23 @@ where
 
 	fn process_pending(
 		ctx: &mut Context,
-		connection_id_map: &mut HashMap<u128, Arc<RwLock<EventConnectionInfo>>>,
-		connection_handle_map: &mut HashMap<Handle, Arc<RwLock<EventConnectionInfo>>>,
+		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len());
 		for pending in &ctx.add_pending {
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					let pending = Arc::new(RwLock::new(pending.clone()));
-					connection_id_map.insert(item.id, pending.clone());
-					connection_handle_map.insert(item.handle, pending);
+					connection_id_map.insert(item.id, item.handle);
+					connection_handle_map.insert(item.handle, pending.clone());
 					ctx.input_events.push(Event {
 						handle: item.handle,
 						etype: EventType::Read,
 					});
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					let pending = Arc::new(RwLock::new(pending.clone()));
-					connection_id_map.insert(item.id, pending.clone());
-					connection_handle_map.insert(item.handles[ctx.tid], pending);
+					connection_id_map.insert(item.id, item.handles[ctx.tid]);
+					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
 					info!(
 						"pushing accept handle: {} to tid={}",
 						item.handles[ctx.tid], ctx.tid
@@ -771,7 +899,7 @@ where
 	}
 }
 
-fn write_bytes(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
+fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	#[cfg(unix)]
 	let len = {
 		let cbuf: *const c_void = buf as *const _ as *const c_void;
@@ -812,7 +940,7 @@ impl ReadWriteConnection {
 		self.id
 	}
 
-	fn _get_handle(&self) -> Handle {
+	fn get_handle(&self) -> Handle {
 		self.handle
 	}
 }
@@ -865,7 +993,7 @@ impl EventConnectionInfo {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum EventType {
 	Accept,
 	Read,
@@ -959,16 +1087,28 @@ struct Context {
 	selector: SelectorHandle,
 	tid: usize,
 	buffer: [u8; READ_BUFFER_SIZE],
+	filter_set: HashSet<Handle>,
 }
 
 impl Context {
 	fn new(tid: usize, guarded_data: Arc<RwLock<GuardedData>>) -> Result<Self, Error> {
 		Ok(Self {
 			guarded_data,
+			filter_set: HashSet::new(),
 			add_pending: vec![],
 			accepted_connections: vec![],
 			nwrites: vec![],
 			input_events: vec![],
+
+			#[cfg(any(target_os = "linux"))]
+			selector: epoll_create1(EpollCreateFlags::empty())?,
+			#[cfg(any(
+				target_os = "macos",
+				target_os = "dragonfly",
+				target_os = "netbsd",
+				target_os = "openbsd",
+				target_os = "freebsd"
+			))]
 			selector: unsafe { kqueue() },
 			tid,
 			buffer: [0u8; READ_BUFFER_SIZE],

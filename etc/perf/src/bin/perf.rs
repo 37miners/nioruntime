@@ -21,7 +21,7 @@ use nix::sys::socket::InetAddr;
 use nix::sys::socket::SockAddr;
 use std::io::{Read, Write};
 use std::mem;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::prelude::RawFd;
@@ -79,10 +79,12 @@ fn main() -> Result<(), Error> {
 		show_line_num: false,
 		..Default::default()
 	})?;
-	let mut evh = EventHandler::new(EventHandlerConfig {
+	let evh_config = EventHandlerConfig {
 		threads: 6,
 		..EventHandlerConfig::default()
-	})?;
+	};
+
+	let mut evh = EventHandler::new(evh_config.clone())?;
 
 	if is_server {
 		info!("Starting EventHandler");
@@ -93,7 +95,7 @@ fn main() -> Result<(), Error> {
 		let mut handles = vec![];
 		let mut listeners = vec![];
 
-		for _ in 0..6 {
+		for _ in 0..evh_config.threads {
 			let fd = get_fd()?;
 			nix::sys::socket::bind(fd, &sock_addr)?;
 			nix::sys::socket::listen(fd, 1000)?;
@@ -142,7 +144,10 @@ fn main() -> Result<(), Error> {
 			for _ in 0..threads {
 				jhs.push(std::thread::spawn(move || match run_thread(count) {
 					Ok(_) => {}
-					Err(e) => error!("{}", e),
+					Err(e) => {
+						error!("{}", e);
+						assert!(false);
+					}
 				}));
 			}
 
@@ -170,14 +175,23 @@ fn main() -> Result<(), Error> {
 }
 
 fn run_thread(count: usize) -> Result<(), Error> {
-	info!("running a thread with count = {}", count);
-	let buf = &mut [0u8; 10];
+	let max: usize = 100;
+	let min: usize = 50;
+	let rbuf = &mut [0u8; 100];
+	let wbuf = &mut [0u8; 100];
+	for i in 0..100 {
+		wbuf[i] = (i % 256) as u8;
+	}
+
 	let mut stream = TcpStream::connect("127.0.0.1:8092")?;
 	let mut x = 0;
 	loop {
-		stream.write(&[1, 2, 3, 4, 5, 6, 7])?;
-		let len = stream.read(&mut buf[..])?;
-		assert_eq!(&buf[0..len], &[1, 2, 3, 4, 5, 6, 7]);
+		let r: usize = rand::random();
+		let r = r % (max - min);
+		let wlen = r + min;
+		stream.write(&wbuf[0..wlen])?;
+		let len = stream.read(&mut rbuf[..])?;
+		assert_eq!(&rbuf[0..len], &wbuf[0..wlen]);
 		x += 1;
 		if x == count {
 			break;
