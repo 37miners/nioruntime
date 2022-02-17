@@ -137,6 +137,16 @@ fn main() -> Result<(), std::io::Error> {
 	trace_no_ts!("trace_no_ts").expect("failed to log");
 	trace_all!("trace all").expect("failed to log");
 
+	let config = get_config_multi!("default");
+	info!("config={:?}", config).expect("config");
+
+	let config_option = get_config_option!(Settings::Stdout);
+	set_config_option!(Settings::Timestamp, true).expect("set");
+	info_all!("stdout={:?}", config_option).expect("info");
+	rotate!().expect("rotate");
+	let rotation_status = rotation_status!();
+	info_all!("rot_status={:?}", rotation_status).expect("info");
+
 	Ok(())
 	/*
 		let res = real_main();

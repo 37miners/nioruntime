@@ -73,13 +73,13 @@ macro_rules! fatal_no_ts {
         ($a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::FATAL, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, DEFAULT_LOG, $a)
                 }
         };
         ($a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::FATAL, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -153,13 +153,13 @@ macro_rules! error_no_ts {
         ($a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::ERROR, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, DEFAULT_LOG, $a)
                 }
         };
         ($a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::ERROR, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -233,13 +233,13 @@ macro_rules! warn_no_ts {
         ($a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::WARN, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, DEFAULT_LOG, $a)
                 }
         };
         ($a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::WARN, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -311,13 +311,13 @@ macro_rules! info_no_ts {
         ($a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::INFO, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, DEFAULT_LOG, $a)
                 }
         };
         ($a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::INFO, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -392,13 +392,13 @@ macro_rules! debug_no_ts {
         ($a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::DEBUG, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, DEFAULT_LOG, $a)
                 }
         };
         ($a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!(nioruntime_log::DEBUG, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -472,13 +472,13 @@ macro_rules! trace_no_ts {
 	($a:expr) => {
 		{
 			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_no_ts_multi!(nioruntime_log::TRACE, DEFAULT_LOG, $a)
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, DEFAULT_LOG, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
 			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_no_ts_multi!(nioruntime_log::TRACE, DEFAULT_LOG, $a, $($b)*)
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, DEFAULT_LOG, $a, $($b)*)
 		}
 	};
 }
@@ -503,7 +503,7 @@ macro_rules! trace_all {
 
 /// Same as [`log_multi`] except that the log line is logged to stdout as well, no matter
 /// what the existing configuration is. To configure this
-/// logger, see [`log_multi_config`]. It is used like the pritln/format macros. The first
+/// logger, see [`log_config_multi`]. It is used like the pritln/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace_all`], [`debug_all`],
 /// [`info_all`], [`warn_all`], [`error_all`], or [`fatal_all`].
 /// # Examples
@@ -548,7 +548,7 @@ macro_rules! log_multi_all {
 		res
 	}};
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
-		let mut res: Result<(), nioruntime_err::Error> = Ok(());
+		let mut res: Result<(), nioruntime_err::Error>;
 
                 let stdout_cur = nioruntime_log::get_config_option!(
                         nioruntime_log::Settings::Stdout
@@ -573,7 +573,7 @@ macro_rules! log_multi_all {
 }
 
 /// The main logging macro for use with multiple loggers. To configure this
-/// logger, see [`log_multi_config`]. It is used like the pritln/format macros. The first
+/// logger, see [`log_config_multi`]. It is used like the pritln/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace`], [`debug`],
 /// [`info`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
@@ -700,6 +700,24 @@ macro_rules! log {
         };
 }
 
+/// Just like [`log`], but the line is also logged to stdout regardless of the current
+/// configuration.
+#[macro_export]
+macro_rules! log_all {
+        ($level:expr, $a:expr) => {
+                {
+                        const DEFAULT_LOG: &str = "default";
+                        nioruntime_log::log_multi_all!($level, DEFAULT_LOG, $a)
+                }
+        };
+        ($level:expr, $a:expr,$($b:tt)*)=>{
+                {
+                        const DEFAULT_LOG: &str = "default";
+                        nioruntime_log::log_multi_all!($level, DEFAULT_LOG, $a, $($b)*)
+                }
+        };
+}
+
 /// Set various options for the logger after initialization.
 /// The settings supported are specified in the [`crate::logger::Settings`] enumeration.
 ///
@@ -749,7 +767,7 @@ macro_rules! get_config_option {
 	($log:expr,$get_type:expr) => {{
 		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => {
-				let mut log = log_map.get_mut($log);
+				let log = log_map.get_mut($log);
 				match log {
 					Some(log) => match $get_type {
 						nioruntime_log::Settings::Stdout => log.get_show_stdout(),
@@ -860,14 +878,14 @@ macro_rules! set_config_option {
 /// info!();
 ///
 /// fn test() -> Result<(), Error> {
-///     log_no_ts_multi!(2, "nondefaultlogger", "hi");
-///     log_no_ts_multi!(2, "nondefaultlogger", "value = {}", 123);
+///     log_multi_no_ts!(2, "nondefaultlogger", "hi");
+///     log_multi_no_ts!(2, "nondefaultlogger", "value = {}", 123);
 ///     Ok(())
 /// }
 /// ```
 ///
 #[macro_export]
-macro_rules! log_no_ts_multi {
+macro_rules! log_multi_no_ts {
 ($level:expr, $a:expr, $b:expr) => {{
                 let res: Result<(), nioruntime_err::Error>;
                 match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
@@ -955,13 +973,13 @@ macro_rules! log_no_ts {
         ($level:expr, $a:expr) => {
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!($level, DEFAULT_LOG, $a)
+                        nioruntime_log::log_multi_no_ts!($level, DEFAULT_LOG, $a)
                 }
         };
         ($level:expr, $a:expr,$($b:tt)*)=>{
                 {
                         const DEFAULT_LOG: &str = "default";
-                        nioruntime_log::log_no_ts_multi!($level, DEFAULT_LOG, $a, $($b)*)
+                        nioruntime_log::log_multi_no_ts!($level, DEFAULT_LOG, $a, $($b)*)
                 }
         };
 }
@@ -1015,15 +1033,28 @@ macro_rules! do_log {
 #[macro_export]
 macro_rules! get_config_multi {
 	($a:expr) => {{
-		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
-		let log = log_map.get_mut($a);
-		match log {
-			Some(log) => log.get_config(),
-			None => Err(nioruntime_err::ErrorKind::LogConfigurationError(
-				"no config found".to_string(),
-			)
-			.into()),
+		let res: Result<LogConfig, nioruntime_err::Error>;
+		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+			Ok(mut log_map) => match log_map.get_mut($a) {
+				Some(log) => {
+					res = log.get_config();
+				}
+				None => {
+					res = Err(nioruntime_err::ErrorKind::LogConfigurationError(
+						"no config found".to_string(),
+					)
+					.into());
+				}
+			},
+			Err(e) => {
+				res = Err(nioruntime_err::ErrorKind::LogError(format!(
+					"error obtaining lock: {}",
+					e
+				))
+				.into());
+			}
 		}
+		res
 	}};
 }
 
@@ -1101,4 +1132,227 @@ macro_rules! log_config {
 			nioruntime_log::log_config_multi!(DEFAULT_LOG, $a);
 		res
 	}};
+}
+
+/// This macro rotates the log. Optionally, the name of the log may be specified. If no
+/// name is specified, the default log is rotated. Also see [`rotation_status`].
+///
+/// # Examples
+/// ```
+/// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+///
+/// const MAIN_LOG: &str = "mainlog";
+///
+/// info!();
+///
+/// fn test() -> Result<(), Error> {
+///     log_config!(nioruntime_log::LogConfig {
+///         max_age_millis: 10000, // set log rotations to every 10 seconds
+///         max_size: 10000, // set log rotations to every 10,000 bytes
+///         ..Default::default()
+///     });
+///
+///     info!("some data...");
+///     rotate!();
+///
+///     info!("other data...");
+///     rotate!(MAIN_LOG);
+///
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! rotate {
+	() => {{
+		const DEFAULT_LOG: &str = "default";
+		rotate!(DEFAULT_LOG)
+	}};
+	($log:expr) => {{
+		//let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
+		let res: Result<(), nioruntime_err::Error>;
+		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+			Ok(mut log_map) => match log_map.get_mut($log) {
+				Some(log) => {
+					res = log.rotate();
+				}
+				None => {
+					res = Err(nioruntime_err::ErrorKind::LogConfigurationError(
+						"error log not configured".to_string(),
+					)
+					.into());
+				}
+			},
+			Err(e) => {
+				res = Err(e);
+			}
+		};
+		res
+	}};
+}
+
+/// This macro returns the rotation status of the log. Optionally, the name of the log
+/// may be specified. If no name is specified, the default log is rotated. The return
+/// value is of the [`crate::RotationStatus`] enum. See its documentation for further details.
+/// Also see [`rotate`].
+///
+/// # Examples
+/// ```
+/// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+///
+/// const MAIN_LOG: &str = "mainlog";
+///
+/// info!();
+///
+/// fn test() -> Result<(), Error> {
+///     log_config!(nioruntime_log::LogConfig {
+///         max_age_millis: 10000, // set log rotations to every 10 seconds
+///         max_size: 10000, // set log rotations to every 10,000 bytes
+///         ..Default::default()
+///     });
+///
+///     info!("some data...")?;
+///     rotate!()?;
+///
+///     info!("other data...")?;
+///     rotate!(MAIN_LOG)?;
+///
+///     let status_main = rotation_status!(MAIN_LOG)?;
+///     let status_default = rotation_status!()?;
+///
+///     info!("rotation status main = {:?}, default = {:?}", status_main, status_default);
+///
+///     Ok(())
+/// }
+/// ```
+#[macro_export]
+macro_rules! rotation_status {
+	() => {{
+		const DEFAULT_LOG: &str = "default";
+		rotation_status!(DEFAULT_LOG)
+	}};
+	($log:expr) => {{
+		let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
+		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+			Ok(mut log_map) => match log_map.get_mut($log) {
+				Some(log) => {
+					res = log.rotation_status();
+				}
+				None => {
+					res = Err(nioruntime_err::ErrorKind::LogConfigurationError(
+						"error log not configured".to_string(),
+					)
+					.into());
+				}
+			},
+			Err(e) => {
+				res = Err(e);
+			}
+		};
+		res
+	}};
+}
+
+#[cfg(test)]
+mod tests {
+	use crate as nioruntime_log;
+	use crate::*;
+	use nioruntime_err::Error;
+
+	trace!();
+
+	fn setup_test_dir(dir: &str) -> Result<(), Error> {
+		let _ = std::fs::remove_dir_all(dir);
+		std::fs::create_dir_all(dir)?;
+		Ok(())
+	}
+
+	fn tear_down_test_dir(dir: &str) -> Result<(), Error> {
+		std::fs::remove_dir_all(dir)?;
+		Ok(())
+	}
+
+	#[test]
+	fn test_macros() {
+		const TEST_DIR: &str = ".test_macros.nio";
+
+		setup_test_dir(TEST_DIR).unwrap();
+
+		log_config!(LogConfig {
+			show_bt: false,
+			show_stdout: false,
+			auto_rotate: false,
+			show_line_num: false,
+			show_timestamp: false,
+			max_size: 10,
+			file_path: Some(format!("{}/test1.log", TEST_DIR)),
+			..Default::default()
+		})
+		.expect("log config");
+
+		fatal!("fatal").expect("fatal");
+		fatal_no_ts!("fatal no ts").expect("fatal no ts");
+		fatal_all!("fatal all").expect("fatal all");
+
+		error!("error").expect("error");
+		error_no_ts!("error no ts").expect("error no ts");
+		error_all!("error all").expect("error all");
+
+		warn!("warn").expect("warn");
+		warn_no_ts!("warn no ts").expect("warn no ts");
+		warn_all!("warn all").expect("warn all");
+
+		info!("info").expect("info");
+		info_no_ts!("info no ts").expect("info no ts");
+		info_all!("info all").expect("info all");
+
+		debug!("debug").expect("debug");
+		debug_no_ts!("debug no ts").expect("debug no ts");
+		debug_all!("debug all").expect("debug all");
+
+		trace!("trace").expect("trace");
+		trace_no_ts!("trace no ts").expect("trace no ts");
+		trace_all!("trace all").expect("trace all");
+
+		log!(INFO, "info from log").expect("log");
+		log_no_ts!(INFO, "info from log no ts").expect("log no ts");
+		log_all!(INFO, "log all").expect("log all");
+
+		let config = get_config_multi!("default").unwrap();
+		info_all!("config.show_timestamp={:?}", config.show_timestamp).expect("config");
+
+		let config_option = get_config_option!(Settings::Level).expect("level");
+		info_all!("level={}", config_option).expect("infoall");
+		set_config_option!(Settings::Level, false).expect("set");
+
+		let rs = rotation_status!().expect("rotation_status");
+		rotate!().expect("rotate");
+		let rs2 = rotation_status!().expect("rotation_status");
+		info_all!("rs={:?},rs2={:?}", rs, rs2).expect("info");
+
+		// there should be two files.
+		let paths = std::fs::read_dir(TEST_DIR).unwrap();
+		let mut count = 0;
+		for path in paths {
+			let path = path.unwrap().path().display().to_string();
+			if path.find(".test_macros.nio/test1.log") == Some(0) {
+				let len = std::fs::metadata(path).unwrap().len();
+				assert_eq!(len, 24);
+				count += 1;
+			} else if path.find(".test_macros.nio/test1.r") == Some(0) {
+				let len = std::fs::metadata(path).unwrap().len();
+				assert_eq!(len, 363);
+				count += 1;
+			}
+		}
+
+		assert_eq!(count, 2);
+		// for now checking length and number of files should be ok.
+		// with the specified options, files are deterministic.
+		// any bugs at this level would likely result in different file
+		// lengths. More thorough testing is done in logger.rs
+
+		tear_down_test_dir(TEST_DIR).unwrap();
+	}
 }
