@@ -56,7 +56,7 @@ use std::time::Duration;
 
 // linux specific deps
 #[cfg(target_os = "linux")]
-use nix::sys::epoll::{
+use nioruntime_deps::nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
