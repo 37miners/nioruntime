@@ -12,6 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(any(
+	target_os = "macos",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "freebsd"
+))]
+pub use kqueue_sys;
+
 pub use backtrace;
 pub use base64;
 pub use byteorder;
@@ -21,7 +30,6 @@ pub use ed25519_dalek;
 pub use errno;
 pub use failure;
 pub use futures;
-pub use kqueue_sys;
 pub use lazy_static;
 pub use libc;
 pub use nix;
