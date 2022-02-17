@@ -1011,10 +1011,10 @@ macro_rules! do_log {
 	};
 }
 
-/// get_config_multi get's the LogConfig structure for the specified logger
+/// get_config returns the [`crate::LogConfig`] structure for the specified logger.
+/// If no logger is specified, the default logger's [`crate::LogConfig`] will be returned.
 ///
-/// A sample get_config_multi! call might look something like this:
-///
+/// # Examples
 /// ```
 /// use nioruntime_log::*;
 /// use nioruntime_err::Error;
@@ -1024,8 +1024,10 @@ macro_rules! do_log {
 ///
 /// fn test() -> Result<(), Error> {
 ///     log_multi!(INFO, MAIN_LOG, "test");
-///     let config = get_config_multi!(MAIN_LOG)?;
+///     let config = get_config!(MAIN_LOG)?;
 ///     info!("The mainlog's config is {:?}", config);
+///     let config = get_config!();
+///     info!("The default config is {:?}", config);
 ///
 ///     Ok(())
 /// }
@@ -1033,7 +1035,11 @@ macro_rules! do_log {
 ///
 /// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
-macro_rules! get_config_multi {
+macro_rules! get_config {
+	() => {{
+		const DEFAULT_LOG: &str = "default";
+		nioruntime_log::get_config!(DEFAULT_LOG)
+	}};
 	($a:expr) => {{
 		let res: Result<LogConfig, nioruntime_err::Error>;
 		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
@@ -1321,8 +1327,13 @@ mod tests {
 		log_no_ts!(INFO, "info from log no ts").expect("log no ts");
 		log_all!(INFO, "log all").expect("log all");
 
-		let config = get_config_multi!("default").unwrap();
+		let config = get_config!().unwrap();
 		info_all!("config.show_timestamp={:?}", config.show_timestamp).expect("config");
+
+		// main log not configured yet
+		assert_eq!(get_config!("mainlog").is_err(), true);
+		log_multi!(INFO, "mainlog", "test").expect("log_multi");
+		assert_eq!(get_config!("mainlog").is_err(), false);
 
 		let config_option = get_config_option!(Settings::Level).expect("level");
 		info_all!("level={}", config_option).expect("infoall");

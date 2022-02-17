@@ -137,7 +137,7 @@ fn main() -> Result<(), std::io::Error> {
 	trace_no_ts!("trace_no_ts").expect("failed to log");
 	trace_all!("trace all").expect("failed to log");
 
-	let config = get_config_multi!("default");
+	let config = get_config!("default");
 	info!("config={:?}", config).expect("config");
 
 	let config_option = get_config_option!(Settings::Stdout);
