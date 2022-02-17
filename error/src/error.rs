@@ -15,6 +15,7 @@
 use crate::failure::{Backtrace, Context, Fail};
 #[cfg(unix)]
 use crate::nix::errno::Errno;
+use crate::rustls::client::InvalidDnsNameError;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
@@ -324,6 +325,14 @@ impl From<Infallible> for Error {
 	fn from(e: Infallible) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::InternalError(format!("Infallible: {}", e))),
+		}
+	}
+}
+
+impl From<InvalidDnsNameError> for Error {
+	fn from(e: InvalidDnsNameError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::TLSError(format!("InvalidDNS: {}", e))),
 		}
 	}
 }

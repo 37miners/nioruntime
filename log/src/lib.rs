@@ -23,4 +23,4 @@ mod macros;
 
 pub use crate::logger::{do_log, Log, LogConfig, RotationStatus, Settings};
 pub use crate::logger::{DEBUG, ERROR, FATAL, INFO, TRACE, WARN};
-pub use crate::macros::STATIC_LOG;
+pub use crate::macros::{DEFAULT_LOG_NAME, STATIC_LOG};

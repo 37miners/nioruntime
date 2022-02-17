@@ -22,6 +22,59 @@ lazy_static! {
 	/// should not be called directly. See [`log`] instead.
 	#[doc(hidden)]
 	pub static ref STATIC_LOG: Arc<RwLock<HashMap<String, Log>>> = Arc::new(RwLock::new(HashMap::new()));
+	#[doc(hidden)]
+	pub static ref DEFAULT_LOG_NAME: Arc<RwLock<String>> = Arc::new(RwLock::new("default".to_string()));
+}
+
+#[macro_export]
+/// This macro is used to get/set the default log name. If no parameters are specified, the current default
+/// log name is returned. If a &str is specified, the default log name is set to that value.
+///
+/// # Examples
+/// ```
+///
+/// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+/// trace!();
+///
+/// fn test() -> Result<(), Error> {
+///     const LOGA: &str = "loga";
+///     const LOGB: &str = "logb";
+///     log_config_multi!(LOGA, LogConfig {
+///         show_timestamp: false,
+///         ..Default::default()
+///     })?;
+///
+///     log_config_multi!(LOGB, LogConfig {
+///         show_log_level: false,
+///         ..Default::default()
+///     })?;
+///
+///     log_multi!(INFO, LOGA, "a0123456789")?;
+///     log_multi!(INFO, LOGB, "b0123456789")?;
+///
+///     default_log_name!(LOGA);
+///     debug!("a")?; // logged to log a.
+///
+///     Ok(())
+/// }
+///
+/// ```
+macro_rules! default_log_name {
+	() => {{
+		match nioruntime_util::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
+			Ok(default_log_name) => (*default_log_name).clone(),
+			Err(e) => "default".to_string(),
+		}
+	}};
+	($name:expr) => {{
+		match nioruntime_util::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
+			Ok(mut default_log_name) => {
+				*default_log_name = $name.to_string();
+			}
+			Err(_e) => {}
+		}
+	}};
 }
 
 /// Log at the 'fatal' (5) log level. This macro calls the default logger. To configure this
@@ -56,14 +109,14 @@ macro_rules! fatal {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::FATAL, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::FATAL, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a, $($b)*)
 		}
 	};
 }
@@ -73,14 +126,14 @@ macro_rules! fatal {
 macro_rules! fatal_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a, $($b)*)
 		}
 	};
 }
@@ -91,14 +144,14 @@ macro_rules! fatal_no_ts {
 macro_rules! fatal_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a, $($b)*)
 		}
 	};
 }
@@ -136,14 +189,14 @@ macro_rules! error {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::ERROR, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::ERROR, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a, $($b)*)
 		}
 	};
 }
@@ -153,14 +206,14 @@ macro_rules! error {
 macro_rules! error_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a, $($b)*)
 		}
 	};
 }
@@ -171,14 +224,14 @@ macro_rules! error_no_ts {
 macro_rules! error_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a, $($b)*)
 		}
 	};
 }
@@ -216,14 +269,14 @@ macro_rules! warn {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::WARN, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::WARN, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a, $($b)*)
 		}
 	};
 }
@@ -233,14 +286,14 @@ macro_rules! warn {
 macro_rules! warn_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a, $($b)*)
 		}
 	};
 }
@@ -251,14 +304,14 @@ macro_rules! warn_no_ts {
 macro_rules! warn_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::WARN, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::WARN, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a, $($b)*)
 		}
 	};
 }
@@ -294,14 +347,14 @@ macro_rules! info {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::INFO, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::INFO, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a, $($b)*)
 		}
 	};
 }
@@ -311,14 +364,14 @@ macro_rules! info {
 macro_rules! info_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a, $($b)*)
 		}
 	};
 }
@@ -329,14 +382,14 @@ macro_rules! info_no_ts {
 macro_rules! info_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::INFO, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::INFO, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a, $($b)*)
 		}
 	};
 }
@@ -375,14 +428,14 @@ macro_rules! debug {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::DEBUG, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::DEBUG, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a, $($b)*)
 		}
 	};
 }
@@ -392,14 +445,14 @@ macro_rules! debug {
 macro_rules! debug_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a, $($b)*)
 		}
 	};
 }
@@ -410,14 +463,14 @@ macro_rules! debug_no_ts {
 macro_rules! debug_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a, $($b)*)
 		}
 	};
 }
@@ -455,14 +508,14 @@ macro_rules! trace {
 	};
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::TRACE, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!(nioruntime_log::TRACE, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a, $($b)*)
 		}
 	};
 }
@@ -472,14 +525,14 @@ macro_rules! trace {
 macro_rules! trace_no_ts {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a, $($b)*)
 		}
 	};
 }
@@ -490,14 +543,14 @@ macro_rules! trace_no_ts {
 macro_rules! trace_all {
 	($a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a)
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a, $($b)*)
 		}
 	};
 }
@@ -689,14 +742,14 @@ macro_rules! log_multi {
 macro_rules! log {
        ($level:expr, $a:expr)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!($level, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!($level, &default, $a)
 		}
 	};
 	($level:expr, $a:expr, $($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi!($level, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi!($level, &default, $a, $($b)*)
 		}
 	};
 }
@@ -707,14 +760,14 @@ macro_rules! log {
 macro_rules! log_all {
 	($level:expr, $a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!($level, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!($level, &default, $a)
 		}
 	};
 	($level:expr, $a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_all!($level, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_all!($level, &default, $a, $($b)*)
 		}
 	};
 }
@@ -973,14 +1026,14 @@ macro_rules! log_multi_no_ts {
 macro_rules! log_no_ts {
 	($level:expr, $a:expr) => {
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!($level, DEFAULT_LOG, $a)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!($level, &default, $a)
 		}
 	};
 	($level:expr, $a:expr,$($b:tt)*)=>{
 		{
-			const DEFAULT_LOG: &str = "default";
-			nioruntime_log::log_multi_no_ts!($level, DEFAULT_LOG, $a, $($b)*)
+			let default = nioruntime_log::default_log_name!();
+			nioruntime_log::log_multi_no_ts!($level, &default, $a, $($b)*)
 		}
 	};
 }
@@ -1037,8 +1090,8 @@ macro_rules! do_log {
 #[macro_export]
 macro_rules! get_config {
 	() => {{
-		const DEFAULT_LOG: &str = "default";
-		nioruntime_log::get_config!(DEFAULT_LOG)
+		let default = nioruntime_log::default_log_name!();
+		nioruntime_log::get_config!(&default)
 	}};
 	($a:expr) => {{
 		let res: Result<LogConfig, nioruntime_err::Error>;
@@ -1135,9 +1188,9 @@ macro_rules! log_config_multi {
 #[macro_export]
 macro_rules! log_config {
 	($a:expr) => {{
-		const DEFAULT_LOG: &str = "default";
+		let default = nioruntime_log::default_log_name!();
 		let res: Result<(), nioruntime_err::Error> =
-			nioruntime_log::log_config_multi!(DEFAULT_LOG, $a);
+			nioruntime_log::log_config_multi!(&default, $a);
 		res
 	}};
 }
@@ -1173,8 +1226,8 @@ macro_rules! log_config {
 #[macro_export]
 macro_rules! rotate {
 	() => {{
-		const DEFAULT_LOG: &str = "default";
-		rotate!(DEFAULT_LOG)
+		let default = nioruntime_log::default_log_name!();
+		rotate!(&default)
 	}};
 	($log:expr) => {{
 		//let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
@@ -1237,8 +1290,8 @@ macro_rules! rotate {
 #[macro_export]
 macro_rules! rotation_status {
 	() => {{
-		const DEFAULT_LOG: &str = "default";
-		rotation_status!(DEFAULT_LOG)
+		let default = nioruntime_log::default_log_name!();
+		rotation_status!(&default)
 	}};
 	($log:expr) => {{
 		let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
@@ -1365,6 +1418,54 @@ mod tests {
 		// with the specified options, files are deterministic.
 		// any bugs at this level would likely result in different file
 		// lengths. More thorough testing is done in logger.rs
+
+		// test different default name
+
+		const LOGA: &str = "logA";
+		const LOGB: &str = "logB";
+
+		let path_a = format!("{}/{}", TEST_DIR, LOGA);
+		let path_b = format!("{}/{}", TEST_DIR, LOGB);
+
+		log_config_multi!(
+			LOGA,
+			LogConfig {
+				file_path: Some(path_a.clone()),
+				show_bt: false,
+				show_stdout: false,
+				auto_rotate: false,
+				show_line_num: false,
+				show_timestamp: false,
+				..Default::default()
+			}
+		)
+		.expect("loga");
+
+		log_config_multi!(
+			LOGB,
+			LogConfig {
+				file_path: Some(path_b.clone()),
+				show_bt: false,
+				show_stdout: false,
+				auto_rotate: false,
+				show_line_num: false,
+				show_timestamp: false,
+				..Default::default()
+			}
+		)
+		.expect("logb");
+
+		log_multi!(INFO, LOGA, "a0123456789").expect("loga");
+		log_multi!(INFO, LOGB, "b0123456789").expect("logb");
+
+		default_log_name!(LOGA);
+		debug!("a").expect("to log a");
+
+		let len_a = std::fs::metadata(path_a).unwrap().len();
+		let len_b = std::fs::metadata(path_b).unwrap().len();
+
+		assert_eq!(len_b, 19);
+		assert_eq!(len_a, 29);
 
 		tear_down_test_dir(TEST_DIR).unwrap();
 	}

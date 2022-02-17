@@ -20,8 +20,13 @@ use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::{lockw, lockwp};
+use rustls::{
+	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
+	ServerConnection,
+};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::BufReader;
 use std::os::unix::prelude::RawFd;
@@ -235,7 +240,11 @@ where
 		self.do_start()
 	}
 
-	pub fn add_listener_handles(&self, handles: Vec<Handle>) -> Result<(), Error> {
+	pub fn add_listener_handles(
+		&self,
+		handles: Vec<Handle>,
+		tls_config: Option<TLSServerConfig>,
+	) -> Result<(), Error> {
 		self.check_callbacks()?;
 
 		if handles.len() != self.config.threads.try_into()? {
@@ -247,7 +256,29 @@ where
 			.into());
 		}
 
-		let connection_info = EventConnectionInfo::listener_connection(handles);
+		let tls_config = match tls_config {
+			Some(tls_config) => {
+				match ServerConfig::builder()
+					.with_safe_defaults()
+					.with_no_client_auth()
+					.with_single_cert(
+						load_certs(&tls_config.certificates_file)?,
+						load_private_key(&tls_config.private_key_file)?,
+					) {
+					Ok(tls_server_config) => Some(tls_server_config),
+					Err(e) => {
+						return Err(ErrorKind::TLSError(format!(
+							"TLS not configured properly: {}",
+							e
+						))
+						.into());
+					}
+				}
+			}
+			None => None,
+		};
+
+		let connection_info = EventConnectionInfo::listener_connection(handles, tls_config);
 
 		for i in 0..self.guarded_data.len() {
 			let guarded_data = &self.guarded_data[i];
@@ -260,9 +291,25 @@ where
 		Ok(())
 	}
 
-	pub fn add_handle(&self, handle: Handle) -> Result<(), Error> {
+	pub fn add_handle(
+		&self,
+		handle: Handle,
+		tls_config: Option<TLSClientConfig>,
+	) -> Result<(), Error> {
 		self.check_callbacks()?;
-		let connection_info = EventConnectionInfo::read_write_connection(handle);
+
+		let connection_info = match tls_config {
+			Some(tls_config) => {
+				let server_name: &str = &tls_config.server_name;
+				let config = make_config(tls_config.trusted_cert_full_chain_file)?;
+				let tls_client = Some(Arc::new(RwLock::new(ClientConnection::new(
+					config,
+					server_name.try_into()?,
+				)?)));
+				EventConnectionInfo::read_write_connection(handle, None, tls_client)
+			}
+			None => EventConnectionInfo::read_write_connection(handle, None, None),
+		};
 
 		// pick a random queue
 		let rand: usize = rand::random();
@@ -325,7 +372,8 @@ where
 		let mut connection_handle_map = HashMap::new();
 
 		let config = self.config.clone();
-		let connection_info = EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read);
+		let connection_info =
+			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None);
 		let connection_id = connection_info.get_connection_id();
 		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
 		connection_id_map.insert(connection_id, wakeup.wakeup_handle_read);
@@ -493,9 +541,15 @@ where
 			debug!("process conn_info: {:?}", connection_info)?;
 
 			match &*connection_info {
-				EventConnectionInfo::ListenerConnection(_c) => {
+				EventConnectionInfo::ListenerConnection(c) => {
 					loop {
-						if !Self::process_accept(handle, ctx, wakeup, callbacks)? {
+						if !Self::process_accept(
+							handle,
+							ctx,
+							wakeup,
+							callbacks,
+							&c.tls_server_config,
+						)? {
 							break;
 						}
 					}
@@ -608,6 +662,7 @@ where
 		ctx: &mut Context,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		tls_server_config: &Option<ServerConfig>,
 	) -> Result<bool, Error> {
 		let handle = unsafe {
 			accept(
@@ -625,7 +680,23 @@ where
 			info!("Accepted handle = {} on tid={}", handle, ctx.tid)?;
 			unsafe { fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK) };
 
-			let connection_info = EventConnectionInfo::read_write_connection(handle);
+			let tls_server = match tls_server_config {
+				Some(tls_server_config) => {
+					let tls_config = Arc::new(tls_server_config.clone());
+
+					match ServerConnection::new(tls_config) {
+						Ok(tls_conn) => Some(Arc::new(RwLock::new(tls_conn))),
+						Err(e) => {
+							error!("Error building tls_connection: {}", e.to_string())?;
+							None
+						}
+					}
+				}
+				None => None,
+			};
+
+			let connection_info =
+				EventConnectionInfo::read_write_connection(handle, tls_server, None);
 
 			match &callbacks.on_accept {
 				Some(on_accept) => {
@@ -1146,24 +1217,64 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	Ok(len.try_into().unwrap_or(0))
 }
 
-fn _load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, Error> {
+#[derive(Clone, Debug)]
+pub struct TLSServerConfig {
+	/// The location of the private_key file (privkey.pem).
+	pub private_key_file: String,
+	/// The location of the certificates file (fullchain.pem).
+	pub certificates_file: String,
+}
+
+pub struct TLSClientConfig {
+	pub server_name: String,
+	pub trusted_cert_full_chain_file: Option<String>,
+}
+
+fn make_config(trusted_cert_full_chain_file: Option<String>) -> Result<Arc<ClientConfig>, Error> {
+	let mut root_store = RootCertStore::empty();
+	match trusted_cert_full_chain_file {
+		Some(trusted_cert_full_chain_file) => {
+			let full_chain_certs = load_certs(&trusted_cert_full_chain_file)?;
+			for i in 0..full_chain_certs.len() {
+				root_store.add(&full_chain_certs[i]).map_err(|e| {
+					let error: Error = ErrorKind::SetupError(format!(
+						"adding certificate to root store generated error: {}",
+						e.to_string()
+					))
+					.into();
+					error
+				})?;
+			}
+		}
+		None => {}
+	}
+
+	let config = ClientConfig::builder()
+		.with_safe_default_cipher_suites()
+		.with_safe_default_kx_groups()
+		.with_safe_default_protocol_versions()
+		.unwrap()
+		.with_root_certificates(root_store)
+		.with_no_client_auth();
+
+	Ok(Arc::new(config))
+}
+
+fn load_certs(filename: &str) -> Result<Vec<Certificate>, Error> {
 	let certfile = File::open(filename)?;
 	let mut reader = BufReader::new(certfile);
 	let certs = rustls_pemfile::certs(&mut reader)?;
-	Ok(certs
-		.iter()
-		.map(|v| rustls::Certificate(v.clone()))
-		.collect())
+	Ok(certs.iter().map(|v| Certificate(v.clone())).collect())
 }
 
-fn _load_private_key(filename: &str) -> Result<rustls::PrivateKey, Error> {
+fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 	let keyfile = File::open(filename)?;
 	let mut reader = BufReader::new(keyfile);
 
 	loop {
 		match rustls_pemfile::read_one(&mut reader)? {
-			Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(rustls::PrivateKey(key)),
-			Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(rustls::PrivateKey(key)),
+			Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)),
+			Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(PrivateKey(key)),
 			None => break,
 			_ => {}
 		}
@@ -1172,21 +1283,44 @@ fn _load_private_key(filename: &str) -> Result<rustls::PrivateKey, Error> {
 	Err(ErrorKind::TLSError(format!("no private keys found in file: {}", filename)).into())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ReadWriteConnection {
 	id: u128,
 	handle: Handle,
 	pending_wbufs: Vec<WriteBuffer>,
 	is_closed: Arc<RwLock<bool>>,
+	tls_server: Option<Arc<RwLock<ServerConnection>>>,
+	tls_client: Option<Arc<RwLock<ClientConnection>>>,
+}
+
+impl Debug for ReadWriteConnection {
+	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+		f.debug_struct("ListenerConnection")
+			.field("id", &self.id)
+			.field("handle", &self.handle)
+			.field("pending_wbufs", &self.pending_wbufs)
+			.field("is_closed", &self.is_closed)
+			.field("tls_server", &self.tls_server)
+			.field("tls_client", &self.tls_client)
+			.finish()?;
+		Ok(())
+	}
 }
 
 impl ReadWriteConnection {
-	fn new(id: u128, handle: Handle) -> Self {
+	fn new(
+		id: u128,
+		handle: Handle,
+		tls_server: Option<Arc<RwLock<ServerConnection>>>,
+		tls_client: Option<Arc<RwLock<ClientConnection>>>,
+	) -> Self {
 		Self {
 			id,
 			handle,
 			pending_wbufs: vec![],
 			is_closed: Arc::new(RwLock::new(false)),
+			tls_server,
+			tls_client,
 		}
 	}
 
@@ -1199,10 +1333,22 @@ impl ReadWriteConnection {
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct ListenerConnection {
 	id: u128,
 	handles: Vec<Handle>,
+	tls_server_config: Option<ServerConfig>,
+}
+
+impl Debug for ListenerConnection {
+	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+		f.debug_struct("ListenerConnection")
+			.field("id", &self.id)
+			.field("handles", &self.handles)
+			.field("tls_server_config", &self.tls_server_config.is_some())
+			.finish()?;
+		Ok(())
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -1212,14 +1358,27 @@ enum EventConnectionInfo {
 }
 
 impl EventConnectionInfo {
-	fn read_write_connection(handle: Handle) -> EventConnectionInfo {
-		EventConnectionInfo::ReadWriteConnection(ReadWriteConnection::new(rand::random(), handle))
+	fn read_write_connection(
+		handle: Handle,
+		tls_server: Option<Arc<RwLock<ServerConnection>>>,
+		tls_client: Option<Arc<RwLock<ClientConnection>>>,
+	) -> EventConnectionInfo {
+		EventConnectionInfo::ReadWriteConnection(ReadWriteConnection::new(
+			rand::random(),
+			handle,
+			tls_server,
+			tls_client,
+		))
 	}
 
-	fn listener_connection(handles: Vec<Handle>) -> EventConnectionInfo {
+	fn listener_connection(
+		handles: Vec<Handle>,
+		tls_server_config: Option<ServerConfig>,
+	) -> EventConnectionInfo {
 		EventConnectionInfo::ListenerConnection(ListenerConnection {
 			id: rand::random(),
 			handles,
+			tls_server_config,
 		})
 	}
 
@@ -1498,7 +1657,7 @@ mod tests {
 			Ok(())
 		})?;
 		evh.start()?;
-		evh.add_listener_handles(handles)?;
+		evh.add_listener_handles(handles, None)?;
 		let mut stream = TcpStream::connect("127.0.0.1:8092")?;
 		stream.write(&[1, 2, 3, 4])?;
 		loop {
