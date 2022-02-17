@@ -18,13 +18,18 @@ pub use byteorder;
 pub use bytes;
 pub use chrono;
 pub use ed25519_dalek;
+pub use errno;
 pub use failure;
 pub use futures;
+pub use kqueue_sys;
 pub use lazy_static;
+pub use libc;
 pub use nix;
 pub use rand;
 pub use rustls;
+pub use rustls_pemfile;
 pub use serde;
+pub use webpki_roots;
 
 // we put this here because util has macros so it needs to be external to the crate
 use std::collections::HashMap;

@@ -14,26 +14,21 @@
 
 //! An event handler library.
 
-use errno::{errno, set_errno, Errno};
-use libc::{accept, c_int, c_void, fcntl, pipe, read, write};
+use nioruntime_deps::errno::{errno, set_errno, Errno};
+use nioruntime_deps::libc::{self, accept, c_int, c_void, fcntl, pipe, read, write};
+use nioruntime_deps::{backtrace, rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::lockw;
+use nioruntime_util::{lockw, lockwp};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::fs::File;
+use std::io::BufReader;
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 // mac/bsd variant specific deps
-#[cfg(any(
-	target_os = "macos",
-	target_os = "dragonfly",
-	target_os = "netbsd",
-	target_os = "openbsd",
-	target_os = "freebsd"
-))]
-use kqueue_sys::{kevent, kqueue, EventFilter, EventFlag, FilterFlag};
 #[cfg(any(
 	target_os = "macos",
 	target_os = "dragonfly",
@@ -49,6 +44,14 @@ use libc::timespec;
 	target_os = "openbsd",
 	target_os = "freebsd"
 ))]
+use nioruntime_deps::kqueue_sys::{kevent, kqueue, EventFilter, EventFlag, FilterFlag};
+#[cfg(any(
+	target_os = "macos",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "freebsd"
+))]
 use std::time::Duration;
 
 // linux specific deps
@@ -57,7 +60,9 @@ use nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
-fatal!();
+const MAIN_LOG: &str = "mainlog";
+
+debug!();
 
 const MAX_EVENTS: i32 = 100;
 const READ_BUFFER_SIZE: usize = 1024 * 10;
@@ -159,7 +164,7 @@ impl ConnectionData {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct EventHandlerConfig {
 	pub threads: usize,
 }
@@ -313,27 +318,44 @@ where
 		wakeup: Wakeup,
 		tid: usize,
 	) -> Result<(), Error> {
+		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
+		let events = Arc::new(RwLock::new(vec![]));
+		let mut ctx = Context::new(tid, guarded_data)?;
+		let mut connection_id_map = HashMap::new();
+		let mut connection_handle_map = HashMap::new();
+
 		let config = self.config.clone();
-		let callbacks = self.callbacks.clone();
-		let mut ctx: Context = Context::new(tid, guarded_data)?;
-		std::thread::spawn(move || {
+		let connection_info = EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read);
+		let connection_id = connection_info.get_connection_id();
+		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
+		connection_id_map.insert(connection_id, wakeup.wakeup_handle_read);
+		ctx.input_events.push(Event {
+			handle: wakeup.wakeup_handle_read,
+			etype: EventType::Read,
+		});
+
+		let ctx = Arc::new(RwLock::new(ctx));
+		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
+		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
+
+		std::thread::spawn(move || loop {
 			debug!("starting thread {}", tid);
-			let mut events = vec![];
-			let mut connection_id_map = HashMap::new();
-			let mut connection_handle_map = HashMap::new();
+			let events = events.clone();
+			let ctx = ctx.clone();
+			let connection_id_map = connection_id_map.clone();
+			let connection_handle_map = connection_handle_map.clone();
+			let callbacks = callbacks.clone();
+			let callbacks_clone = callbacks.clone();
 
-			let connection_info =
-				EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read);
-			let connection_id = connection_info.get_connection_id();
-			connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
-			connection_id_map.insert(connection_id, wakeup.wakeup_handle_read);
-			ctx.input_events.push(Event {
-				handle: wakeup.wakeup_handle_read,
-				etype: EventType::Read,
-			});
+			let jh = std::thread::spawn(move || {
+				let mut events: &mut Vec<Event> = &mut *lockwp!(events);
+				let mut ctx = &mut *lockwp!(ctx);
+				let mut connection_id_map = &mut *lockwp!(connection_id_map);
+				let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
+				let callbacks = &mut *lockwp!(callbacks);
 
-			loop {
-				info!("thread loop {}", tid);
+				// process any remaining events from a panic
+				let next = ctx.counter + 1;
 				match Self::thread_loop(
 					&mut ctx,
 					&config,
@@ -342,13 +364,51 @@ where
 					&callbacks,
 					&mut connection_id_map,
 					&mut connection_handle_map,
+					next,
 				) {
 					Ok(_) => {}
 					Err(e) => {
 						fatal!("unexpected error in thread loop: {}", e);
-						break;
 					}
 				}
+
+				loop {
+					info!("thread loop {}", tid);
+					match Self::thread_loop(
+						&mut ctx,
+						&config,
+						&mut events,
+						&wakeup,
+						&callbacks,
+						&mut connection_id_map,
+						&mut connection_handle_map,
+						0,
+					) {
+						Ok(_) => {}
+						Err(e) => {
+							fatal!("unexpected error in thread loop: {}", e);
+							break;
+						}
+					}
+				}
+			});
+
+			match jh.join() {
+				Ok(_) => {}
+				Err(_e) => {
+					log_multi!(ERROR, MAIN_LOG, "thread panic!");
+				}
+			}
+
+			let callbacks = lockwp!(callbacks_clone);
+			match &(*callbacks).on_panic {
+				Some(on_panic) => match (on_panic)() {
+					Ok(_) => {}
+					Err(e) => {
+						println!("on_panic generated error: {}", e.to_string());
+					}
+				},
+				None => {}
 			}
 		});
 
@@ -363,11 +423,20 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		start: usize,
 	) -> Result<(), Error> {
-		Self::process_new(ctx, config, connection_id_map, connection_handle_map)?;
-		Self::get_events(ctx, events)?;
-		debug!("event count = {}", events.len());
-		for event in events {
+		if start == 0 {
+			Self::process_new(ctx, config, connection_id_map, connection_handle_map)?;
+			Self::get_events(ctx, events)?;
+			debug!("event count = {}", events.len());
+		}
+
+		ctx.counter = start;
+		loop {
+			if ctx.counter >= events.len() {
+				break;
+			}
+			let event = &events[ctx.counter];
 			match event.etype {
 				EventType::Read => {
 					let _res = Self::process_read_event(
@@ -391,6 +460,7 @@ where
 				)?,
 				EventType::Accept => {} // accepts are returned as read.
 			}
+			ctx.counter += 1;
 		}
 		Ok(())
 	}
@@ -1076,6 +1146,32 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	Ok(len.try_into().unwrap_or(0))
 }
 
+fn load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, Error> {
+	let certfile = File::open(filename)?;
+	let mut reader = BufReader::new(certfile);
+	let certs = rustls_pemfile::certs(&mut reader)?;
+	Ok(certs
+		.iter()
+		.map(|v| rustls::Certificate(v.clone()))
+		.collect())
+}
+
+fn load_private_key(filename: &str) -> Result<rustls::PrivateKey, Error> {
+	let keyfile = File::open(filename)?;
+	let mut reader = BufReader::new(keyfile);
+
+	loop {
+		match rustls_pemfile::read_one(&mut reader)? {
+			Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(rustls::PrivateKey(key)),
+			Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(rustls::PrivateKey(key)),
+			None => break,
+			_ => {}
+		}
+	}
+
+	Err(ErrorKind::TLSError(format!("no private keys found in file: {}", filename)).into())
+}
+
 #[derive(Clone, Debug)]
 pub struct ReadWriteConnection {
 	id: u128,
@@ -1184,7 +1280,7 @@ impl WriteBuffer {
 	}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Wakeup {
 	wakeup_handle_read: Handle,
 	wakeup_handle_write: Handle,
@@ -1248,6 +1344,7 @@ struct Context {
 	filter_set: HashSet<Handle>,
 	#[cfg(target_os = "linux")]
 	epoll_events: Vec<EpollEvent>,
+	counter: usize, // used for handling panics
 }
 
 impl Context {
@@ -1255,6 +1352,7 @@ impl Context {
 		#[cfg(target_os = "linux")]
 		let epoll_events = [EpollEvent::new(EpollFlags::empty(), 0); MAX_EVENTS as usize].to_vec();
 		Ok(Self {
+			counter: 0,
 			#[cfg(target_os = "linux")]
 			epoll_events,
 			guarded_data,
