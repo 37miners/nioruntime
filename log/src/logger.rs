@@ -535,6 +535,7 @@ impl Log {
 }
 
 // helper function for macros
+#[doc(hidden)]
 pub fn do_log(
 	level: i32,
 	show_ts: bool,

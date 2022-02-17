@@ -20,6 +20,7 @@ use std::sync::{Arc, RwLock};
 lazy_static! {
 	/// This is the static holder of all log objects. Generally this
 	/// should not be called directly. See [`log`] instead.
+	#[doc(hidden)]
 	pub static ref STATIC_LOG: Arc<RwLock<HashMap<String, Log>>> = Arc::new(RwLock::new(HashMap::new()));
 }
 
@@ -986,6 +987,7 @@ macro_rules! log_no_ts {
 
 /// Generally, this macro should not be used directly. It is used by the other macros. See [`log`] or [`info`] instead.
 #[macro_export]
+#[doc(hidden)]
 macro_rules! do_log {
 	($level:expr)=>{
 		const LOG_LEVEL: i32 = $level;
