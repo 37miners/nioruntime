@@ -14,8 +14,9 @@ name = "perf"
 path = "src/bin/perf.rs"
 
 [dependencies]
-nioruntime_evh = { path = "../../eventhandler" }
+nioruntime_deps = { path = "../../deps" }
 nioruntime_log = { path = "../../log" }
+nioruntime_evh = { path = "../../eventhandler" }
 nioruntime_util = { path = "../../util" }
 nioruntime_err = { path = "../../error" }
 

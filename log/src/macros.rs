@@ -29,18 +29,24 @@ lazy_static! {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// fatal!(); // set log level to fatal "5"
 ///
-/// let abc = 123;
-/// fatal!("my value = {}", abc);
-/// fatal!("hi");
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     fatal!("my value = {}", abc);
+///     fatal_all!("hi");
+///     fatal_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
 ///
-/// // The output will look like this:
-/// // [2022-02-15 22:58:32]: (FATL) [..e/src/ops/function.rs:227]: my value = 123
-/// // [2022-02-15 22:58:32]: (FATL) [..e/src/ops/function.rs:227]: hi
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (FATAL) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (FATAL) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! fatal {
@@ -82,7 +88,7 @@ macro_rules! fatal_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -102,13 +108,13 @@ macro_rules! fatal_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::fatal!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -120,18 +126,25 @@ macro_rules! fatal_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// error!(); // set log level to error "4"
 ///
-/// let abc = 123;
-/// error!("my value = {}", abc);
-/// error!("hi");
 ///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     error!("my value = {}", abc);
+///     error_all!("hi");
+///     error_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
+///
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (ERROR) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (ERROR) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! error {
@@ -173,7 +186,7 @@ macro_rules! error_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -193,13 +206,13 @@ macro_rules! error_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::error!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -211,18 +224,25 @@ macro_rules! error_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// warn!(); // set log level to warn "3"
 ///
-/// let abc = 123;
-/// warn!("my value = {}", abc);
-/// warn!("hi");
 ///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     warn!("my value = {}", abc);
+///     warn_all!("hi");
+///     warn_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
+///
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (WARN) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (WARN) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! warn {
@@ -264,7 +284,7 @@ macro_rules! warn_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -284,13 +304,13 @@ macro_rules! warn_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::warn!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -302,18 +322,23 @@ macro_rules! warn_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// info!(); // set log level to info "2"
 ///
-/// let abc = 123;
-/// info!("my value = {}", abc);
-/// info!("hi");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     info!("my value = {}", abc);
+///     info_all!("hi");
+///     info_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (INFO) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (INFO) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! info {
@@ -355,7 +380,7 @@ macro_rules! info_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -375,13 +400,13 @@ macro_rules! info_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::info!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -393,18 +418,25 @@ macro_rules! info_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// debug!(); // set log level to debug "1"
 ///
-/// let abc = 123;
-/// debug!("my value = {}", abc);
-/// debug!("hi");
 ///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     debug!("my value = {}", abc);
+///     debug_all!("hi");
+///     debug_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
+///
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (DEBUG) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (DEBUG) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! debug {
@@ -446,7 +478,7 @@ macro_rules! debug_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -466,13 +498,13 @@ macro_rules! debug_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::debug!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -484,18 +516,25 @@ macro_rules! debug_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// trace!(); // set log level to trace "0"
 ///
-/// let abc = 123;
-/// trace!("my value = {}", abc);
-/// trace!("hi");
 ///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: my value = 123
-/// // [2021-08-09 19:41:37]: hi
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     trace!("my value = {}", abc);
+///     trace_all!("hi");
+///     trace_no_ts!("no timestamp shown");
+///     Ok(())
+/// }
+///
+/// // The output will look something like this:
+/// // [2022-02-16 19:37:48]: (TRACE) [..c/perf/src/bin/perf.rs:85]: my value = 123
+/// // [2022-02-16 19:37:48]: (TRACE) [..c/perf/src/bin/perf.rs:86]: hi
+/// // no timestamp shown
 /// ```
 #[macro_export]
 macro_rules! trace {
@@ -537,7 +576,7 @@ macro_rules! trace_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, true
 			) {
@@ -557,13 +596,13 @@ macro_rules! trace_all {
 		{
 			let stdout_cur = nioruntime_log::get_config_option!(
 				nioruntime_log::Settings::Stdout
-			).unwrap_or(true);
+			)?;
 			nioruntime_log::trace!($a, $($b)*);
 			match nioruntime_log::set_config_option!(
 				nioruntime_log::Settings::Stdout, stdout_cur
 			) {
 				Ok(_) => {},
-				Err(e) => println("ERRO Setting log config"),
+				Err(e) => println("ERROR Setting log config"),
 			}
 		}
 	};
@@ -574,144 +613,183 @@ macro_rules! trace_all {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 /// // log level must be set before calling any logging function.
 /// // typically it is done at the top of a file so that it's easy to change.
 /// // but it can be done at any level or scope. The inner scope prevails.
 /// info!();
 ///
-/// let abc = 123;
-/// log_multi!(nioruntime_log::WARN, "logger2", "hi");
-/// log_multi!(nioruntime_log::WARN, "logger2", "value = {}", abc);
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     log_multi!(WARN, "logger2", "hi");
+///     log_multi!(WARN, "logger2", "value = {}", abc);
+///     Ok(())
+/// }
 ///
 /// ```
 #[macro_export]
 macro_rules! log_multi {
 	($level:expr, $a:expr, $b:expr) => {
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => {
-						nioruntime_log::do_log!($level, true, log, $b);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						nioruntime_log::do_log!($level, true, log, $b);
-						log_map.insert($a.to_string(), log);
-					}
-				}
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($a);
+		match log {
+			Some(log) => {
+				nioruntime_log::do_log!($level, true, log, $b);
 			},
-			Err(e) => {
-				println!(
-					"Error: could not log '{}' due to PoisonError: {}",
-					format!($b),
-					e.to_string()
-				);
+			None => {
+				let mut log = nioruntime_log::Log::new();
+				nioruntime_log::do_log!($level, true, log, $b);
+				log_map.insert($a.to_string(), log);
 			}
 		}
 	};
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=>{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => {
-						nioruntime_log::do_log!($level, true, log, $b, $($c)*);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						nioruntime_log::do_log!($level, true, log, $b, $($c)*);
-						log_map.insert($a.to_string(), log);
-					}
-				}
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($a);
+		match log {
+			Some(log) => {
+				nioruntime_log::do_log!($level, true, log, $b, $($c)*);
 			},
-			Err(e) => {
-				println!(
-					"Error: could not log '{}' due to PoisonError: {}",
-					format!($b, $($c)*),
-					e.to_string()
-				);
-			},
+			None => {
+				let mut log = nioruntime_log::Log::new();
+				nioruntime_log::do_log!($level, true, log, $b, $($c)*);
+				log_map.insert($a.to_string(), log);
+			}
 		}
 	};
 }
 
-/// get various options for the logger
+/// Set various options for the logger after initialization.
+/// The settings supported are specified in the [`crate::logger::Settings`] enumeration.
+///
+/// # Examples
+/// ```
+/// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+///
+/// const MAIN_LOG: &str = "mainlog";
+/// info!(); // set log level to info "2"
+///
+/// fn test() -> Result<(), Error> {
+///     let original_stdout_setting = get_config_option!(Settings::Stdout)?;
+///     let original_timestamp_setting = get_config_option!(Settings::Timestamp)?;
+///     let original_log_level_setting = get_config_option!(Settings::Level)?;
+///     let original_line_num_setting = get_config_option!(Settings::LineNum)?;
+///
+///     set_config_option!(Settings::Stdout, true);
+///     set_config_option!(Settings::Timestamp, true);
+///     set_config_option!(Settings::Level, true);
+///     set_config_option!(Settings::LineNum, true);
+///
+///     log!(INFO, "some data");
+///     set_config_option!(Settings::Stdout, original_stdout_setting);
+///     set_config_option!(Settings::Stdout, original_timestamp_setting);
+///     set_config_option!(Settings::Stdout, original_log_level_setting);
+///     set_config_option!(Settings::Stdout, original_line_num_setting);
+///     log!(INFO, "hi");
+///
+///
+///     // this macro may also specify a particular logger instead of the default logger. To
+///     // do that, specify the first parameter as the name of the logger.
+///
+///     set_config_option!(MAIN_LOG, Settings::Timestamp, true);
+///     log_multi!(WARN, MAIN_LOG, "test");
+///     set_config_option!(MAIN_LOG, Settings::Timestamp, false);
+///     log_multi!(WARN, MAIN_LOG, "test");
+///     Ok(())
+/// }
+///
+/// ```
 #[macro_export]
 macro_rules! get_config_option {
 	($get_type:expr) => {{
 		nioruntime_log::get_config_option!("default", $get_type)
 	}};
 	($log:expr,$get_type:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($log);
-				match log {
-					Some(log) => match $get_type {
-						nioruntime_log::Settings::Stdout => log.get_show_stdout(),
-						nioruntime_log::Settings::LineNum => log.get_show_line_num(),
-						nioruntime_log::Settings::Level => log.get_show_log_level(),
-						nioruntime_log::Settings::Timestamp => log.get_show_timestamp(),
-					},
-					None => {
-						let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
-							"no config found".to_string(),
-						)
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($log);
+		match log {
+			Some(log) => match $get_type {
+				nioruntime_log::Settings::Stdout => log.get_show_stdout(),
+				nioruntime_log::Settings::LineNum => log.get_show_line_num(),
+				nioruntime_log::Settings::Level => log.get_show_log_level(),
+				nioruntime_log::Settings::Timestamp => log.get_show_timestamp(),
+			},
+			None => {
+				let error: nioruntime_err::Error =
+					nioruntime_err::ErrorKind::LogConfigurationError("no config found".to_string())
 						.into();
-						Err(error)
-					}
-				}
-			}
-			Err(_) => {
-				let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
-					"error getting log from STATIC_LOG".to_string(),
-				)
-				.into();
 				Err(error)
 			}
 		}
 	}};
 }
 
-/// set various options for the logger
+/// Set various options for the logger after initialization.
+/// The settings supported are specified in the [`crate::logger::Settings`] enumeration.
+///
+/// # Examples
+/// ```
+/// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+///
+/// const MAIN_LOG: &str = "mainlog";
+/// info!(); // set log level to info "2"
+///
+/// fn test() -> Result<(), Error> {
+///
+///     let abc = 123;
+///     set_config_option!(Settings::Stdout, false);
+///     log!(INFO, "my value = {}", abc);
+///     set_config_option!(Settings::Stdout, true);
+///     log!(INFO, "hi");
+///
+///     set_config_option!(Settings::LineNum, true);
+///     log!(INFO, "my value = {}", abc);
+///     set_config_option!(Settings::LineNum, false);
+///     log!(INFO, "hi");
+///
+///     set_config_option!(Settings::Level, true);
+///     log!(INFO, "my value = {}", abc);
+///     set_config_option!(Settings::Level, false);
+///     log!(INFO, "hi");
+///
+///     set_config_option!(Settings::Timestamp, true);
+///     log!(INFO, "my value = {}", abc);
+///     set_config_option!(Settings::Timestamp, false);
+///     log!(INFO, "hi");
+///
+///     // this macro may also specify a particular logger instead of the default logger. To
+///     // do that, specify the first parameter as the name of the logger.
+///
+///     set_config_option!(MAIN_LOG, Settings::Timestamp, true);
+///     log_multi!(WARN, MAIN_LOG, "test");
+///     set_config_option!(MAIN_LOG, Settings::Timestamp, false);
+///     log_multi!(WARN, MAIN_LOG, "test");
+///
+///     Ok(())
+/// }
+///
+/// ```
 #[macro_export]
 macro_rules! set_config_option {
 	($set_type:expr,$value:expr) => {{
 		nioruntime_log::set_config_option!("default", $set_type, $value)
 	}};
 	($log:expr,$set_type:expr,$value:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($log);
-				match log {
-					Some(log) => match $set_type {
-						nioruntime_log::Settings::Stdout => log.update_show_stdout($value),
-						nioruntime_log::Settings::LineNum => log.update_show_line_num($value),
-						nioruntime_log::Settings::Level => log.update_show_log_level($value),
-						nioruntime_log::Settings::Timestamp => log.update_show_timestamp($value),
-					},
-					None => {
-						let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
-							"no config found".to_string(),
-						)
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($log);
+		match log {
+			Some(log) => match $set_type {
+				nioruntime_log::Settings::Stdout => log.update_show_stdout($value),
+				nioruntime_log::Settings::LineNum => log.update_show_line_num($value),
+				nioruntime_log::Settings::Level => log.update_show_log_level($value),
+				nioruntime_log::Settings::Timestamp => log.update_show_timestamp($value),
+			},
+			None => {
+				let error: nioruntime_err::Error =
+					nioruntime_err::ErrorKind::LogConfigurationError("no config found".to_string())
 						.into();
-						Err(error)
-					}
-				}
-			}
-			Err(_) => {
-				let error: Error = nioruntime_err::ErrorKind::LogConfigurationError(
-					"error getting log from STATIC_LOG".to_string(),
-				)
-				.into();
 				Err(error)
 			}
 		}
@@ -725,14 +803,20 @@ macro_rules! set_config_option {
 /// # Examples
 /// ```
 /// use nioruntime_log::*;
-///
+/// use nioruntime_err::Error;
+/// // log level must be set before calling any logging function.
+/// // typically it is done at the top of a file so that it's easy to change.
+/// // but it can be done at any level or scope. The inner scope prevails.
 /// info!(); // set log level to info "2"
 ///
-/// let abc = 123;
-/// log!(nioruntime_log::INFO, "my value = {}", abc);
-/// log!(nioruntime_log::INFO, "hi");
+/// fn test() -> Result<(), Error> {
+///     let abc = 123;
+///     log!(INFO, "my value = {}", abc);
+///     log!(WARN, "hi");
+///     Ok(())
+/// }
 ///
-/// // The output will look like this:
+/// // The output will look something like this:
 /// // [2021-08-09 19:41:37]: my value = 123
 /// // [2021-08-09 19:41:37]: hi
 /// ```
@@ -741,10 +825,7 @@ macro_rules! log {
 	($level:expr, $a:expr)=>{
 		{
 			const DEFAULT_LOG: &str = "default";
-			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write();
-			match log_map {
-				Ok(mut log_map) => {
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut(&DEFAULT_LOG.to_string());
 			match log {
 				Some(log) => {
@@ -756,22 +837,13 @@ macro_rules! log {
 					log_map.insert(DEFAULT_LOG.to_string(), log);
 				}
 			}
-				},
-				Err(e) => {
-					println!(
-						"Error: could not log '{}' due to PoisonError: {}",
-						format!($a),
-						e.to_string()
-					);
-				},
-			}
 		}
     	};
 	($level:expr, $a:expr,$($b:tt)*)=>{
 		{
 			const DEFAULT_LOG: &str = "default";
 			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write().unwrap();
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut(&DEFAULT_LOG.to_string());
 			match log {
 				Some(log) => {
@@ -793,19 +865,22 @@ macro_rules! log {
 ///
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 ///
 /// info!();
 ///
-/// log_no_ts_multi!(2, "nondefaultlogger", "hi");
-/// log_no_ts_multi!(2, "nondefaultlogger", "value = {}", 123);
+/// fn test() -> Result<(), Error> {
+///     log_no_ts_multi!(2, "nondefaultlogger", "hi");
+///     log_no_ts_multi!(2, "nondefaultlogger", "value = {}", 123);
+///     Ok(())
+/// }
 /// ```
 ///
 #[macro_export]
 macro_rules! log_no_ts_multi {
 	($level:expr, $a:expr, $b:expr)=>{
 		{
-			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write().unwrap();
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut($a);
 			match log {
 				Some(log) => {
@@ -821,8 +896,7 @@ macro_rules! log_no_ts_multi {
 	};
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=>{
 		{
-			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write().unwrap();
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut($a);
 			match log {
 				Some(log) => {
@@ -843,27 +917,29 @@ macro_rules! log_no_ts_multi {
 ///
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
+/// debug!(); // set log level to debug
 ///
-/// debug!();
+/// fn test() -> Result<(), Error> {
+///     log!(INFO, "hi");
+///     log_no_ts!(INFO, "message here");
+///     log_no_ts!(WARN, "my value = {}", 1);
+///     log!(WARN, "more data");
+///     Ok(())
+/// }
 ///
-/// log!(2, "hi");
-/// log_no_ts!(2, "message here");
-/// log_no_ts!(3, "my value = {}", 1);
-/// log!(2, "more data");
-///
-/// // The output will look like this:
-/// // [2021-08-09 19:41:37]: hi
+/// // The output will look something like this:
+/// // [2021-08-09 19:41:37]: (INFO) [..e/src/ops/function.rs:227]: hi
 /// // message here
 /// // my value = 1
-/// // [2021-08-09 19:41:37]: more data
+/// // [2021-08-09 19:41:37]: (WARN) [..e/src/ops/function.rs:227]: more data
 /// ```
 #[macro_export]
 macro_rules! log_no_ts {
 	($level:expr, $a:expr)=>{
 		{
 			const DEFAULT_LOG: &str = "default";
-			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write().unwrap();
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut(&DEFAULT_LOG.to_string());
 			match log {
 				Some(log) => {
@@ -881,8 +957,7 @@ macro_rules! log_no_ts {
 		{
 
 			const DEFAULT_LOG: &str = "default";
-			let static_log = &nioruntime_log::STATIC_LOG;
-			let mut log_map = static_log.write().unwrap();
+			let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
 			let log = log_map.get_mut(&DEFAULT_LOG.to_string());
 			match log {
 				Some(log) => {
@@ -908,17 +983,17 @@ macro_rules! do_log {
 		{
 			// if not configured, use defaults
 			if !$log.is_configured() {
-				$log.init(nioruntime_log::LogConfig::default()).unwrap();
+				$log.init(nioruntime_log::LogConfig::default())?;
 			}
 
-			let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-			let cur_show_line_num = $log.get_show_line_num().unwrap_or(true);
-			let cur_show_timestamp = $log.get_show_timestamp().unwrap_or(true);
+			let cur_show_log_level = $log.get_show_log_level()?;
+			let cur_show_line_num = $log.get_show_line_num()?;
+			let cur_show_timestamp = $log.get_show_timestamp()?;
 
 			if $show_ts == false {
-				let _ = $log.update_show_timestamp($show_ts);
-				let _ = $log.update_show_log_level($show_ts);
-				let _ = $log.update_show_line_num($show_ts);
+				$log.update_show_timestamp($show_ts)?;
+				$log.update_show_log_level($show_ts)?;
+				$log.update_show_line_num($show_ts)?;
 			}
 
 			if $level >= LOG_LEVEL {
@@ -934,44 +1009,35 @@ macro_rules! do_log {
 				}
 			}
 
-			let _ = $log.update_show_log_level(cur_show_log_level);
-			let _ = $log.update_show_line_num(cur_show_line_num);
-			let _ = $log.update_show_timestamp(cur_show_timestamp);
+			$log.update_show_log_level(cur_show_log_level)?;
+			$log.update_show_line_num(cur_show_line_num)?;
+			$log.update_show_timestamp(cur_show_timestamp)?;
 		}
 	};
 	($level:expr, $show_ts:expr, $log:expr, $a:expr, $($b:tt)*)=>{
 		{
 			// if not configured, use defaults
 			if !$log.is_configured() {
-				$log.init(nioruntime_log::LogConfig::default()).unwrap();
+				$log.init(nioruntime_log::LogConfig::default())?;
 			}
 
-			let cur_show_log_level = $log.get_show_log_level().unwrap_or(true);
-			let cur_show_line_num = $log.get_show_line_num().unwrap_or(true);
-			let cur_show_timestamp = $log.get_show_timestamp().unwrap_or(true);
+			let cur_show_log_level = $log.get_show_log_level()?;
+			let cur_show_line_num = $log.get_show_line_num()?;
+			let cur_show_timestamp = $log.get_show_timestamp()?;
 
 			if $show_ts == false {
-				let _ = $log.update_show_timestamp($show_ts);
-				let _ = $log.update_show_log_level($show_ts);
-				let _ = $log.update_show_line_num($show_ts);
+				$log.update_show_timestamp($show_ts)?;
+				$log.update_show_log_level($show_ts)?;
+				$log.update_show_line_num($show_ts)?;
 			}
 
 			if $level >= LOG_LEVEL {
-				match $log.log($level, &format!($a, $($b)*)) {
-					Ok(_) => {},
-					Err(e) => {
-						println!(
-							"Logging of '{}' resulted in Error: {}",
-							format!($a, $($b)*),
-							e.to_string(),
-						);
-					}
-				}
+				$log.log($level, &format!($a, $($b)*))?
 			}
 
-			let _ = $log.update_show_log_level(cur_show_log_level);
-			let _ = $log.update_show_line_num(cur_show_line_num);
-			let _ = $log.update_show_timestamp(cur_show_timestamp);
+			$log.update_show_log_level(cur_show_log_level)?;
+			$log.update_show_line_num(cur_show_line_num)?;
+			$log.update_show_timestamp(cur_show_timestamp)?;
 		}
 	};
 }
@@ -982,148 +1048,114 @@ macro_rules! do_log {
 ///
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 ///
 /// info!();
 /// const MAIN_LOG: &str = "mainlog";
 ///
-/// log_multi!(INFO, MAIN_LOG, "test");
-/// let mut config = get_config_multi!(MAIN_LOG).unwrap();
+/// fn test() -> Result<(), Error> {
+///     log_multi!(INFO, MAIN_LOG, "test");
+///     let config = get_config_multi!(MAIN_LOG)?;
+///     info!("The mainlog's config is {:?}", config);
 ///
-/// // print to stdout as well as log
-/// config.show_stdout = true;
-/// log_config_multi!(MAIN_LOG, config.clone());
-///
-///
-/// log_multi!(
-/// 	INFO,
-/// 	MAIN_LOG,
-/// 	"print to stdout as well",
-/// );
-///
-/// config.show_stdout = false;
-/// log_config_multi!(MAIN_LOG, config);
-///
-/// log_multi!(
-/// 	INFO,
-///	MAIN_LOG,
-/// 	"print only to log file",
-/// );
+///     Ok(())
+/// }
 /// ```
 ///
 /// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! get_config_multi {
 	($a:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => log.get_config(),
-					None => Err(nioruntime_err::ErrorKind::LogConfigurationError(
-						"no config found".to_string(),
-					)
-					.into()),
-				}
-			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($a);
+		match log {
+			Some(log) => log.get_config(),
+			None => Err(nioruntime_err::ErrorKind::LogConfigurationError(
+				"no config found".to_string(),
+			)
 			.into()),
 		}
 	}};
 }
 
 /// log_config_multi is identical to [`log_config`] except that the name of the logger is specified instead of using
-/// the default logger.
+/// the default logger. Please note that this macro must be called before any logging occurs. After logging has
+/// started options may only be set via the [`set_config_option`] macro.
 ///
 /// A sample log_config_multi! call might look something like this:
 ///
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::*;
 ///
 /// info!();
 ///
-/// log_config_multi!(
-///     "nondefaultlogger",
-///     LogConfig {
-///	 max_age_millis: 10000, // set log rotations to every 10 seconds
-///	 max_size: 10000, // set log rotations to every 10,000 bytes
-///	 ..Default::default()
-///     }
-/// );
+/// fn test() -> Result<(), Error> {
+///     log_config_multi!(
+///         "nondefaultlogger",
+///         LogConfig {
+///	        max_age_millis: 10000, // set log rotations to every 10 seconds
+///	        max_size: 10000, // set log rotations to every 10,000 bytes
+///	        ..Default::default()
+///         }
+///     );
+///     Ok(())
+/// }
 /// ```
 ///
 /// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! log_config_multi {
 	($a:expr, $b:expr) => {{
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut($a);
-				match log {
-					Some(log) => log.init($b),
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						let ret = log.init($b);
-						log_map.insert($a.to_string(), log);
-						ret
-					}
-				}
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut($a);
+		match log {
+			Some(log) => log.init($b),
+			None => {
+				let mut log = nioruntime_log::Log::new();
+				let ret = log.init($b);
+				log_map.insert($a.to_string(), log);
+				ret
 			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
-			.into()),
 		}
 	}};
 }
 
-/// This macro may be used to configure logging. If it is not called. The default LogConfig is used.
+/// This macro may be used to configure logging. If it is not called, the default LogConfig is used.
 /// By default logging is only done to stdout.
-/// A sample log_config! call might look something like this:
+/// A sample log_config! call is shown below in examples.
 ///
+/// # Examples
 /// ```
 /// use nioruntime_log::*;
+/// use nioruntime_err::Error;
 ///
 /// info!();
 ///
-/// log_config!(nioruntime_log::LogConfig {
-/// 	max_age_millis: 10000, // set log rotations to every 10 seconds
-/// 	max_size: 10000, // set log rotations to every 10,000 bytes
-/// 	..Default::default()
-/// });
+/// fn test() -> Result<(), Error> {
+///     log_config!(nioruntime_log::LogConfig {
+/// 	    max_age_millis: 10000, // set log rotations to every 10 seconds
+/// 	    max_size: 10000, // set log rotations to every 10,000 bytes
+/// 	    ..Default::default()
+///     });
+///     Ok(())
+/// }
 /// ```
 /// For full details on all parameters see [`crate::LogConfig`].
 #[macro_export]
 macro_rules! log_config {
 	($a:expr) => {{
 		const DEFAULT_LOG: &str = "default";
-		let static_log = &nioruntime_log::STATIC_LOG;
-		let mut log_map = static_log.write();
-		match log_map {
-			Ok(mut log_map) => {
-				let log = log_map.get_mut(&DEFAULT_LOG.to_string());
-				match log {
-					Some(log) => log.init($a),
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						let ret = log.init($a);
-						log_map.insert(DEFAULT_LOG.to_string(), log);
-						ret
-					}
-				}
+		let mut log_map = nioruntime_util::lockw!(nioruntime_log::STATIC_LOG)?;
+		let log = log_map.get_mut(&DEFAULT_LOG.to_string());
+		match log {
+			Some(log) => log.init($a),
+			None => {
+				let mut log = nioruntime_log::Log::new();
+				let ret = log.init($a);
+				log_map.insert(DEFAULT_LOG.to_string(), log);
+				ret
 			}
-			Err(e) => Err(nioruntime_err::ErrorKind::PoisonError(format!(
-				"log generated poison error: {}",
-				e
-			))
-			.into()),
 		}
 	}};
 }

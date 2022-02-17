@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/*
 use byte_tools::copy;
 use byteorder::{LittleEndian, ReadBytesExt};
 use clap::load_yaml;
@@ -55,15 +56,19 @@ impl Buffer {
 pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
+*/
 
 fn main() {
-	let res = real_main();
-	match res {
-		Ok(_) => {}
-		Err(e) => error!("real_main generated Error: {}", e.to_string()),
-	}
+	/*
+		let res = real_main();
+		match res {
+			Ok(_) => {}
+			Err(e) => error!("real_main generated Error: {}", e.to_string()),
+		}
+	*/
 }
 
+/*
 fn client_thread(
 	count: usize,
 	id: usize,
@@ -438,3 +443,4 @@ fn real_main() -> Result<(), Error> {
 	}
 	Ok(())
 }
+*/

@@ -11,6 +11,6 @@ edition = "2018"
 
 [dependencies]
 
-nioruntime_err = { path = "../error" }
 nioruntime_deps = { path = "../deps" }
+nioruntime_err = { path = "../error" }
 

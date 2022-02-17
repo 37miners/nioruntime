@@ -18,7 +18,6 @@ pub mod ser;
 pub mod threadpool;
 
 pub use nioruntime_deps;
-use nioruntime_deps::backtrace;
 use nioruntime_deps::byteorder;
 use nioruntime_deps::bytes;
 use nioruntime_deps::futures;

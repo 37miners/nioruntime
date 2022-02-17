@@ -26,10 +26,17 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// This enumeration is used to get/set properties of the log. These settings are generally set through
+/// the [`set_config_option`] macro and the current settings for these properties can be obtained
+/// via the [`get_config_option`] macro.
 pub enum Settings {
+	/// Setting as to whether the logger will print to standard out. (true/false).
 	Stdout,
+	/// Setting as to whether the logger will print a timestamp for each line. (true/false).
 	Timestamp,
+	/// Setting as to whether the logger will print the log level for each line. (true/false).
 	Level,
+	/// Setting as to whether the logger will print the line number for each line. (true/false).
 	LineNum,
 }
 
@@ -74,7 +81,8 @@ pub enum RotationStatus {
 	AutoRotated,
 }
 
-/// Log Config object. Passed into the [`Log::init`] function.
+/// Log Config object. Passed into the [`Log::init`] function. Also may be set via the
+/// [`log_config`] and [`log_config_multi`] macros.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
 	/// The path to the log file. By default, logging is only printed to standard output.

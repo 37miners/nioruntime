@@ -1,3 +1,5 @@
+/*
+
 // Copyright 2021 The BMW Developers
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -648,10 +650,10 @@ impl HttpServer {
 	fn check_config(&self) -> Result<(), Error> {
 		if self.config.stats_frequency < 1000 {
 			log_multi!(
-                        	INFO,
-                        	MAIN_LOG,
-                        	"Error: Invalid config. config.stats_frequency must be equal to or greater than 1,000 ms"
-                	);
+							INFO,
+							MAIN_LOG,
+							"Error: Invalid config. config.stats_frequency must be equal to or greater than 1,000 ms"
+					);
 			Err(ErrorKind::SetupError(
 				"config.stats_frequency must be equal to or greater than 1,000 ms".to_string(),
 			)
@@ -3016,3 +3018,4 @@ fn test_index_of() -> Result<(), Error> {
 	);
 	Ok(())
 }
+*/

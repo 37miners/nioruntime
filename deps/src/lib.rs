@@ -36,8 +36,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 lazy_static::lazy_static! {
-				pub static ref LOCK_MONITOR: Arc<RwLock<HashMap<u128, LockInfo>>> =
-								Arc::new(RwLock::new(HashMap::new()));
+	pub static ref LOCK_MONITOR: Arc<RwLock<HashMap<u128, LockInfo>>> =
+		Arc::new(RwLock::new(HashMap::new()));
 }
 
 #[derive(Debug)]

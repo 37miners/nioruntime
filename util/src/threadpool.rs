@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::backtrace;
 use crate::futures::executor::block_on;
 use crate::lazy_static::lazy_static;
 use crate::rand;

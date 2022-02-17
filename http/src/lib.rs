@@ -1,3 +1,5 @@
+/*
+
 // Copyright 2021 The BMW Developers
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,3 +25,5 @@ pub use crate::websocket::{
 	build_messages, process_websocket_data, send_websocket_message, WebSocketMessage,
 	WebSocketMessageType,
 };
+
+*/

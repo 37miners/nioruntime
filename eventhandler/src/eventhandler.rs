@@ -16,7 +16,7 @@
 
 use nioruntime_deps::errno::{errno, set_errno, Errno};
 use nioruntime_deps::libc::{self, accept, c_int, c_void, fcntl, pipe, read, write};
-use nioruntime_deps::{backtrace, rand, rustls, rustls_pemfile};
+use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::{lockw, lockwp};
@@ -338,42 +338,24 @@ where
 		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
 		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
 
-		std::thread::spawn(move || loop {
-			debug!("starting thread {}", tid);
-			let events = events.clone();
-			let ctx = ctx.clone();
-			let connection_id_map = connection_id_map.clone();
-			let connection_handle_map = connection_handle_map.clone();
-			let callbacks = callbacks.clone();
-			let callbacks_clone = callbacks.clone();
+		std::thread::spawn(move || -> Result<(), Error> {
+			loop {
+				let events = events.clone();
+				let ctx = ctx.clone();
+				let connection_id_map = connection_id_map.clone();
+				let connection_handle_map = connection_handle_map.clone();
+				let callbacks = callbacks.clone();
+				let callbacks_clone = callbacks.clone();
 
-			let jh = std::thread::spawn(move || {
-				let mut events: &mut Vec<Event> = &mut *lockwp!(events);
-				let mut ctx = &mut *lockwp!(ctx);
-				let mut connection_id_map = &mut *lockwp!(connection_id_map);
-				let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
-				let callbacks = &mut *lockwp!(callbacks);
+				let jh = std::thread::spawn(move || -> Result<(), Error> {
+					let mut events: &mut Vec<Event> = &mut *lockwp!(events);
+					let mut ctx = &mut *lockwp!(ctx);
+					let mut connection_id_map = &mut *lockwp!(connection_id_map);
+					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
+					let callbacks = &mut *lockwp!(callbacks);
 
-				// process any remaining events from a panic
-				let next = ctx.counter + 1;
-				match Self::thread_loop(
-					&mut ctx,
-					&config,
-					&mut events,
-					&wakeup,
-					&callbacks,
-					&mut connection_id_map,
-					&mut connection_handle_map,
-					next,
-				) {
-					Ok(_) => {}
-					Err(e) => {
-						fatal!("unexpected error in thread loop: {}", e);
-					}
-				}
-
-				loop {
-					info!("thread loop {}", tid);
+					// process any remaining events from a panic
+					let next = ctx.counter + 1;
 					match Self::thread_loop(
 						&mut ctx,
 						&config,
@@ -382,36 +364,54 @@ where
 						&callbacks,
 						&mut connection_id_map,
 						&mut connection_handle_map,
-						0,
+						next,
 					) {
 						Ok(_) => {}
 						Err(e) => {
 							fatal!("unexpected error in thread loop: {}", e);
-							break;
 						}
 					}
-				}
-			});
 
-			match jh.join() {
-				Ok(_) => {}
-				Err(_e) => {
-					log_multi!(ERROR, MAIN_LOG, "thread panic!");
-				}
-			}
-
-			let callbacks = lockwp!(callbacks_clone);
-			match &(*callbacks).on_panic {
-				Some(on_panic) => match (on_panic)() {
-					Ok(_) => {}
-					Err(e) => {
-						println!("on_panic generated error: {}", e.to_string());
+					loop {
+						match Self::thread_loop(
+							&mut ctx,
+							&config,
+							&mut events,
+							&wakeup,
+							&callbacks,
+							&mut connection_id_map,
+							&mut connection_handle_map,
+							0,
+						) {
+							Ok(_) => {}
+							Err(e) => {
+								fatal!("unexpected error in thread loop: {}", e);
+								break;
+							}
+						}
 					}
-				},
-				None => {}
+					Ok(())
+				});
+
+				match jh.join() {
+					Ok(_) => {}
+					Err(_e) => {
+						log_multi!(ERROR, MAIN_LOG, "thread panic!");
+					}
+				}
+
+				let callbacks = lockwp!(callbacks_clone);
+				match &(*callbacks).on_panic {
+					Some(on_panic) => match (on_panic)() {
+						Ok(_) => {}
+						Err(e) => {
+							println!("on_panic generated error: {}", e.to_string());
+						}
+					},
+					None => {}
+				}
 			}
 		});
-
 		Ok(())
 	}
 
@@ -1146,7 +1146,7 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	Ok(len.try_into().unwrap_or(0))
 }
 
-fn load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, Error> {
+fn _load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, Error> {
 	let certfile = File::open(filename)?;
 	let mut reader = BufReader::new(certfile);
 	let certs = rustls_pemfile::certs(&mut reader)?;
@@ -1156,7 +1156,7 @@ fn load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, Error> {
 		.collect())
 }
 
-fn load_private_key(filename: &str) -> Result<rustls::PrivateKey, Error> {
+fn _load_private_key(filename: &str) -> Result<rustls::PrivateKey, Error> {
 	let keyfile = File::open(filename)?;
 	let mut reader = BufReader::new(keyfile);
 
@@ -1389,9 +1389,10 @@ struct Callbacks<OnRead, OnAccept, OnClose, OnPanic> {
 #[cfg(test)]
 mod tests {
 	use crate::eventhandler::*;
+	use nioruntime_deps::nix::sys::socket::{
+		bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
+	};
 	use nioruntime_err::Error;
-	use nix::sys::socket::InetAddr;
-	use nix::sys::socket::SockAddr;
 	use std::io::{Read, Write};
 	use std::mem;
 	use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -1402,10 +1403,10 @@ mod tests {
 	debug!();
 
 	fn get_fd() -> Result<RawFd, Error> {
-		let raw_fd = nix::sys::socket::socket(
-			nix::sys::socket::AddressFamily::Inet,
-			nix::sys::socket::SockType::Stream,
-			nix::sys::socket::SockFlag::empty(),
+		let raw_fd = socket(
+			AddressFamily::Inet,
+			SockType::Stream,
+			SockFlag::empty(),
 			None,
 		)?;
 
@@ -1453,8 +1454,8 @@ mod tests {
 		let mut listeners = vec![];
 		for _ in 0..3 {
 			let fd = get_fd()?;
-			nix::sys::socket::bind(fd, &sock_addr)?;
-			nix::sys::socket::listen(fd, 10)?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
 
 			let listener = unsafe { TcpListener::from_raw_fd(fd) };
 			listener.set_nonblocking(true)?;

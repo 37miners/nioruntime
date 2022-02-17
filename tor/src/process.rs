@@ -250,7 +250,7 @@ impl TorProcess {
 				let completion_percent = self.completion_percent;
 
 				let status_clone = status.clone();
-				thread::spawn(move || -> Result<(), std::io::Error> {
+				thread::spawn(move || -> Result<(), Error> {
 					let stdout =
 						Self::parse_tor_stdout(stdout, completion_percent, status_clone.clone());
 					if stdout.is_err() {
@@ -393,7 +393,6 @@ impl TorProcess {
 impl Drop for TorProcess {
 	// kill the child
 	fn drop(&mut self) {
-		trace!("DROPPING TOR PROCESS");
 		self.kill().unwrap_or(());
 	}
 }

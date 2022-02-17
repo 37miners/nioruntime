@@ -79,6 +79,7 @@ fn main() -> Result<(), Error> {
 		show_line_num: false,
 		..Default::default()
 	})?;
+
 	let evh_config = EventHandlerConfig {
 		threads: 6,
 		..EventHandlerConfig::default()
@@ -145,7 +146,7 @@ fn main() -> Result<(), Error> {
 				jhs.push(std::thread::spawn(move || match run_thread(count) {
 					Ok(_) => {}
 					Err(e) => {
-						error!("{}", e);
+						println!("{}", e);
 						assert!(false);
 					}
 				}));

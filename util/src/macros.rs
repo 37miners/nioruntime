@@ -20,8 +20,9 @@ pub use crate as niorumtime_util;
 macro_rules! lock {
 	($a:expr) => {
 		$a.lock().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+			let error: nioruntime_err::Error =
+				nioruntime_err::ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+					.into();
 			error
 		})?;
 	};
@@ -44,7 +45,7 @@ macro_rules! lockw {
 				Ok(_) => {}
 				Err(_) => {
 					is_locked = true;
-					let bt = backtrace::Backtrace::new();
+					let bt = nioruntime_deps::backtrace::Backtrace::new();
 					let time = std::time::SystemTime::now()
 						.duration_since(std::time::UNIX_EPOCH)
 						.unwrap()
@@ -52,9 +53,12 @@ macro_rules! lockw {
 					let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 						.write()
 						.map_err(|e| {
-							let error: Error =
-								ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
-									.into();
+							let error: nioruntime_err::Error =
+								nioruntime_err::ErrorKind::PoisonError(format!(
+									"Poison Error: {}",
+									e.to_string()
+								))
+								.into();
 							error
 						})
 						.unwrap();
@@ -62,7 +66,7 @@ macro_rules! lockw {
 					match lock_monitor.get(&0) {
 						Some(_) => {}
 						None => {
-							let bt = backtrace::Backtrace::new();
+							let bt = nioruntime_deps::backtrace::Backtrace::new();
 							lock_monitor.insert(0, nioruntime_deps::LockInfo { id, bt, time });
 							std::thread::spawn(move || loop {
 								std::thread::sleep(std::time::Duration::from_millis(10000));
@@ -96,8 +100,9 @@ macro_rules! lockw {
 			}
 		}
 		let res = $a.write().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+			let error: nioruntime_err::Error =
+				nioruntime_err::ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+					.into();
 			error
 		});
 
@@ -105,8 +110,10 @@ macro_rules! lockw {
 			let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 				.write()
 				.map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+					let error: nioruntime_err::Error = nioruntime_err::ErrorKind::PoisonError(
+						format!("Poison Error: {}", e.to_string()),
+					)
+					.into();
 					error
 				})
 				.unwrap();
@@ -132,7 +139,7 @@ macro_rules! lockr {
 				Ok(_) => {}
 				Err(_) => {
 					is_locked = true;
-					let bt = backtrace::Backtrace::new();
+					let bt = nioruntime_deps::backtrace::Backtrace::new();
 					let time = std::time::SystemTime::now()
 						.duration_since(std::time::UNIX_EPOCH)
 						.unwrap()
@@ -140,7 +147,7 @@ macro_rules! lockr {
 					let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 						.write()
 						.map_err(|e| {
-							let error: Error =
+							let error: nioruntime_err::Error =
 								ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
 									.into();
 							error
@@ -150,7 +157,7 @@ macro_rules! lockr {
 					match lock_monitor.get(&0) {
 						Some(_) => {}
 						None => {
-							let bt = backtrace::Backtrace::new();
+							let bt = nioruntime_deps::backtrace::Backtrace::new();
 							lock_monitor.insert(0, nioruntime_deps::LockInfo { id, bt, time });
 							std::thread::spawn(move || loop {
 								std::thread::sleep(std::time::Duration::from_millis(10000));
@@ -184,8 +191,9 @@ macro_rules! lockr {
 			}
 		}
 		let res = $a.read().map_err(|e| {
-			let error: Error =
-				ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+			let error: nioruntime_err::Error =
+				nioruntime_err::ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+					.into();
 			error
 		});
 
@@ -193,8 +201,10 @@ macro_rules! lockr {
 			let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
 				.write()
 				.map_err(|e| {
-					let error: Error =
-						ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string())).into();
+					let error: nioruntime_err::Error = nioruntime_err::ErrorKind::PoisonError(
+						format!("Poison Error: {}", e.to_string()),
+					)
+					.into();
 					error
 				})
 				.unwrap();

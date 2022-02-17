@@ -606,6 +606,7 @@ version = "0.0.3-beta1"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
+ "nioruntime_util",
 ]
 
 [[package]]
@@ -682,6 +683,7 @@ dependencies = [
  "built",
  "clap",
  "libc",
+ "nioruntime_deps",
  "nioruntime_err",
  "nioruntime_evh",
  "nioruntime_log",
