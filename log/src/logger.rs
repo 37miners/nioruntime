@@ -534,6 +534,39 @@ impl Log {
 	}
 }
 
+// helper function for macros
+pub fn do_log(
+	level: i32,
+	show_ts: bool,
+	log: &mut Log,
+	line: String,
+	config_level: i32,
+) -> Result<(), Error> {
+	if !log.is_configured() {
+		log.init(LogConfig::default())?;
+	}
+
+	let cur_show_log_level = log.get_show_log_level()?;
+	let cur_show_line_num = log.get_show_line_num()?;
+	let cur_show_timestamp = log.get_show_timestamp()?;
+
+	if show_ts == false {
+		log.update_show_timestamp(show_ts)?;
+		log.update_show_log_level(show_ts)?;
+		log.update_show_line_num(show_ts)?;
+	}
+
+	if level >= config_level {
+		log.log(level, &line)?;
+	}
+
+	log.update_show_log_level(cur_show_log_level)?;
+	log.update_show_line_num(cur_show_line_num)?;
+	log.update_show_timestamp(cur_show_timestamp)?;
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::logger::LogImpl;

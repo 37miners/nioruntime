@@ -115,6 +115,9 @@ pub enum ErrorKind {
 	/// InvalidLogLine
 	#[fail(display = "InvalidLogLine: {}", _0)]
 	InvalidLogLine(String),
+	/// LogError
+	#[fail(display = "Log Error: {}", _0)]
+	LogError(String),
 	/// Timeout
 	#[fail(display = "Timeout: {}", _0)]
 	Timeout(String),

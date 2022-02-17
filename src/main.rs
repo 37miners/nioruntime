@@ -58,7 +58,86 @@ pub mod built_info {
 }
 */
 
-fn main() {
+/*
+use nioruntime_deps::failure::{self, Context, Fail};
+use std::fmt::{self, Display};
+use nioruntime_log::*;
+
+/// Base Error struct which is used throught this crate and other crates
+#[derive(Debug, Fail)]
+pub struct Error {
+	inner: Context<ErrorKind>,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Fail)]
+pub enum ErrorKind {
+	#[fail(display = "Abc: {}", _0)]
+	Abc(String),
+}
+
+impl Display for Error {
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+				let cause = match self.cause() {
+						Some(c) => format!("{}", c),
+						None => String::from("Unknown"),
+				};
+				let backtrace = match self.backtrace() {
+						Some(b) => format!("{}", b),
+						None => String::from("Unknown"),
+				};
+				let output = format!(
+						"{} \n Cause: {} \n Backtrace: {}",
+						self.inner, cause, backtrace
+				);
+				Display::fmt(&output, f)
+		}
+}
+
+impl From<nioruntime_err::Error> for Error {
+	fn from(error: nioruntime_err::Error) -> Error {
+		Error { inner: Context::new(ErrorKind::Abc(format!("{}", error))) }
+	}
+}
+*/
+
+use nioruntime_log::*;
+
+trace!();
+
+fn main() -> Result<(), std::io::Error> {
+	log_config!(LogConfig {
+		show_bt: false,
+		show_stdout: false,
+		file_path: Some("abc".to_string()),
+		..Default::default()
+	})
+	.expect("log config");
+
+	fatal!("fatal").expect("failed to log");
+	fatal_no_ts!("fatal_no_ts").expect("failed to log");
+	fatal_all!("fatal all").expect("failed to log");
+
+	error!("error").expect("failed to log");
+	error_no_ts!("error_no_ts").expect("failed to log");
+	error_all!("error all").expect("failed to log");
+
+	warn!("warn").expect("failed to log");
+	warn_no_ts!("warn_no_ts").expect("failed to log");
+	warn_all!("warn all").expect("failed to log");
+
+	info!("info").expect("failed to log");
+	info_no_ts!("info no ts").expect("failed to log");
+	info_all!("info all").expect("failed to log");
+
+	debug!("debug").expect("failed to log");
+	debug_no_ts!("debug no ts").expect("failed to log");
+	debug_all!("debug all").expect("failed to log");
+
+	trace!("trace").expect("failed to log");
+	trace_no_ts!("trace_no_ts").expect("failed to log");
+	trace_all!("trace all").expect("failed to log");
+
+	Ok(())
 	/*
 		let res = real_main();
 		match res {

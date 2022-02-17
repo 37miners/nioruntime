@@ -368,7 +368,7 @@ where
 					) {
 						Ok(_) => {}
 						Err(e) => {
-							fatal!("unexpected error in thread loop: {}", e);
+							fatal!("unexpected error in thread loop: {}", e)?;
 						}
 					}
 
@@ -385,7 +385,7 @@ where
 						) {
 							Ok(_) => {}
 							Err(e) => {
-								fatal!("unexpected error in thread loop: {}", e);
+								fatal!("unexpected error in thread loop: {}", e)?;
 								break;
 							}
 						}
@@ -396,7 +396,7 @@ where
 				match jh.join() {
 					Ok(_) => {}
 					Err(_e) => {
-						log_multi!(ERROR, MAIN_LOG, "thread panic!");
+						log_multi!(ERROR, MAIN_LOG, "thread panic!")?;
 					}
 				}
 
@@ -428,7 +428,7 @@ where
 		if start == 0 {
 			Self::process_new(ctx, config, connection_id_map, connection_handle_map)?;
 			Self::get_events(ctx, events)?;
-			debug!("event count = {}", events.len());
+			debug!("event count = {}", events.len())?;
 		}
 
 		ctx.counter = start;
@@ -474,7 +474,7 @@ where
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		debug!("process read: {:?}", event);
+		debug!("process read: {:?}", event)?;
 
 		let x: Option<(u128, Handle)> = {
 			let connection_info = match connection_handle_map.get(&event.handle) {
@@ -490,7 +490,7 @@ where
 			let _connection_id = connection_info.get_connection_id();
 			let handle = connection_info.get_handle(ctx.tid);
 
-			debug!("process conn_info: {:?}", connection_info);
+			debug!("process conn_info: {:?}", connection_info)?;
 
 			match &*connection_info {
 				EventConnectionInfo::ListenerConnection(_c) => {
@@ -502,13 +502,13 @@ where
 					None
 				}
 				EventConnectionInfo::ReadWriteConnection(c) => {
-					info!("start loop");
+					info!("start loop")?;
 					let mut len;
 					loop {
-						info!("pre");
+						info!("pre")?;
 						set_errno(Errno(0));
 						len = Self::process_read(c.clone(), ctx, wakeup, callbacks)?;
-						info!("len={}, c={:?}", len, c);
+						info!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							break;
 						}
@@ -526,7 +526,7 @@ where
 							info!(
 								"it was an eagain for {}",
 								connection_info.get_connection_id()
-							);
+							)?;
 							None
 						}
 					} else {
@@ -538,7 +538,7 @@ where
 
 		match x {
 			Some((id, handle)) => {
-				info!("rem {},{} from maps", id, handle);
+				info!("rem {},{} from maps", id, handle)?;
 				Self::close_connection(
 					id,
 					ctx,
@@ -585,18 +585,18 @@ where
 										wakeup.clone(),
 									))?;
 								}
-								None => warn!("no on_close callback"),
+								None => warn!("no on_close callback")?,
 							}
 						}
-						_ => warn!("listener closed!"),
+						_ => warn!("listener closed!")?,
 					},
-					None => warn!("no connection info for handle: {}", handle),
+					None => warn!("no connection info for handle: {}", handle)?,
 				}
 
 				ctx.filter_set.remove(&handle);
 			}
 			None => {
-				warn!("Tried to close a connection that does not exist: {}", id);
+				warn!("Tried to close a connection that does not exist: {}", id)?;
 			}
 		}
 
@@ -622,7 +622,7 @@ where
 		};
 
 		if handle > 0 {
-			info!("Accepted handle = {} on tid={}", handle, ctx.tid);
+			info!("Accepted handle = {} on tid={}", handle, ctx.tid)?;
 			unsafe { fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK) };
 
 			let connection_info = EventConnectionInfo::read_write_connection(handle);
@@ -636,11 +636,11 @@ where
 					)) {
 						Ok(_) => {}
 						Err(e) => {
-							warn!("on_accept Callback resulted in error: {}", e);
+							warn!("on_accept Callback resulted in error: {}", e)?;
 						}
 					}
 				}
-				None => error!("no handler for on_accept!"),
+				None => error!("no handler for on_accept!")?,
 			};
 
 			ctx.accepted_connections.push(connection_info);
@@ -649,7 +649,7 @@ where
 			error!(
 				"Error accepting connection: {}",
 				std::io::Error::last_os_error()
-			);
+			)?;
 			Ok(false)
 		}
 	}
@@ -660,23 +660,23 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	) -> Result<isize, Error> {
-		debug!("read event on {:?}", connection_info);
+		debug!("read event on {:?}", connection_info)?;
 		let len = {
 			let cbuf: *mut c_void = &mut ctx.buffer as *mut _ as *mut c_void;
 			unsafe { read(connection_info.handle, cbuf, READ_BUFFER_SIZE) }
 		};
 
 		if len >= 0 {
-			debug!("read {:?}", &ctx.buffer[0..len.try_into()?]);
+			debug!("read {:?}", &ctx.buffer[0..len.try_into()?])?;
 		} else {
-			debug!("got a negative read: {} on conn={:?}", len, connection_info);
+			debug!("got a negative read: {} on conn={:?}", len, connection_info)?;
 		}
 
 		if wakeup.wakeup_handle_read == connection_info.handle {
 			// wakeup event
-			trace!("wakeup len read = {}", len);
+			trace!("wakeup len read = {}", len)?;
 		} else if len > 0 {
-			info!("read {} bytes", len);
+			info!("read {} bytes", len)?;
 			// non-wakeup, so execute on_read callback
 			match &callbacks.on_read {
 				Some(on_read) => {
@@ -688,16 +688,16 @@ where
 					match (on_read)(connection_data, &ctx.buffer[0..len.try_into()?]) {
 						Ok(_) => {}
 						Err(e) => {
-							warn!("on_read Callback resulted in error: {}", e);
+							warn!("on_read Callback resulted in error: {}", e)?;
 						}
 					}
 				}
 				None => {
-					error!("no on_read callback found!");
+					error!("no on_read callback found!")?;
 				}
 			}
 		} else {
-			info!("len less than or equal to 0. Might be a close or no data");
+			info!("len less than or equal to 0. Might be a close or no data")?;
 			// len <= 0 close don't do anything here
 		}
 
@@ -713,7 +713,7 @@ where
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		debug!("in process write for event: {:?}", event);
+		debug!("in process write for event: {:?}", event)?;
 
 		let mut to_remove = vec![];
 
@@ -731,7 +731,7 @@ where
 		match &mut connection_info {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
 				let connection_id = connection_info.get_connection_id();
-				info!("connection_info={:?}", connection_info);
+				info!("connection_info={:?}", connection_info)?;
 				let mut block = false;
 				let mut rem_count = 0;
 				for wbuf in &mut connection_info.pending_wbufs {
@@ -772,7 +772,7 @@ where
 				}
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
-				warn!("tried to write to a listener: {:?}", event);
+				warn!("tried to write to a listener: {:?}", event)?;
 			}
 		}
 
@@ -810,7 +810,7 @@ where
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
 			ctx.tid
-		);
+		)?;
 
 		let epollfd = ctx.selector;
 		for evt in &ctx.input_events {
@@ -833,7 +833,7 @@ where
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
 				match res {
 					Ok(_) => {}
-					Err(e) => error!("Error epoll_ctl2: {}, fd={}, op={:?}", e, fd, op),
+					Err(e) => error!("Error epoll_ctl2: {}, fd={}, op={:?}", e, fd, op)?,
 				}
 			} else if evt.etype == EventType::Write {
 				let fd = evt.handle;
@@ -853,7 +853,7 @@ where
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
 				match res {
 					Ok(_) => {}
-					Err(e) => error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op),
+					Err(e) => error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op)?,
 				}
 			} else {
 				return Err(
@@ -886,7 +886,7 @@ where
 				}
 			}
 			Err(e) => {
-				error!("Error with epoll wait = {}", e.to_string());
+				error!("Error with epoll wait = {}", e.to_string())?;
 			}
 		}
 
@@ -907,14 +907,14 @@ where
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
 			ctx.tid
-		);
+		)?;
 
 		let mut kevs = vec![];
 		for event in &ctx.input_events {
-			debug!("pushing input event = {:?}", event);
+			debug!("pushing input event = {:?}", event)?;
 			match event.etype {
 				EventType::Accept => {
-					trace!("pushing an accept");
+					trace!("pushing an accept")?;
 					kevs.push(kevent::new(
 						event.handle.try_into()?,
 						EventFilter::EVFILT_READ,
@@ -923,7 +923,7 @@ where
 					));
 				}
 				EventType::Read => {
-					info!("pushing a read: {}", event.handle);
+					info!("pushing a read: {}", event.handle)?;
 					kevs.push(kevent::new(
 						event.handle.try_into()?,
 						EventFilter::EVFILT_READ,
@@ -932,7 +932,7 @@ where
 					));
 				}
 				EventType::Write => {
-					trace!("pushing a write");
+					trace!("pushing a write")?;
 					kevs.push(kevent::new(
 						event.handle.try_into()?,
 						EventFilter::EVFILT_WRITE,
@@ -964,7 +964,7 @@ where
 			)
 		};
 
-		debug!("kqueue wakeup with ret_count = {}", ret_count);
+		debug!("kqueue wakeup with ret_count = {}", ret_count)?;
 		events.clear();
 		for i in 0..ret_count as usize {
 			events.push(Event {
@@ -1038,7 +1038,7 @@ where
 		debug!(
 			"adding pending conns: {:?} on tid={}",
 			ctx.add_pending, ctx.tid
-		);
+		)?;
 
 		Self::process_pending(ctx, connection_id_map, connection_handle_map)?;
 		ctx.add_pending.clear();
@@ -1054,29 +1054,29 @@ where
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
-		debug!("process nwrites with {} connections", ctx.nwrites.len());
+		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for wbuf in &ctx.nwrites {
 			match connection_id_map.get(&wbuf.connection_id) {
 				Some(handle) => match connection_handle_map.get_mut(handle) {
 					Some(conn_info) => match conn_info {
 						EventConnectionInfo::ReadWriteConnection(item) => {
 							item.pending_wbufs.push(wbuf.clone());
-							info!("pushing wbuf to item = {:?}", item);
+							info!("pushing wbuf to item = {:?}", item)?;
 							ctx.input_events.push(Event {
 								handle: item.handle,
 								etype: EventType::Write,
 							});
 						}
 						EventConnectionInfo::ListenerConnection(item) => {
-							warn!("Got a write request on listener: {:?}", item);
+							warn!("Got a write request on listener: {:?}", item)?;
 						}
 					},
 					None => {
-						warn!("Handle not found for connection_id!");
+						warn!("Handle not found for connection_id!")?;
 					}
 				},
 				None => {
-					trace!("Attempt to write on closed connection: {:?}", wbuf);
+					trace!("Attempt to write on closed connection: {:?}", wbuf)?;
 				} // connection already disconnected
 			}
 		}
@@ -1089,7 +1089,7 @@ where
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
-		debug!("process_pending with {} connections", ctx.add_pending.len());
+		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
@@ -1106,7 +1106,7 @@ where
 					info!(
 						"pushing accept handle: {} to tid={}",
 						item.handles[ctx.tid], ctx.tid
-					);
+					)?;
 					ctx.input_events.push(Event {
 						handle: item.handles[ctx.tid],
 						etype: EventType::Accept,
@@ -1436,7 +1436,7 @@ mod tests {
 
 	#[test]
 	fn test_eventhandler() -> Result<(), Error> {
-		debug!("Starting Eventhandler");
+		debug!("Starting Eventhandler")?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
 			threads: 3,
 			..EventHandlerConfig::default()
@@ -1483,7 +1483,7 @@ mod tests {
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf| {
-			info!("callback on {:?} with buf={:?}", conn_data, buf);
+			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
 			assert_eq!(buf, [1, 2, 3, 4]);
 			{
 				let mut cid_read = cid_read.write().unwrap();

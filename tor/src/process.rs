@@ -254,7 +254,7 @@ impl TorProcess {
 					let stdout =
 						Self::parse_tor_stdout(stdout, completion_percent, status_clone.clone());
 					if stdout.is_err() {
-						error!("problem with parsing stdout (tor): {:?}", stdout);
+						error!("problem with parsing stdout (tor): {:?}", stdout)?;
 					}
 					// now we start reading again forever so buffers don't fill
 					let _ = Self::parse_tor_stdout(stdout.unwrap(), u8::max_value(), status_clone);
@@ -340,7 +340,7 @@ impl TorProcess {
 				}
 				let timestamp = &raw_line[..timestamp_len];
 				let line = &raw_line[timestamp_len + 1..raw_line.len() - 1];
-				debug!("{} {}", timestamp, line);
+				debug!("{} {}", timestamp, line)?;
 				match line.split(' ').nth(0) {
 					Some("[notice]") => {
 						if let Some("Bootstrapped") = line.split(' ').nth(1) {
