@@ -925,14 +925,19 @@ dependencies = [
  "bytes",
  "chrono",
  "ed25519-dalek",
+ "errno",
  "failure",
  "failure_derive",
  "futures",
+ "kqueue-sys",
  "lazy_static",
+ "libc",
  "nix",
  "rand 0.8.4",
  "rustls",
+ "rustls-pemfile",
  "serde",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -946,24 +951,10 @@ dependencies = [
 name = "nioruntime_evh"
 version = "0.0.3-beta1"
 dependencies = [
- "backtrace",
- "errno",
- "futures",
- "kqueue-sys",
- "libc",
  "nioruntime_deps",
  "nioruntime_err",
  "nioruntime_log",
  "nioruntime_util",
- "nix",
- "portpicker",
- "rand 0.8.4",
- "rustls",
- "rustls-pemfile",
- "webpki-roots",
- "wepoll-sys",
- "winapi 0.2.8",
- "ws2_32-sys",
 ]
 
 [[package]]
@@ -1998,15 +1989,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "552ceb903e957524388c4d3475725ff2c8b7960922063af6ce53c9a43da07449"
 dependencies = [
  "webpki",
-]
-
-[[package]]
-name = "wepoll-sys"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9082a777aed991f6769e2b654aa0cb29f1c3d615daf009829b07b66c7aff6a24"
-dependencies = [
- "cc",
 ]
 
 [[package]]
