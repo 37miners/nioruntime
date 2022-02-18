@@ -766,46 +766,58 @@ macro_rules! trace_all {
 #[macro_export]
 macro_rules! log_multi_all {
 	($level:expr, $a:expr, $b:expr) => {{
-		// TODO: there's a possiblity that two threads could log at the same time
-		// and set this option on one another. Make it use a single lock.
-		let stdout_cur = nioruntime_log::get_config_option!(
-			nioruntime_log::Settings::Stdout
-		).unwrap_or(true);
+                match LOG_LEVEL <= $level {
+                	true => {
+				// TODO: there's a possiblity that two threads could log at the same time
+				// and set this option on one another. Make it use a single lock.
+				let stdout_cur = nioruntime_log::get_config_option!(
+					nioruntime_log::Settings::Stdout
+				).unwrap_or(true);
 
-		nioruntime_log::set_config_option!(
-			nioruntime_log::Settings::Stdout, true
-		).ok();
+				nioruntime_log::set_config_option!(
+					nioruntime_log::Settings::Stdout, true
+				).ok();
 
-		let res: Result<(), nioruntime_err::Error>  = nioruntime_log::log_multi!($level, $a, $b);
+				let res: Result<(), nioruntime_err::Error> =
+					nioruntime_log::log_multi!($level, $a, $b);
 
-		nioruntime_log::set_config_option!(
-			nioruntime_log::Settings::Stdout, stdout_cur
-		).ok();
+				nioruntime_log::set_config_option!(
+					nioruntime_log::Settings::Stdout, stdout_cur
+				).ok();
 
-		res
+				res
+			},
+			false => Ok(()),
+		}
+
 	}};
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
-		let mut res: Result<(), nioruntime_err::Error>;
+                match LOG_LEVEL <= $level {
+                        true => {
+				let mut res: Result<(), nioruntime_err::Error>;
 
-		let stdout_cur = nioruntime_log::get_config_option!(
-			nioruntime_log::Settings::Stdout
-		).unwrap_or(true);
+				let stdout_cur = nioruntime_log::get_config_option!(
+					nioruntime_log::Settings::Stdout
+				).unwrap_or(true);
 
-		res = nioruntime_log::set_config_option!(
-			nioruntime_log::Settings::Stdout, true
-		);
+				res = nioruntime_log::set_config_option!(
+					nioruntime_log::Settings::Stdout, true
+				);
 
-		if res.is_ok() {
-			res = nioruntime_log::log_multi!($level, $a, $b, $($c)*);
-		}
+				if res.is_ok() {
+					res = nioruntime_log::log_multi!($level, $a, $b, $($c)*);
+				}
 
-		if res.is_ok() {
-			res = nioruntime_log::set_config_option!(
-				nioruntime_log::Settings::Stdout, stdout_cur
-			);
-		}
+				if res.is_ok() {
+					res = nioruntime_log::set_config_option!(
+						nioruntime_log::Settings::Stdout, stdout_cur
+					);
+				}
 
-		res
+				res
+                        },
+                        false => Ok(()),
+                }
 	}};
 }
 
@@ -838,62 +850,72 @@ macro_rules! log_multi_all {
 #[macro_export]
 macro_rules! log_multi {
 	($level:expr, $a:expr, $b:expr) => {{
-		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
-			Ok(mut log_map) => {
-				let mut log = log_map.get_mut($a);
-				match log {
-			       		Some(ref mut log) => {
-			       			res = nioruntime_log::do_log!($level, true, log, $b);
-			       		},
-			       		None => {
-			       			let mut log = nioruntime_log::Log::new();
-			       			res = nioruntime_log::do_log!($level, true, &mut log, $b);
-			       			log_map.insert($a.to_string(), log);
-			       		}
-				}
-			}
-			Err(e) => {
-				res = Err(
-					nioruntime_err::ErrorKind::LogError(
-						format!(
-							"couldn't obtain lock due to: {}",
-							e
-						)
-					).into()
-				);
-			}
-		}
-		res
-	}};
-	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
-		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
-			Ok(mut log_map) => {
-				let mut log = log_map.get_mut($a);
-				match log {
-					Some(ref mut log) => {
-						res = nioruntime_log::do_log!($level, true, log, $b, $($c)*);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						res = nioruntime_log::do_log!($level, true, &mut log, $b, $($c)*);
-						log_map.insert($a.to_string(), log);
+                match LOG_LEVEL <= $level {
+                        true => {
+				let res: Result<(), nioruntime_err::Error>;
+				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+					Ok(mut log_map) => {
+						let mut log = log_map.get_mut($a);
+						match log {
+			       				Some(ref mut log) => {
+			       					res = nioruntime_log::do_log!($level, true, log, $b);
+			       				},
+			       				None => {
+			       					let mut log = nioruntime_log::Log::new();
+			       					res = nioruntime_log::do_log!($level, true, &mut log, $b);
+			       					log_map.insert($a.to_string(), log);
+			       				}
+						}
+					}
+					Err(e) => {
+						res = Err(
+							nioruntime_err::ErrorKind::LogError(
+								format!(
+									"couldn't obtain lock due to: {}",
+									e
+								)
+							).into()
+						);
 					}
 				}
-			}
-			Err(e) => {
-				res = Err(
-					nioruntime_err::ErrorKind::LogError(
-						format!(
-							"couldn't obtain lock due to: {}",
-							e
-						)
-					).into()
-				);
-			}
-		}
-		res
+				res
+                        },
+                        false => Ok(()),
+                }
+	}};
+	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
+		match LOG_LEVEL <= $level {
+                        true => {
+				let res: Result<(), nioruntime_err::Error>;
+				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+					Ok(mut log_map) => {
+						let mut log = log_map.get_mut($a);
+						match log {
+							Some(ref mut log) => {
+								res = nioruntime_log::do_log!($level, true, log, $b, $($c)*);
+							},
+							None => {
+								let mut log = nioruntime_log::Log::new();
+								res = nioruntime_log::do_log!($level, true, &mut log, $b, $($c)*);
+								log_map.insert($a.to_string(), log);
+							}
+						}
+					}
+					Err(e) => {
+						res = Err(
+							nioruntime_err::ErrorKind::LogError(
+								format!(
+									"couldn't obtain lock due to: {}",
+									e
+								)
+							).into()
+						);
+					}
+				}
+				res
+                        },
+                        false => Ok(()),
+                }
 	}};
 }
 
@@ -925,14 +947,24 @@ macro_rules! log_multi {
 macro_rules! log {
        ($level:expr, $a:expr)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!($level, &default, $a)
+			match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!($level, &default, $a)
+                	        },
+                        	false => Ok(()),
+                	}
 		}
 	};
 	($level:expr, $a:expr, $($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!($level, &default, $a, $($b)*)
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!($level, &default, $a, $($b)*)
+                	        },
+                        	false => Ok(()),
+                	}
 		}
 	};
 }
@@ -943,14 +975,24 @@ macro_rules! log {
 macro_rules! log_all {
 	($level:expr, $a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!($level, &default, $a)
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!($level, &default, $a)
+                        	},
+                        	false => Ok(()),
+                	}
 		}
 	};
 	($level:expr, $a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!($level, &default, $a, $($b)*)
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!($level, &default, $a, $($b)*)
+                	        },
+                        	false => Ok(()),
+                	}
 		}
 	};
 }
@@ -1106,8 +1148,7 @@ macro_rules! set_config_option {
 
 /// Identical to [`log_no_ts`] except that the name of the logger is specified instead of using
 /// the default logger.
-/// # Examples
-///
+/// # Examples ///
 /// ```
 /// use nioruntime_log::*;
 /// use nioruntime_err::Error;
@@ -1124,62 +1165,71 @@ macro_rules! set_config_option {
 #[macro_export]
 macro_rules! log_multi_no_ts {
 ($level:expr, $a:expr, $b:expr) => {{
-		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
-			Ok(mut log_map) => {
-				let mut log = log_map.get_mut($a);
-				match log {
-					Some(ref mut log) => {
-						res = nioruntime_log::do_log!($level, false, log, $b);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						res = nioruntime_log::do_log!($level, false, &mut log, $b);
-						log_map.insert($a.to_string(), log);
+                match LOG_LEVEL <= $level {
+                        true => {
+				let res: Result<(), nioruntime_err::Error>;
+				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+					Ok(mut log_map) => {
+						let mut log = log_map.get_mut($a);
+						match log {
+							Some(ref mut log) => {
+								res = nioruntime_log::do_log!($level, false, log, $b);
+							},
+							None => {
+								let mut log = nioruntime_log::Log::new();
+								res = nioruntime_log::do_log!($level, false, &mut log, $b);
+								log_map.insert($a.to_string(), log);
+							}
+						}
+					}
+					Err(e) => {
+						res = Err(
+							nioruntime_err::ErrorKind::LogError(
+								format!(
+									"couldn't obtain lock due to: {}",
+									e
+								)
+							).into()
+						);
 					}
 				}
-			}
-			Err(e) => {
-				res = Err(
-					nioruntime_err::ErrorKind::LogError(
-						format!(
-							"couldn't obtain lock due to: {}",
-							e
-						)
-					).into()
-				);
-			}
-		}
-		res
+				res
+                        },
+                        false => Ok(()),
+                }
 	}};
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
-		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
-			Ok(mut log_map) => {
-				let mut log = log_map.get_mut($a);
-				match log {
-					Some(ref mut log) => {
-						res = nioruntime_log::do_log!($level, false, log, $b, $($c)*);
-					},
-					None => {
-						let mut log = nioruntime_log::Log::new();
-						res = nioruntime_log::do_log!($level, false, &mut log, $b, $($c)*);
-						log_map.insert($a.to_string(), log);
+		match LOG_LEVEL <= $level {
+			true => {
+				let res: Result<(), nioruntime_err::Error>; match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+					Ok(mut log_map) => {
+						let mut log = log_map.get_mut($a);
+						match log {
+							Some(ref mut log) => {
+								res = nioruntime_log::do_log!($level, false, log, $b, $($c)*);
+							},
+							None => {
+								let mut log = nioruntime_log::Log::new();
+								res = nioruntime_log::do_log!($level, false, &mut log, $b, $($c)*);
+								log_map.insert($a.to_string(), log);
+							}
+						}
+					}
+					Err(e) => {
+						res = Err(
+							nioruntime_err::ErrorKind::LogError(
+								format!(
+									"couldn't obtain lock due to: {}",
+									e
+								)
+							).into()
+						);
 					}
 				}
-			}
-			Err(e) => {
-				res = Err(
-					nioruntime_err::ErrorKind::LogError(
-						format!(
-							"couldn't obtain lock due to: {}",
-							e
-						)
-					).into()
-				);
-			}
-		}
-		res
+				res
+                        },
+                        false => Ok(()),
+                }
 	}};
 }
 
@@ -1209,14 +1259,24 @@ macro_rules! log_multi_no_ts {
 macro_rules! log_no_ts {
 	($level:expr, $a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!($level, &default, $a)
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!($level, &default, $a)
+                        	},
+                        	false => Ok(()),
+                	}
 		}
 	};
 	($level:expr, $a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!($level, &default, $a, $($b)*)
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!($level, &default, $a, $($b)*)
+                	        },
+                        	false => Ok(()),
+                	}
 		}
 	};
 }
@@ -1230,19 +1290,28 @@ macro_rules! do_log {
 	};
 	($level:expr, $show_ts:expr, $log:expr, $a:expr)=>{
 		{
-			let res: Result<(), nioruntime_err::Error> = nioruntime_log::do_log(
-
-				$level, $show_ts, $log, format!($a), LOG_LEVEL
-			);
-			res
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let res: Result<(), nioruntime_err::Error> = nioruntime_log::do_log(
+						$level, $show_ts, $log, format!($a), LOG_LEVEL
+					);
+					res
+                        	},
+                        	false => Ok(()),
+                	}
 		}
 	};
 	($level:expr, $show_ts:expr, $log:expr, $a:expr, $($b:tt)*)=>{
 		{
-			let res: Result<(), nioruntime_err::Error> = nioruntime_log::do_log(
-				$level, $show_ts, $log, format!($a, $($b)*), LOG_LEVEL
-			);
-			res
+                	match LOG_LEVEL <= $level {
+                        	true => {
+					let res: Result<(), nioruntime_err::Error> = nioruntime_log::do_log(
+						$level, $show_ts, $log, format!($a, $($b)*), LOG_LEVEL
+					);
+					res
+                 	       },
+                        	false => Ok(()),
+                	}
 		}
 	};
 }
@@ -1562,6 +1631,9 @@ mod tests {
 		log!(INFO, "info from log").expect("log");
 		log_no_ts!(INFO, "info from log no ts").expect("log no ts");
 		log_all!(INFO, "log all").expect("log all");
+
+		log_multi_all!(INFO, "notmainlog", "log multi all").expect("log multi all");
+		log_multi_no_ts!(INFO, "notmainlog", "log multi no ts").expect("log multi no ts");
 
 		let config = get_config!().unwrap();
 		info_all!("config.show_timestamp={:?}", config.show_timestamp).expect("config");
