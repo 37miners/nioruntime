@@ -64,7 +64,7 @@ macro_rules! default_log_name {
 	() => {{
 		match nioruntime_util::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
 			Ok(default_log_name) => (*default_log_name).clone(),
-			Err(e) => "default".to_string(),
+			Err(_e) => "default".to_string(),
 		}
 	}};
 	($name:expr) => {{
@@ -109,14 +109,24 @@ macro_rules! fatal {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a)
+			match LOG_LEVEL <= nioruntime_log::FATAL {
+				true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a)
+				},
+				false => Ok(()),
+			}
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::FATAL {
+                                true => {
+                                        let default = nioruntime_log::default_log_name!();
+                                        nioruntime_log::log_multi!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -126,14 +136,24 @@ macro_rules! fatal {
 macro_rules! fatal_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::FATAL {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::FATAL {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -144,14 +164,24 @@ macro_rules! fatal_no_ts {
 macro_rules! fatal_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::FATAL {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::FATAL {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::FATAL, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -189,14 +219,24 @@ macro_rules! error {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -206,14 +246,24 @@ macro_rules! error {
 macro_rules! error_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -224,14 +274,24 @@ macro_rules! error_no_ts {
 macro_rules! error_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::ERROR {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::ERROR, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -269,14 +329,24 @@ macro_rules! warn {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::WARN, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -286,14 +356,24 @@ macro_rules! warn {
 macro_rules! warn_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::WARN, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -304,14 +384,24 @@ macro_rules! warn_no_ts {
 macro_rules! warn_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::WARN {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::WARN, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -347,14 +437,24 @@ macro_rules! info {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::INFO, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -364,14 +464,24 @@ macro_rules! info {
 macro_rules! info_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::INFO, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -382,14 +492,24 @@ macro_rules! info_no_ts {
 macro_rules! info_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::INFO {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::INFO, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -428,14 +548,24 @@ macro_rules! debug {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -445,14 +575,24 @@ macro_rules! debug {
 macro_rules! debug_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -463,14 +603,24 @@ macro_rules! debug_no_ts {
 macro_rules! debug_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::DEBUG {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::DEBUG, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -508,14 +658,25 @@ macro_rules! trace {
 	};
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a)
+				},
+				false => Ok(()),
+			}
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi!(nioruntime_log::TRACE, &default, $a, $($b)*)
+				},
+				false => Ok(()),
+			}
+
 		}
 	};
 }
@@ -525,14 +686,24 @@ macro_rules! trace {
 macro_rules! trace_no_ts {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_no_ts!(nioruntime_log::TRACE, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -543,14 +714,24 @@ macro_rules! trace_no_ts {
 macro_rules! trace_all {
 	($a:expr) => {
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 	($a:expr,$($b:tt)*)=>{
 		{
-			let default = nioruntime_log::default_log_name!();
-			nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a, $($b)*)
+                        match LOG_LEVEL <= nioruntime_log::TRACE {
+                                true => {
+					let default = nioruntime_log::default_log_name!();
+					nioruntime_log::log_multi_all!(nioruntime_log::TRACE, &default, $a, $($b)*)
+                                },
+                                false => Ok(()),
+                        }
 		}
 	};
 }
@@ -585,6 +766,8 @@ macro_rules! trace_all {
 #[macro_export]
 macro_rules! log_multi_all {
 	($level:expr, $a:expr, $b:expr) => {{
+		// TODO: there's a possiblity that two threads could log at the same time
+		// and set this option on one another. Make it use a single lock.
 		let stdout_cur = nioruntime_log::get_config_option!(
 			nioruntime_log::Settings::Stdout
 		).unwrap_or(true);

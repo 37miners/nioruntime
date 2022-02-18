@@ -65,8 +65,6 @@ use nioruntime_deps::nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
-const MAIN_LOG: &str = "mainlog";
-
 fatal!();
 
 const MAX_EVENTS: i32 = 100;
@@ -493,7 +491,7 @@ where
 				match jh.join() {
 					Ok(_) => {}
 					Err(_e) => {
-						log_multi!(ERROR, MAIN_LOG, "thread panic!")?;
+						error!("thread panic!")?;
 					}
 				}
 
@@ -822,9 +820,7 @@ where
 					tls_conn.reader().read_exact(&mut ctx.buffer)?;
 				}
 				Err(e) => {
-					log_multi!(
-						WARN,
-						MAIN_LOG,
+					warn!(
 						"error generated processing packets for handle={}. Error={}",
 						handle,
 						e.to_string()
@@ -867,9 +863,7 @@ where
 					tls_conn.reader().read_exact(&mut ctx.buffer)?;
 				}
 				Err(e) => {
-					log_multi!(
-						WARN,
-						MAIN_LOG,
+					warn!(
 						"error generated processing packets for handle={}. Error={}",
 						handle,
 						e.to_string()
