@@ -33,6 +33,7 @@ pub use futures;
 pub use lazy_static;
 pub use libc;
 pub use nix;
+pub use portpicker;
 pub use rand;
 pub use rustls;
 pub use rustls_pemfile;

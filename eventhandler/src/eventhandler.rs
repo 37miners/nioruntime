@@ -65,7 +65,7 @@ use nioruntime_deps::nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
-fatal!();
+debug!();
 
 const MAX_EVENTS: i32 = 100;
 const READ_BUFFER_SIZE: usize = 1024 * 10;
@@ -155,15 +155,23 @@ impl ConnectionData {
 
 		let res = {
 			// first try to write in our own thread, check if closed first.
-			let is_closed = lockw!(self.connection_info.is_closed)?;
-			if *is_closed {
+			let write_status = lockw!(self.connection_info.write_status)?;
+			if (*write_status).is_closed {
 				return Err(ErrorKind::ConnectionClosedError(format!(
 					"connection {} already closed",
 					self.get_connection_id()
 				))
 				.into());
 			}
-			write_bytes(self.connection_info.get_handle(), &data)?
+
+			if (*write_status).pending_wbufs.len() > 0 {
+				// there are pending writes, we cannot write here.
+				// return that 0 bytes were written and pass on to
+				// main thread loop
+				0
+			} else {
+				write_bytes(self.connection_info.get_handle(), &data)?
+			}
 		};
 
 		if res == len.try_into().unwrap_or(0) {
@@ -342,7 +350,7 @@ where
 		&self,
 		handle: Handle,
 		tls_config: Option<TLSClientConfig>,
-	) -> Result<(), Error> {
+	) -> Result<ReadWriteConnection, Error> {
 		self.check_callbacks()?;
 
 		let connection_info = match tls_config {
@@ -365,9 +373,10 @@ where
 
 		{
 			let mut guarded_data = lockw!(guarded_data)?;
-			guarded_data.nhandles.push(connection_info);
+			guarded_data.nhandles.push(connection_info.clone());
 		}
-		Ok(())
+
+		connection_info.as_read_write_connection()
 	}
 
 	fn check_callbacks(&self) -> Result<(), Error> {
@@ -672,8 +681,8 @@ where
 					Some(connection_info) => match connection_info {
 						EventConnectionInfo::ReadWriteConnection(ref c) => {
 							{
-								let mut is_closed = lockw!(c.is_closed)?;
-								*is_closed = true;
+								let mut write_status = lockw!(c.write_status)?;
+								(*write_status).is_closed = true;
 								unsafe {
 									libc::close(handle);
 								}
@@ -816,8 +825,10 @@ where
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
+					// TODO: is this safe? What is the maximum buffer size pt_len could be?
+					let buf = &mut ctx.buffer[0..pt_len];
 					//ctx.buffer.resize(pt_len, 0u8);
-					tls_conn.reader().read_exact(&mut ctx.buffer)?;
+					tls_conn.reader().read_exact(buf)?;
 				}
 				Err(e) => {
 					warn!(
@@ -853,14 +864,17 @@ where
 		let mut wbuf = vec![];
 		{
 			let mut tls_conn =
-				nioruntime_util::lockw!(connection_info.tls_client.as_ref().unwrap())?;
+				nioruntime_util::lockw!(connection_info.tls_server.as_ref().unwrap())?;
 			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
 
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
+					error!("pt_len = {}, buf_len={}", pt_len, ctx.buffer.len())?;
 					//ctx.buffer.resize(pt_len, 0u8);
-					tls_conn.reader().read_exact(&mut ctx.buffer)?;
+					// TODO: is this safe? What is the maximum buffer size pt_len could be?
+					let buf = &mut ctx.buffer[0..pt_len];
+					tls_conn.reader().read_exact(buf)?;
 				}
 				Err(e) => {
 					warn!(
@@ -983,7 +997,9 @@ where
 				info!("connection_info={:?}", connection_info)?;
 				let mut block = false;
 				let mut rem_count = 0;
-				for wbuf in &mut connection_info.pending_wbufs {
+
+				let mut write_status = lockw!(connection_info.write_status)?;
+				for wbuf in &mut (*write_status).pending_wbufs {
 					loop {
 						if wbuf.cur <= 0 {
 							rem_count += 1;
@@ -1017,7 +1033,7 @@ where
 				}
 
 				for _ in 0..rem_count {
-					connection_info.pending_wbufs.remove(0);
+					(*write_status).pending_wbufs.remove(0);
 				}
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
@@ -1309,7 +1325,10 @@ where
 				Some(handle) => match connection_handle_map.get_mut(handle) {
 					Some(conn_info) => match conn_info {
 						EventConnectionInfo::ReadWriteConnection(item) => {
-							item.pending_wbufs.push(wbuf.clone());
+							{
+								let mut write_status = lockw!(item.write_status)?;
+								(*write_status).pending_wbufs.push(wbuf.clone());
+							}
 							info!("pushing wbuf to item = {:?}", item)?;
 							ctx.input_events.push(Event {
 								handle: item.handle,
@@ -1461,12 +1480,26 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 	Err(ErrorKind::TLSError(format!("no private keys found in file: {}", filename)).into())
 }
 
+#[derive(Debug, Clone)]
+pub struct WriteStatus {
+	pending_wbufs: Vec<WriteBuffer>,
+	is_closed: bool,
+}
+
+impl WriteStatus {
+	fn new() -> Self {
+		Self {
+			pending_wbufs: vec![],
+			is_closed: false,
+		}
+	}
+}
+
 #[derive(Clone)]
 pub struct ReadWriteConnection {
 	id: u128,
 	handle: Handle,
-	pending_wbufs: Vec<WriteBuffer>,
-	is_closed: Arc<RwLock<bool>>,
+	write_status: Arc<RwLock<WriteStatus>>,
 	tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	tls_client: Option<Arc<RwLock<ClientConnection>>>,
 }
@@ -1476,8 +1509,7 @@ impl Debug for ReadWriteConnection {
 		f.debug_struct("ListenerConnection")
 			.field("id", &self.id)
 			.field("handle", &self.handle)
-			.field("pending_wbufs", &self.pending_wbufs)
-			.field("is_closed", &self.is_closed)
+			.field("write_status", &self.write_status)
 			.field("tls_server", &self.tls_server)
 			.field("tls_client", &self.tls_client)
 			.finish()?;
@@ -1495,8 +1527,7 @@ impl ReadWriteConnection {
 		Self {
 			id,
 			handle,
-			pending_wbufs: vec![],
-			is_closed: Arc::new(RwLock::new(false)),
+			write_status: Arc::new(RwLock::new(WriteStatus::new())),
 			tls_server,
 			tls_client,
 		}
@@ -1536,6 +1567,15 @@ enum EventConnectionInfo {
 }
 
 impl EventConnectionInfo {
+	fn as_read_write_connection(&self) -> Result<ReadWriteConnection, Error> {
+		match self {
+			EventConnectionInfo::ReadWriteConnection(r) => Ok(r.clone()),
+			_ => {
+				Err(ErrorKind::InvalidType("this is not a ReadWriteConnection".to_string()).into())
+			}
+		}
+	}
+
 	fn read_write_connection(
 		handle: Handle,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
@@ -1729,6 +1769,7 @@ mod tests {
 	use nioruntime_deps::nix::sys::socket::{
 		bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 	};
+	use nioruntime_deps::portpicker;
 	use nioruntime_err::Error;
 	use std::io::{Read, Write};
 	use std::mem;
@@ -1736,8 +1777,21 @@ mod tests {
 	use std::os::unix::io::AsRawFd;
 	use std::os::unix::prelude::FromRawFd;
 	use std::str::FromStr;
+	use std::sync::Once;
 
 	debug!();
+
+	static INIT: Once = Once::new();
+
+	pub fn initialize() {
+		INIT.call_once(|| {
+			log_config!(LogConfig {
+				show_bt: false,
+				..Default::default()
+			})
+			.expect("init logger");
+		});
+	}
 
 	fn get_fd() -> Result<RawFd, Error> {
 		let raw_fd = socket(
@@ -1773,7 +1827,14 @@ mod tests {
 
 	#[test]
 	fn test_eventhandler() -> Result<(), Error> {
-		debug!("Starting Eventhandler")?;
+		let port = 8000;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
 			threads: 3,
 			..EventHandlerConfig::default()
@@ -1783,7 +1844,7 @@ mod tests {
 		let lock_clone1 = lock.clone();
 		let lock_clone2 = lock.clone();
 
-		let std_sa = SocketAddr::from_str("0.0.0.0:8092").unwrap();
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
 		let inet_addr = InetAddr::from_std(&std_sa);
 		let sock_addr = SockAddr::new_inet(inet_addr);
 
@@ -1836,7 +1897,224 @@ mod tests {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
-		let mut stream = TcpStream::connect("127.0.0.1:8092")?;
+		let mut stream = TcpStream::connect(addr)?;
+		stream.write(&[1, 2, 3, 4])?;
+		loop {
+			{
+				let lock = lock.write().unwrap();
+				if *lock > 1 {
+					break;
+				}
+			}
+			std::thread::sleep(std::time::Duration::from_millis(1));
+		}
+		let mut buf = [0u8; 10];
+		let len = stream.read(&mut buf)?;
+		assert_eq!(&buf[0..len], &[5, 6, 7, 8, 9]);
+
+		{
+			let lock = lock.read().unwrap();
+			assert_eq!(*lock, 2);
+		}
+
+		{
+			let cid_accept = cid_accept_clone.read().unwrap();
+			let cid_read = cid_read_clone.read().unwrap();
+			assert_eq!(*cid_read, *cid_accept);
+			assert!(*cid_read != 0);
+		}
+
+		Ok(())
+	}
+
+	// work in progress
+	// #[test]
+	fn test_client() -> Result<(), Error> {
+		initialize();
+
+		let port = 8100;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let lock = Arc::new(RwLock::new(0));
+		let lock_clone1 = lock.clone();
+		let lock_clone2 = lock.clone();
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		let cid_accept = Arc::new(RwLock::new(0));
+		let cid_accept_clone = cid_accept.clone();
+		let cid_read = Arc::new(RwLock::new(0));
+		let cid_read_clone = cid_read.clone();
+
+		evh.set_on_accept(move |conn_data| {
+			{
+				let mut cid = cid_accept.write().unwrap();
+				*cid = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone1.write().unwrap();
+				*lock += 1;
+			}
+			Ok(())
+		})?;
+		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		evh.set_on_read(move |conn_data, buf| {
+			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
+			assert_eq!(buf, [1, 2, 3, 4]);
+			{
+				let mut cid_read = cid_read.write().unwrap();
+				*cid_read = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone2.write().unwrap();
+				*lock += 1;
+			}
+
+			conn_data.write(&[5, 6, 7, 8, 9])?;
+			Ok(())
+		})?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+		let mut stream = TcpStream::connect(addr)?;
+		stream.write(&[1, 2, 3, 4])?;
+		loop {
+			{
+				let lock = lock.write().unwrap();
+				if *lock > 1 {
+					break;
+				}
+			}
+			std::thread::sleep(std::time::Duration::from_millis(1));
+		}
+		let mut buf = [0u8; 10];
+		let len = stream.read(&mut buf)?;
+		assert_eq!(&buf[0..len], &[5, 6, 7, 8, 9]);
+
+		{
+			let lock = lock.read().unwrap();
+			assert_eq!(*lock, 2);
+		}
+
+		{
+			let cid_accept = cid_accept_clone.read().unwrap();
+			let cid_read = cid_read_clone.read().unwrap();
+			assert_eq!(*cid_read, *cid_accept);
+			assert!(*cid_read != 0);
+		}
+
+		Ok(())
+	}
+
+	// work in progress
+	//#[test]
+	fn test_ssl() -> Result<(), Error> {
+		initialize();
+
+		let port = 8200;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let lock = Arc::new(RwLock::new(0));
+		let lock_clone1 = lock.clone();
+		let lock_clone2 = lock.clone();
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		let cid_accept = Arc::new(RwLock::new(0));
+		let cid_accept_clone = cid_accept.clone();
+		let cid_read = Arc::new(RwLock::new(0));
+		let cid_read_clone = cid_read.clone();
+
+		evh.set_on_accept(move |conn_data| {
+			{
+				let mut cid = cid_accept.write().unwrap();
+				*cid = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone1.write().unwrap();
+				*lock += 1;
+			}
+			Ok(())
+		})?;
+		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		evh.set_on_read(move |conn_data, buf| {
+			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
+			assert_eq!(buf, [1, 2, 3, 4]);
+			{
+				let mut cid_read = cid_read.write().unwrap();
+				*cid_read = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone2.write().unwrap();
+				*lock += 1;
+			}
+
+			conn_data.write(&[5, 6, 7, 8, 9])?;
+			Ok(())
+		})?;
+		evh.start()?;
+
+		let tls_config = Some(TLSServerConfig {
+			certificates_file: "./src/resources/cert.pem".to_string(),
+			private_key_file: "./src/resources/key.pem".to_string(),
+		});
+
+		evh.add_listener_handles(handles, tls_config)?;
+		let mut stream = TcpStream::connect(addr)?;
 		stream.write(&[1, 2, 3, 4])?;
 		loop {
 			{

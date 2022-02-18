@@ -933,6 +933,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "nix",
+ "portpicker",
  "rand 0.8.4",
  "rustls",
  "rustls-pemfile",

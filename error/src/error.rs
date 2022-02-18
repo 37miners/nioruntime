@@ -151,6 +151,9 @@ pub enum ErrorKind {
 	/// The connection is already closed
 	#[fail(display = "Connection is closed: {}", _0)]
 	ConnectionClosedError(String),
+	/// Invalid Type
+	#[fail(display = "Invalid Type error: {}", _0)]
+	InvalidType(String),
 }
 
 impl Display for Error {
