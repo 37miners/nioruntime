@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Write};
 use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -71,6 +71,7 @@ debug!();
 
 const MAX_EVENTS: i32 = 100;
 const READ_BUFFER_SIZE: usize = 1024 * 10;
+const TLS_CHUNKS: usize = 32768;
 
 type SelectorHandle = i32;
 type Handle = RawFd;
@@ -100,6 +101,54 @@ impl ConnectionData {
 	}
 
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
+		match &self.connection_info.tls_server {
+			Some(tls_conn) => {
+				let mut wbuf = vec![];
+				{
+					let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
+					let mut start = 0;
+					loop {
+						let mut end = data.len();
+						if end - start > TLS_CHUNKS {
+							end = start + TLS_CHUNKS;
+						}
+						tls_conn.writer().write_all(&data[start..end])?;
+						tls_conn.write_tls(&mut wbuf)?;
+						if end == data.len() {
+							break;
+						}
+						start += TLS_CHUNKS;
+					}
+				}
+				self.do_write(&wbuf)
+			}
+			None => match &self.connection_info.tls_client {
+				Some(tls_conn) => {
+					let mut wbuf = vec![];
+					{
+						let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
+						let mut start = 0;
+						loop {
+							let mut end = data.len();
+							if end - start > TLS_CHUNKS {
+								end = start + TLS_CHUNKS;
+							}
+							tls_conn.writer().write_all(&data[start..end])?;
+							tls_conn.write_tls(&mut wbuf)?;
+							if end == data.len() {
+								break;
+							}
+							start += TLS_CHUNKS;
+						}
+					}
+					self.do_write(&wbuf)
+				}
+				None => self.do_write(data),
+			},
+		}
+	}
+
+	pub fn do_write(&self, data: &[u8]) -> Result<(), Error> {
 		let len = data.len();
 		if len == 0 {
 			// nothing to write
@@ -732,11 +781,122 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
-		let len = {
-			let cbuf: *mut c_void = &mut ctx.buffer as *mut _ as *mut c_void;
-			unsafe { read(connection_info.handle, cbuf, READ_BUFFER_SIZE) }
+		let (len, _pt_len) = match connection_info.tls_server {
+			Some(ref _tls_server) => Self::do_tls_server_read(&connection_info, ctx, wakeup)?,
+			None => match connection_info.tls_client {
+				Some(ref _tls_client) => Self::do_tls_client_read(&connection_info, ctx, wakeup)?,
+				None => {
+					let len = Self::do_read(connection_info.handle, &mut ctx.buffer)?;
+					if len >= 0 {
+						(len, len.try_into()?)
+					} else {
+						(len, 0)
+					}
+				}
+			},
 		};
+		Self::process_read_result(connection_info, len, wakeup, callbacks, ctx)?;
 
+		Ok(len)
+	}
+
+	fn do_tls_client_read(
+		connection_info: &ReadWriteConnection,
+		ctx: &mut Context,
+		wakeup: &Wakeup,
+	) -> Result<(isize, usize), Error> {
+		let pt_len;
+		let handle = connection_info.handle;
+
+		let len = Self::do_read(handle, &mut ctx.buffer)?;
+		let mut wbuf = vec![];
+		{
+			let mut tls_conn =
+				nioruntime_util::lockw!(connection_info.tls_client.as_ref().unwrap())?;
+			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
+
+			match tls_conn.process_new_packets() {
+				Ok(io_state) => {
+					pt_len = io_state.plaintext_bytes_to_read();
+					//ctx.buffer.resize(pt_len, 0u8);
+					tls_conn.reader().read_exact(&mut ctx.buffer)?;
+				}
+				Err(e) => {
+					log_multi!(
+						WARN,
+						MAIN_LOG,
+						"error generated processing packets for handle={}. Error={}",
+						handle,
+						e.to_string()
+					)?;
+					return Ok((-1, 0)); // invalid text received. Close conn.
+				}
+			}
+			tls_conn.write_tls(&mut wbuf)?;
+		}
+
+		let connection_data = &ConnectionData::new(
+			connection_info.clone(),
+			ctx.guarded_data.clone(),
+			wakeup.clone(),
+		);
+		connection_data.write(&wbuf)?;
+
+		Ok((len, pt_len))
+	}
+
+	fn do_tls_server_read(
+		connection_info: &ReadWriteConnection,
+		ctx: &mut Context,
+		wakeup: &Wakeup,
+	) -> Result<(isize, usize), Error> {
+		let pt_len;
+		let handle = connection_info.handle;
+
+		let len = Self::do_read(handle, &mut ctx.buffer)?;
+		let mut wbuf = vec![];
+		{
+			let mut tls_conn =
+				nioruntime_util::lockw!(connection_info.tls_client.as_ref().unwrap())?;
+			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
+
+			match tls_conn.process_new_packets() {
+				Ok(io_state) => {
+					pt_len = io_state.plaintext_bytes_to_read();
+					//ctx.buffer.resize(pt_len, 0u8);
+					tls_conn.reader().read_exact(&mut ctx.buffer)?;
+				}
+				Err(e) => {
+					log_multi!(
+						WARN,
+						MAIN_LOG,
+						"error generated processing packets for handle={}. Error={}",
+						handle,
+						e.to_string()
+					)?;
+					return Ok((-1, 0)); // invalid text received. Close conn.
+				}
+			}
+			tls_conn.write_tls(&mut wbuf)?;
+		}
+
+		let connection_data = &ConnectionData::new(
+			connection_info.clone(),
+			ctx.guarded_data.clone(),
+			wakeup.clone(),
+		);
+		connection_data.write(&wbuf)?;
+
+		Ok((len, pt_len))
+	}
+
+	fn process_read_result(
+		connection_info: ReadWriteConnection,
+		len: isize,
+		wakeup: &Wakeup,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		ctx: &mut Context,
+	) -> Result<(), Error> {
 		if len >= 0 {
 			debug!("read {:?}", &ctx.buffer[0..len.try_into()?])?;
 		} else {
@@ -767,12 +927,36 @@ where
 					error!("no on_read callback found!")?;
 				}
 			}
-		} else {
-			info!("len less than or equal to 0. Might be a close or no data")?;
-			// len <= 0 close don't do anything here
 		}
 
-		Ok(len)
+		Ok(())
+	}
+
+	fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
+		#[cfg(unix)]
+		let len = {
+			let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
+			unsafe { read(handle, cbuf, READ_BUFFER_SIZE) }
+		};
+		#[cfg(target_os = "windows")]
+		let len = {
+			let cbuf: *mut i8 = buf as *mut _ as *mut i8;
+			errno::set_errno(Errno(0));
+			let mut len = unsafe {
+				ws2_32::recv(
+					handle.try_into().unwrap_or(0),
+					cbuf,
+					BUFFER_SIZE.try_into().unwrap_or(0),
+					0,
+				)
+			};
+			if errno().0 == 10035 {
+				// would block
+				len = -2;
+			}
+			len
+		};
+		Ok(len.try_into().unwrap_or(-1))
 	}
 
 	fn process_write_event(
