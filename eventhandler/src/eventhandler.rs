@@ -67,7 +67,7 @@ use nioruntime_deps::nix::sys::epoll::{
 
 const MAIN_LOG: &str = "mainlog";
 
-debug!();
+fatal!();
 
 const MAX_EVENTS: i32 = 100;
 const READ_BUFFER_SIZE: usize = 1024 * 10;

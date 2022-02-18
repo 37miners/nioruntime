@@ -88,7 +88,7 @@ fn main() -> Result<(), Error> {
 	let mut evh = EventHandler::new(evh_config.clone())?;
 
 	if is_server {
-		info!("Starting EventHandler");
+		info!("Starting EventHandler")?;
 		let std_sa = SocketAddr::from_str("127.0.0.1:8092").unwrap();
 		let inet_addr = InetAddr::from_std(&std_sa);
 		let sock_addr = SockAddr::new_inet(inet_addr);
@@ -116,7 +116,7 @@ fn main() -> Result<(), Error> {
 			Ok(())
 		})?;
 		evh.start()?;
-		evh.add_listener_handles(handles)?;
+		evh.add_listener_handles(handles, None)?;
 		std::thread::park();
 	}
 	if is_client {
@@ -135,7 +135,7 @@ fn main() -> Result<(), Error> {
 			false => 1,
 		};
 
-		info!("Starting test client.");
+		info!("Starting test client.")?;
 
 		let mut i = 0;
 		let start = Instant::now();
@@ -160,7 +160,7 @@ fn main() -> Result<(), Error> {
 			}
 
 			i += 1;
-			info!("Iteration {} complete.", i);
+			info!("Iteration {} complete.", i)?;
 			if i == itt {
 				break;
 			}
@@ -169,7 +169,7 @@ fn main() -> Result<(), Error> {
 		info!(
 			"complete in {}ms!",
 			start.elapsed().as_nanos() as f64 / 1_000_000 as f64
-		);
+		)?;
 	}
 
 	Ok(())
