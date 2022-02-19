@@ -42,7 +42,7 @@ args:
         long: histo
         takes_value: false
     - histo_max:
-        help: maximum time in microseconds to display in the histogram. The default is 4,000.
+        help: maximum time in microseconds to display in the histogram. The default is 1,000.
         short: m
         long: histo_max
         value_name: histo_max
