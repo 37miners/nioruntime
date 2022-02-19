@@ -406,9 +406,10 @@ fn main() -> Result<(), Error> {
 fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Result<(), Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
-	rbuf.resize(max, 0u8);
-	wbuf.resize(max, 0u8);
-	for i in 0..max {
+	let cap = if max > min { max } else { min };
+	rbuf.resize(cap, 0u8);
+	wbuf.resize(cap, 0u8);
+	for i in 0..cap {
 		wbuf[i] = (i % 256) as u8;
 	}
 
