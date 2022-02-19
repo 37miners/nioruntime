@@ -210,6 +210,7 @@ fn main() -> Result<(), Error> {
 	log_config!(LogConfig {
 		show_line_num: false,
 		show_log_level: false,
+		show_bt: false,
 		..Default::default()
 	})?;
 
@@ -221,7 +222,7 @@ fn main() -> Result<(), Error> {
 	let mut evh = EventHandler::new(evh_config.clone())?;
 
 	if is_server {
-		info!("Starting EventHandler")?;
+		info!("Starting EventHandler!")?;
 		let std_sa = SocketAddr::from_str("127.0.0.1:8092").unwrap();
 		let inet_addr = InetAddr::from_std(&std_sa);
 		let sock_addr = SockAddr::new_inet(inet_addr);
@@ -341,8 +342,9 @@ fn main() -> Result<(), Error> {
 			let total_messages: u64 = (threads * count).try_into().unwrap_or(0);
 			let qps: f64 = (total_messages as f64 / nanos as f64) * 1_000_000_000 as f64;
 			let qps_decimal: f64 = qps - (qps.floor() as f64);
+			let qps_decimal = &qps_decimal.to_string()[1..];
 			let qps = &format!(
-				"{}{:.2}",
+				"{}{:.3}",
 				(qps.floor() as u64).to_formatted_string(&Locale::en),
 				qps_decimal
 			);
@@ -414,7 +416,7 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 	let mut x = 0;
 	loop {
 		let r: usize = rand::random();
-		let r = r % (max - min);
+		let r = if max <= min { 0 } else { r % (max - min) };
 		let wlen = r + min;
 		let mut len_sum = 0;
 
@@ -424,7 +426,7 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 		loop {
 			let len = stream.read(&mut rbuf[len_sum..])?;
 			len_sum += len;
-			trace!("len_sum={}", len_sum)?;
+			trace!("len={},len_sum={}", len, len_sum)?;
 			if len_sum >= wlen {
 				break;
 			}
@@ -445,6 +447,7 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 
 		assert_eq!(len_sum, wlen);
 		assert_eq!(&rbuf[0..len_sum], &wbuf[0..wlen]);
+
 		x += 1;
 		if x == count {
 			break;

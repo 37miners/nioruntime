@@ -163,14 +163,17 @@ impl ConnectionData {
 				.into());
 			}
 
-			if (*write_status).pending_wbufs.len() > 0 {
+			if (*write_status).is_pending {
 				// there are pending writes, we cannot write here.
 				// return that 0 bytes were written and pass on to
 				// main thread loop
 				0
 			} else {
 				let wlen = write_bytes(self.connection_info.get_handle(), &data)?;
-				if wlen > 0 {
+				if wlen >= 0 {
+					if (wlen as usize) < data.len() {
+						(*write_status).is_pending = true;
+					}
 					(*write_status).total_bytes_written += wlen as u128;
 				}
 				wlen
@@ -197,6 +200,7 @@ impl ConnectionData {
 			}
 		} else {
 			// otherwise, we have to pass to the other thread
+
 			let data = &data[res.try_into().unwrap_or(0)..];
 			self.pass_to_selector_thread(data)
 		}
@@ -1049,6 +1053,10 @@ where
 				for _ in 0..rem_count {
 					(*write_status).pending_wbufs.remove(0);
 				}
+
+				if (*write_status).pending_wbufs.len() == 0 {
+					(*write_status).is_pending = false;
+				}
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
 				warn!("tried to write to a listener: {:?}", event)?;
@@ -1498,6 +1506,7 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 #[derive(Debug, Clone)]
 pub struct WriteStatus {
 	pending_wbufs: Vec<WriteBuffer>,
+	is_pending: bool,
 	is_closed: bool,
 	total_bytes_written: u128,
 }
@@ -1507,6 +1516,7 @@ impl WriteStatus {
 		Self {
 			pending_wbufs: vec![],
 			is_closed: false,
+			is_pending: false,
 			total_bytes_written: 0,
 		}
 	}
@@ -2191,7 +2201,7 @@ mod tests {
 		let server_on_read_count_clone = server_on_read_count.clone();
 
 		let mut msg = vec![];
-		for i in 0..1_000_000_000 {
+		for i in 0..100_000_000 {
 			if i % 20_000_000 == 0 {
 				debug!("i = {}", i)?;
 			}
@@ -2212,14 +2222,16 @@ mod tests {
 				let mut client_buffer = lockw!(client_buffer)?;
 				(*client_buffer).append(&mut buf.to_vec());
 				if (*client_buffer).len() == msg.len() {
-					//assert_eq!((*client_buffer), *msg);
+					assert_eq!((*client_buffer), *msg);
+					info!("assertion on client successful, len = {}", (*msg).len())?;
 					*(lockw!(client_on_read_count)?) += 1;
 				}
 			} else {
 				let mut server_buffer = lockw!(server_buffer)?;
 				(*server_buffer).append(&mut buf.to_vec());
 				if (*server_buffer).len() == msg.len() {
-					//assert_eq!((*server_buffer), *msg);
+					assert_eq!((*server_buffer), *msg);
+					info!("assertion on server successful, len = {}", (*msg).len())?;
 					conn_data.write(&msg)?;
 					*(lockw!(server_on_read_count)?) += 1;
 				}
