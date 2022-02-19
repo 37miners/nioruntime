@@ -35,8 +35,6 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-debug!();
-
 const MAX_BUF: usize = 100_000;
 
 struct Buffer {

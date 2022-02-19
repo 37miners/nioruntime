@@ -152,10 +152,9 @@ impl ConnectionData {
 			// nothing to write
 			return Ok(());
 		}
-
 		let res = {
 			// first try to write in our own thread, check if closed first.
-			let write_status = lockw!(self.connection_info.write_status)?;
+			let mut write_status = lockw!(self.connection_info.write_status)?;
 			if (*write_status).is_closed {
 				return Err(ErrorKind::ConnectionClosedError(format!(
 					"connection {} already closed",
@@ -170,15 +169,19 @@ impl ConnectionData {
 				// main thread loop
 				0
 			} else {
-				write_bytes(self.connection_info.get_handle(), &data)?
+				let wlen = write_bytes(self.connection_info.get_handle(), &data)?;
+				if wlen > 0 {
+					(*write_status).total_bytes_written += wlen as u128;
+				}
+				wlen
 			}
 		};
 
 		if res == len.try_into().unwrap_or(0) {
 			Ok(())
 		} else if res < 0 {
-			let e = errno();
-			if e.0 != libc::EAGAIN {
+			let e = errno().0;
+			if e == libc::EAGAIN {
 				// can't write right now. Would block. Pass to selector
 				self.pass_to_selector_thread(data)
 			} else {
@@ -630,19 +633,19 @@ where
 					}
 
 					if len <= 0 {
-						let e = errno();
-						if e.0 != libc::EAGAIN {
+						let e = errno().0;
+						if e == libc::EAGAIN {
 							// this is would block and not an error to close
+							None
+						} else {
+							info!(
+								"it was an actual error for {}",
+								connection_info.get_connection_id()
+							)?;
 							Some((
 								connection_info.get_connection_id(),
 								connection_info.get_handle(ctx.tid),
 							))
-						} else {
-							info!(
-								"it was an eagain for {}",
-								connection_info.get_connection_id()
-							)?;
-							None
 						}
 					} else {
 						None
@@ -653,7 +656,7 @@ where
 
 		match x {
 			Some((id, handle)) => {
-				info!("rem {},{} from maps", id, handle)?;
+				debug!("rem {},{} from maps", id, handle)?;
 				Self::close_connection(
 					id,
 					ctx,
@@ -1004,9 +1007,10 @@ where
 				let mut rem_count = 0;
 
 				let mut write_status = lockw!(connection_info.write_status)?;
+				let mut len_sum: u128 = 0;
 				for wbuf in &mut (*write_status).pending_wbufs {
 					loop {
-						if wbuf.cur <= 0 {
+						if wbuf.cur == wbuf.buf.len() {
 							rem_count += 1;
 							if wbuf.close {
 								to_remove.push(connection_id);
@@ -1014,9 +1018,12 @@ where
 							}
 							break;
 						} // nothing more to write
-						match Self::write_loop(event.handle, wbuf)? {
+						let (wr, len) = Self::write_loop(event.handle, wbuf)?;
+						match wr {
 							WriteResult::Ok => {
-								// nothing to do, continue loop
+								if len > 0 {
+									len_sum += len as u128;
+								}
 							}
 							WriteResult::Err => {
 								// error occured. Must close connection
@@ -1036,6 +1043,8 @@ where
 						break;
 					}
 				}
+
+				(*write_status).total_bytes_written += len_sum as u128;
 
 				for _ in 0..rem_count {
 					(*write_status).pending_wbufs.remove(0);
@@ -1060,17 +1069,18 @@ where
 		Ok(())
 	}
 
-	fn write_loop(handle: Handle, wbuf: &mut WriteBuffer) -> Result<WriteResult, Error> {
-		let len = write_bytes(handle, &mut wbuf.buf)?;
+	fn write_loop(handle: Handle, wbuf: &mut WriteBuffer) -> Result<(WriteResult, isize), Error> {
+		let len = write_bytes(handle, &mut wbuf.buf[wbuf.cur..])?;
 		if len < 0 {
-			if errno().0 != libc::EAGAIN {
-				Ok(WriteResult::Block)
+			let e = errno().0;
+			if e == libc::EAGAIN {
+				Ok((WriteResult::Block, -1))
 			} else {
-				Ok(WriteResult::Err)
+				Ok((WriteResult::Err, -1))
 			}
 		} else {
-			wbuf.cur = wbuf.cur.saturating_sub(len.try_into()?);
-			Ok(WriteResult::Ok)
+			wbuf.cur += len as usize;
+			Ok((WriteResult::Ok, len))
 		}
 	}
 
@@ -1489,6 +1499,7 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 pub struct WriteStatus {
 	pending_wbufs: Vec<WriteBuffer>,
 	is_closed: bool,
+	total_bytes_written: u128,
 }
 
 impl WriteStatus {
@@ -1496,6 +1507,7 @@ impl WriteStatus {
 		Self {
 			pending_wbufs: vec![],
 			is_closed: false,
+			total_bytes_written: 0,
 		}
 	}
 }
@@ -1652,7 +1664,7 @@ struct WriteBuffer {
 
 impl WriteBuffer {
 	fn new(connection_id: u128, buf: Vec<u8>, close: bool) -> Self {
-		let cur = buf.len();
+		let cur = 0;
 		Self {
 			connection_id,
 			buf,
@@ -1887,7 +1899,6 @@ mod tests {
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf| {
-			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
 			assert_eq!(buf, [1, 2, 3, 4]);
 			{
 				let mut cid_read = cid_read.write().unwrap();
@@ -2124,6 +2135,117 @@ mod tests {
 			assert!(*cid_read != 0);
 		}
 
+		Ok(())
+	}
+
+	#[test]
+	fn test_big_msg() -> Result<(), Error> {
+		initialize();
+
+		let port = 8300;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |conn_data| {
+			error!("connection closed: {:?}", conn_data.get_connection_id())?;
+			Ok(())
+		})?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		let stream = TcpStream::connect(addr)?;
+		stream.set_nonblocking(true)?;
+		let handle = stream.as_raw_fd();
+		let client_id = Arc::new(RwLock::new(0));
+		let client_id_clone = client_id.clone();
+
+		let client_on_read_count = Arc::new(RwLock::new(0));
+		let server_on_read_count = Arc::new(RwLock::new(0));
+		let client_on_read_count_clone = client_on_read_count.clone();
+		let server_on_read_count_clone = server_on_read_count.clone();
+
+		let mut msg = vec![];
+		for i in 0..1_000_000_000 {
+			if i % 20_000_000 == 0 {
+				debug!("i = {}", i)?;
+			}
+			msg.push((i % 256) as u8);
+		}
+
+		let msg_clone = msg.clone();
+
+		let cbuf: Vec<u8> = vec![];
+		let sbuf: Vec<u8> = vec![];
+		let client_buffer = Arc::new(RwLock::new(cbuf));
+		let server_buffer = Arc::new(RwLock::new(sbuf));
+
+		evh.set_on_read(move |conn_data, buf| {
+			let msg = &msg_clone;
+
+			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
+				let mut client_buffer = lockw!(client_buffer)?;
+				(*client_buffer).append(&mut buf.to_vec());
+				if (*client_buffer).len() == msg.len() {
+					//assert_eq!((*client_buffer), *msg);
+					*(lockw!(client_on_read_count)?) += 1;
+				}
+			} else {
+				let mut server_buffer = lockw!(server_buffer)?;
+				(*server_buffer).append(&mut buf.to_vec());
+				if (*server_buffer).len() == msg.len() {
+					//assert_eq!((*server_buffer), *msg);
+					conn_data.write(&msg)?;
+					*(lockw!(server_on_read_count)?) += 1;
+				}
+			}
+			Ok(())
+		})?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+		let conn_info = evh.add_handle(handle, None)?;
+
+		info!("clientid={}", conn_info.get_connection_id())?;
+		{
+			let mut client_id = lockw!(client_id)?;
+			*client_id = conn_info.get_connection_id();
+		}
+
+		conn_info.write(&msg[..])?;
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if *(lockr!(client_on_read_count_clone)?) != 0 {
+				break;
+			}
+		}
+
+		assert_eq!(*(lockr!(server_on_read_count_clone)?), 1);
+		assert_eq!(*(lockr!(client_on_read_count_clone)?), 1);
 		Ok(())
 	}
 }
