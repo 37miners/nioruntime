@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+const SEPARATOR: &str =
+	"------------------------------------------------------------------------------------------";
+//123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890
+//         1         2         3         4         5         6         7         8         9
+
 use clap::load_yaml;
 use clap::App;
+use colored::Colorize;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_log::*;
 use nix::sys::socket::InetAddr;
 use nix::sys::socket::SockAddr;
+use num_format::{Locale, ToFormattedString};
+use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::mem;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -26,9 +34,133 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::prelude::RawFd;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 debug!();
+
+// structure to hold the histogram data
+#[derive(Clone)]
+struct Histo {
+	buckets: Vec<Arc<RwLock<u64>>>,
+	max: usize,
+	bucket_count: usize,
+}
+
+impl Histo {
+	fn new(max: usize, bucket_count: usize) -> Self {
+		let mut buckets = vec![];
+
+		// we make a bucket for each microsecond + one extra for above the max
+		for _ in 0..max + 1 {
+			buckets.push(Arc::new(RwLock::new(0)));
+		}
+
+		Histo {
+			buckets,
+			max,
+			bucket_count,
+		}
+	}
+
+	// increment the count for this bucket
+	fn incr(&self, bucket_num: usize) -> Result<(), Error> {
+		let mut bucket = self.buckets[bucket_num].write().map_err(|e| {
+			let error: Error =
+				ErrorKind::ApplicationError(format!("error obtaining lock: {}", e)).into();
+			error
+		})?;
+		*bucket += 1;
+
+		Ok(())
+	}
+
+	// get the value at this bucket
+	fn get(&self, bucket_num: usize) -> Result<u64, Error> {
+		let bucket = self.buckets[bucket_num].read().map_err(|e| {
+			let error: Error =
+				ErrorKind::ApplicationError(format!("error obtaining lock: {}", e)).into();
+			error
+		})?;
+		Ok(*bucket)
+	}
+
+	// display the histogram in a readable fashion
+	fn display(&self) -> Result<(), Error> {
+		let bucket_divisor = self.max / self.bucket_count;
+		let mut display_buckets_vec = vec![];
+		for _ in 0..self.bucket_count + 1 {
+			display_buckets_vec.push(0u64);
+		}
+		let display_buckets = &mut display_buckets_vec[..];
+		let mut total = 0;
+		for i in 0..self.max + 1 {
+			let bucket_num = i / bucket_divisor;
+			let num = self.get(i)?;
+			display_buckets[bucket_num] += num;
+			total += num;
+		}
+		for i in 0..self.bucket_count + 1 {
+			let percentage = 100 as f64 * display_buckets[i] as f64 / total as f64;
+			let percentage_int = percentage as u64;
+			let mut line = "".to_string();
+			line = format!("{}{}", line, "|".white());
+			for _ in 0..percentage_int {
+				line = format!("{}{}", line, "=".green());
+			}
+
+			if display_buckets[i] > 0 {
+				line = format!("{}{}", line, ">".green());
+			} else {
+				line = format!("{} ", line);
+			}
+			for _ in percentage_int..50 {
+				line = format!("{} ", line);
+			}
+			line = format!("{}{} ", line, "|".white());
+			if percentage < 10.0 {
+				line = format!("{} ", line);
+			}
+			let low_range = (bucket_divisor * i) as f64 / 1000 as f64;
+			let high_range = (bucket_divisor * (1 + i)) as f64 / 1000 as f64;
+
+			if i == self.bucket_count {
+				line = format!(
+					"{}{:.3}% ({:.2}ms and up  ) num={}",
+					line,
+					percentage,
+					low_range,
+					display_buckets[i].to_formatted_string(&Locale::en)
+				);
+				if percentage > 10.0 {
+					info_no_ts!("{}", line.red())?;
+				} else if percentage > 1.0 {
+					info_no_ts!("{}", line.cyan())?;
+				} else {
+					info_no_ts!("{}", line)?;
+				}
+			} else {
+				line = format!(
+					"{}{:.3}% ({:.2}ms - {:.2}ms) num={}",
+					line,
+					percentage,
+					low_range,
+					high_range,
+					display_buckets[i].to_formatted_string(&Locale::en)
+				);
+
+				if percentage > 10.0 {
+					info_no_ts!("{}", line.red())?;
+				} else if percentage > 1.0 {
+					info_no_ts!("{}", line.cyan())?;
+				} else {
+					info_no_ts!("{}", line)?;
+				}
+			}
+		}
+		Ok(())
+	}
+}
 
 fn get_fd() -> Result<RawFd, Error> {
 	let raw_fd = nix::sys::socket::socket(
@@ -77,6 +209,7 @@ fn main() -> Result<(), Error> {
 
 	log_config!(LogConfig {
 		show_line_num: false,
+		show_log_level: false,
 		..Default::default()
 	})?;
 
@@ -135,19 +268,63 @@ fn main() -> Result<(), Error> {
 			false => 1,
 		};
 
+		let min = match args.is_present("min") {
+			true => args.value_of("min").unwrap().parse()?,
+			false => 50,
+		};
+
+		let max = match args.is_present("max") {
+			true => args.value_of("max").unwrap().parse()?,
+			false => 100,
+		};
+
+		let histo_max = args.is_present("histo_max");
+		let bucket_count = args.is_present("bucket_count");
+
+		let histo_max = match histo_max {
+			true => args.value_of("histo_max").unwrap().parse().unwrap(),
+			false => 1_000,
+		};
+
+		let bucket_count = match bucket_count {
+			true => args.value_of("bucket_count").unwrap().parse().unwrap(),
+			false => 20,
+		};
+
+		if histo_max % bucket_count != 0 {
+			error!("histo_max must be divisible by bucket_count.")?;
+			error!(
+				"Supplied values (hist_max={},bucket_count={}) are not.",
+				histo_max, bucket_count,
+			)?;
+			error!("Halting!")?;
+			return Ok(());
+		}
+
+		let histo = match args.is_present("histo") {
+			true => Some(Histo::new(histo_max, bucket_count)),
+			false => None,
+		};
+
 		info!("Starting test client.")?;
+		info_no_ts!("{}", SEPARATOR)?;
 
 		let mut i = 0;
 		let start = Instant::now();
 
 		loop {
+			let start_itt = Instant::now();
 			let mut jhs = vec![];
+
 			for _ in 0..threads {
-				jhs.push(std::thread::spawn(move || match run_thread(count) {
-					Ok(_) => {}
-					Err(e) => {
-						println!("{}", e);
-						assert!(false);
+				let histo = histo.clone();
+				jhs.push(std::thread::spawn(move || {
+					match run_thread(count, min, max, histo) {
+						Ok(_) => {}
+						Err(e) => {
+							println!("{}", e);
+							assert!(false);
+						}
 					}
 				}));
 			}
@@ -160,27 +337,76 @@ fn main() -> Result<(), Error> {
 			}
 
 			i += 1;
-			info!("Iteration {} complete.", i)?;
+			let nanos = start_itt.elapsed().as_nanos();
+			let total_messages: u64 = (threads * count).try_into().unwrap_or(0);
+			let qps: f64 = (total_messages as f64 / nanos as f64) * 1_000_000_000 as f64;
+			let qps_decimal: f64 = qps - (qps.floor() as f64);
+			let qps = &format!(
+				"{}{:.2}",
+				(qps.floor() as u64).to_formatted_string(&Locale::en),
+				qps_decimal
+			);
+
+			info!(
+				"Iteration {}{} complete in {:.2}s. Msgs = {}. QPS = {}",
+				i,
+				match i < 10 {
+					true => " ",
+					false => "",
+				},
+				nanos as f64 / 1_000_000_000 as f64,
+				total_messages.to_formatted_string(&Locale::en),
+				qps,
+			)?;
 			if i == itt {
 				break;
 			}
 		}
 
+		let nanos = start.elapsed().as_nanos();
+		let total_messages: u64 = (threads * count * itt).try_into().unwrap_or(0);
+		let qps: f64 = (total_messages as f64 / nanos as f64) * 1_000_000_000 as f64;
+		let qps_decimal: f64 = qps - (qps.floor() as f64);
+		let qps_decimal = &qps_decimal.to_string()[1..];
+		let qps = &format!(
+			"{}{:.3}",
+			(qps.floor() as u64).to_formatted_string(&Locale::en),
+			qps_decimal
+		);
+
+		info_no_ts!("{}", SEPARATOR)?;
 		info!(
-			"complete in {}ms!",
-			start.elapsed().as_nanos() as f64 / 1_000_000 as f64
+			"Complete in {:.2}s! Total Messages = {}. QPS = {}",
+			nanos as f64 / 1_000_000_000 as f64,
+			total_messages.to_formatted_string(&Locale::en),
+			qps,
 		)?;
+
+		match histo {
+			Some(histo) => {
+				info_no_ts!("{}", SEPARATOR)?;
+				info_no_ts!("{}", 
+"-------------------------------------Latency Histogram------------------------------------".cyan())?;
+				//123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890
+				//         1         2         3         4         5         6         7         8         9
+
+				info_no_ts!("{}", SEPARATOR)?;
+				histo.display()?;
+				info_no_ts!("{}", SEPARATOR)?;
+			}
+			None => {}
+		}
 	}
 
 	Ok(())
 }
 
-fn run_thread(count: usize) -> Result<(), Error> {
-	let max: usize = 100;
-	let min: usize = 50;
-	let rbuf = &mut [0u8; 100];
-	let wbuf = &mut [0u8; 100];
-	for i in 0..100 {
+fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Result<(), Error> {
+	let mut rbuf = vec![];
+	let mut wbuf = vec![];
+	rbuf.resize(max, 0u8);
+	wbuf.resize(max, 0u8);
+	for i in 0..max {
 		wbuf[i] = (i % 256) as u8;
 	}
 
@@ -190,9 +416,35 @@ fn run_thread(count: usize) -> Result<(), Error> {
 		let r: usize = rand::random();
 		let r = r % (max - min);
 		let wlen = r + min;
+		let mut len_sum = 0;
+
+		let start_time = std::time::SystemTime::now();
 		stream.write(&wbuf[0..wlen])?;
-		let len = stream.read(&mut rbuf[..])?;
-		assert_eq!(&rbuf[0..len], &wbuf[0..wlen]);
+
+		loop {
+			let len = stream.read(&mut rbuf[len_sum..])?;
+			len_sum += len;
+			trace!("len_sum={}", len_sum)?;
+			if len_sum >= wlen {
+				break;
+			}
+		}
+		let elapsed = std::time::SystemTime::now().duration_since(start_time)?;
+		let nanos = elapsed.as_nanos();
+		let mut micros = nanos as usize / 1000;
+
+		match histo {
+			Some(ref histo) => {
+				if micros > histo.max {
+					micros = histo.max;
+				}
+				histo.incr(micros.try_into().unwrap_or(histo.max))?;
+			}
+			None => {}
+		}
+
+		assert_eq!(len_sum, wlen);
+		assert_eq!(&rbuf[0..len_sum], &wbuf[0..wlen]);
 		x += 1;
 		if x == count {
 			break;

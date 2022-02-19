@@ -24,3 +24,32 @@ args:
         short: t
         value_name: threads
         takes_value: true
+    - min:
+        help: Minimum size of the request data
+        short: q
+        value_name: min
+        long: min
+        takes_value: true
+    - max:
+        help: Maximum size of the request data
+        short: m
+        value_name: max
+        long: max
+        takes_value: true
+    - histo:
+        help: include histogram in output
+        short: o
+        long: histo
+        takes_value: false
+    - histo_max:
+        help: maximum time in microseconds to display in the histogram. The default is 4,000.
+        short: m
+        long: histo_max
+        value_name: histo_max
+        takes_value: true
+    - bucket_count:
+        help: number of buckets to display in the histogram. The default is 20.
+        short: b
+        long: bucket_count
+        value_name: bucket_count
+        takes_value: true
