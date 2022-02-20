@@ -23,6 +23,7 @@ use colored::Colorize;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_log::*;
+use nioruntime_util::lockw;
 use nix::sys::socket::InetAddr;
 use nix::sys::socket::SockAddr;
 use num_format::{Locale, ToFormattedString};
@@ -315,16 +316,22 @@ fn main() -> Result<(), Error> {
 
 		let mut i = 0;
 		let start = Instant::now();
+		let mut total_lats = 0;
 
 		loop {
 			let start_itt = Instant::now();
 			let mut jhs = vec![];
+			let lat_sum_total = Arc::new(RwLock::new(0));
 
 			for _ in 0..threads {
 				let histo = histo.clone();
+				let lat_sum_total_clone = lat_sum_total.clone();
 				jhs.push(std::thread::spawn(move || {
 					match run_thread(count, min, max, histo) {
-						Ok(_) => {}
+						Ok(lat_sum) => {
+							let mut lat_sum_total = lockw!(lat_sum_total_clone).unwrap();
+							*lat_sum_total += lat_sum;
+						}
 						Err(e) => {
 							println!("{}", e);
 							assert!(false);
@@ -351,9 +358,14 @@ fn main() -> Result<(), Error> {
 				(qps.floor() as u64).to_formatted_string(&Locale::en),
 				qps_decimal
 			);
+			let avglat = {
+				let lats = *(lockw!(lat_sum_total)?);
+				total_lats += lats;
+				(lats as f64 / 1_000_000 as f64) / (count as f64 * threads as f64)
+			};
 
 			info!(
-				"Iteration {}{} complete in {:.2}s. Msgs = {}. QPS = {}",
+				"Iteration {}:{} {:.2}s. Msgs = {}. QPS = {}, AvgLat={:.2}ms",
 				i,
 				match i < 10 {
 					true => " ",
@@ -362,7 +374,9 @@ fn main() -> Result<(), Error> {
 				nanos as f64 / 1_000_000_000 as f64,
 				total_messages.to_formatted_string(&Locale::en),
 				qps,
+				avglat,
 			)?;
+
 			if i == itt {
 				break;
 			}
@@ -378,13 +392,15 @@ fn main() -> Result<(), Error> {
 			(qps.floor() as u64).to_formatted_string(&Locale::en),
 			qps_decimal
 		);
+		let avglat = { (total_lats as f64 / 1_000_000 as f64) / total_messages as f64 };
 
 		info_no_ts!("{}", SEPARATOR)?;
 		info!(
-			"Complete in {:.2}s! Total Messages = {}. QPS = {}",
+			"- {:.2}s! Total Messages = {}. QPS = {}, AvgLat={:.2}ms",
 			nanos as f64 / 1_000_000_000 as f64,
 			total_messages.to_formatted_string(&Locale::en),
 			qps,
+			avglat,
 		)?;
 
 		match histo {
@@ -406,7 +422,7 @@ fn main() -> Result<(), Error> {
 	Ok(())
 }
 
-fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Result<(), Error> {
+fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	let cap = if max > min { max } else { min };
@@ -418,6 +434,7 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 
 	let mut stream = TcpStream::connect("127.0.0.1:8092")?;
 	let mut x = 0;
+	let mut lat_sum = 0;
 	loop {
 		let r: usize = rand::random();
 		let r = if max <= min { 0 } else { r % (max - min) };
@@ -438,6 +455,7 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 		let elapsed = std::time::SystemTime::now().duration_since(start_time)?;
 		let nanos = elapsed.as_nanos();
 		let mut micros = nanos as usize / 1000;
+		lat_sum += nanos;
 
 		match histo {
 			Some(ref histo) => {
@@ -462,5 +480,5 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 			break;
 		}
 	}
-	Ok(())
+	Ok(lat_sum)
 }

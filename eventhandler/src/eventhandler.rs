@@ -211,7 +211,6 @@ impl ConnectionData {
 				self.notify_selector_thread()
 			} else {
 				// actual write error. Return error
-
 				Err(ErrorKind::IOError(format!(
 					"failed writing to handle={},cid={} with error={}",
 					self.connection_info.handle,
@@ -724,8 +723,8 @@ where
 							// this is would block and not an error to close
 							None
 						} else {
-							warn!(
-								"error for {}, handle={}: {}",
+							debug!(
+								"error/close for {}, handle={}: {}",
 								connection_info.get_connection_id(),
 								connection_info.get_handle(ctx.tid),
 								std::io::Error::last_os_error()
