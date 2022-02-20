@@ -65,7 +65,7 @@ use nioruntime_deps::nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
-fatal!();
+warn!();
 
 const MAX_EVENTS: i32 = 100;
 const READ_BUFFER_SIZE: usize = 1024 * 10;
@@ -155,6 +155,7 @@ impl ConnectionData {
 		let res = {
 			// first try to write in our own thread, check if closed first.
 			let mut write_status = lockw!(self.connection_info.write_status)?;
+
 			if (*write_status).is_closed {
 				return Err(ErrorKind::ConnectionClosedError(format!(
 					"connection {} already closed",
@@ -167,15 +168,29 @@ impl ConnectionData {
 				// there are pending writes, we cannot write here.
 				// return that 0 bytes were written and pass on to
 				// main thread loop
+				(*write_status).write_buffer.append(&mut data.to_vec());
 				0
 			} else {
 				let wlen = write_bytes(self.connection_info.get_handle(), &data)?;
 				if wlen >= 0 {
-					if (wlen as usize) < data.len() {
-						(*write_status).is_pending = true;
-					}
 					(*write_status).total_bytes_written += wlen as u128;
 				}
+
+				let start_data = if wlen > 0 { wlen as usize } else { 0 as usize };
+
+				if start_data > 0 && start_data < data.len() {
+					(*write_status).is_pending = true;
+					(*write_status)
+						.write_buffer
+						.append(&mut data[start_data..].to_vec());
+				} else if start_data == 0 && errno().0 == libc::EAGAIN {
+					// blocking so add it to the buffer
+					(*write_status).is_pending = true;
+					(*write_status)
+						.write_buffer
+						.append(&mut data[start_data..].to_vec());
+				}
+
 				wlen
 			}
 		};
@@ -186,7 +201,7 @@ impl ConnectionData {
 			let e = errno().0;
 			if e == libc::EAGAIN {
 				// can't write right now. Would block. Pass to selector
-				self.pass_to_selector_thread(data)
+				self.notify_selector_thread()
 			} else {
 				// actual write error. Return error
 
@@ -200,30 +215,32 @@ impl ConnectionData {
 			}
 		} else {
 			// otherwise, we have to pass to the other thread
-
-			let data = &data[res.try_into().unwrap_or(0)..];
-			self.pass_to_selector_thread(data)
+			self.notify_selector_thread()
 		}
 	}
 
 	pub fn close(&self) -> Result<(), Error> {
-		let wb = WriteBuffer::new(self.get_connection_id(), vec![], true);
-
 		{
-			let mut guarded_data = lockw!(self.guarded_data)?;
-			guarded_data.write_queue.push(wb);
+			let mut write_status = lockw!(self.connection_info.write_status)?;
+			if (*write_status).is_closed {
+				return Err(ErrorKind::ConnectionClosedError(format!(
+					"connection {} already closed",
+					self.get_connection_id()
+				))
+				.into());
+			}
+			(*write_status).close_oncomplete = true;
 		}
 
-		self.wakeup.wakeup()?;
+		self.notify_selector_thread()?;
 
 		Ok(())
 	}
 
-	fn pass_to_selector_thread(&self, data: &[u8]) -> Result<(), Error> {
-		let wb = WriteBuffer::new(self.get_connection_id(), data.to_vec(), false);
+	fn notify_selector_thread(&self) -> Result<(), Error> {
 		{
 			let mut guarded_data = lockw!(self.guarded_data)?;
-			guarded_data.write_queue.push(wb);
+			guarded_data.write_queue.push(self.get_connection_id());
 		}
 
 		self.wakeup.wakeup()?;
@@ -555,7 +572,7 @@ where
 			let event = &events[ctx.counter];
 			match event.etype {
 				EventType::Read => {
-					let _res = Self::process_read_event(
+					let res = Self::process_read_event(
 						event,
 						ctx,
 						config,
@@ -563,7 +580,22 @@ where
 						connection_id_map,
 						connection_handle_map,
 						wakeup,
-					)?;
+					);
+
+					match res {
+						Ok(_) => {}
+						Err(e) => {
+							match e.kind() {
+								ErrorKind::HandleNotFoundError(_e) => {
+									// This is ok. Connection already disconnected
+									// ignore.
+								}
+								_ => {
+									return Err(e);
+								}
+							}
+						}
+					}
 				}
 				EventType::Write => Self::process_write_event(
 					event,
@@ -578,6 +610,38 @@ where
 			}
 			ctx.counter += 1;
 		}
+
+		for handle in ctx.saturating_handles.clone() {
+			let event = Event {
+				handle: handle,
+				etype: EventType::Read,
+			};
+			let res = Self::process_read_event(
+				&event,
+				ctx,
+				config,
+				callbacks,
+				connection_id_map,
+				connection_handle_map,
+				wakeup,
+			);
+
+			match res {
+				Ok(_) => {}
+				Err(e) => {
+					match e.kind() {
+						ErrorKind::HandleNotFoundError(_e) => {
+							// This is ok. Connection already disconnected
+							// ignore.
+						}
+						_ => {
+							return Err(e);
+						}
+					}
+				}
+			}
+		}
+
 		Ok(())
 	}
 
@@ -626,12 +690,19 @@ where
 				EventConnectionInfo::ReadWriteConnection(c) => {
 					info!("start loop")?;
 					let mut len;
+					let mut sat_count = 0;
 					loop {
-						info!("pre")?;
 						set_errno(Errno(0));
 						len = Self::process_read(c.clone(), ctx, wakeup, callbacks)?;
 						info!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
+							ctx.saturating_handles.remove(&c.get_handle());
+							break;
+						}
+
+						sat_count += 1;
+						if sat_count >= 5 {
+							ctx.saturating_handles.insert(c.get_handle());
 							break;
 						}
 					}
@@ -693,8 +764,10 @@ where
 					Some(connection_info) => match connection_info {
 						EventConnectionInfo::ReadWriteConnection(ref c) => {
 							{
+								ctx.saturating_handles.remove(&handle);
 								let mut write_status = lockw!(c.write_status)?;
 								(*write_status).is_closed = true;
+								(*write_status).write_buffer.clear();
 								unsafe {
 									libc::close(handle);
 								}
@@ -733,6 +806,7 @@ where
 		tls_server_config: &Option<ServerConfig>,
 	) -> Result<bool, Error> {
 		let handle = unsafe {
+			set_errno(Errno(0));
 			accept(
 				handle,
 				&mut libc::sockaddr {
@@ -768,11 +842,12 @@ where
 
 			match &callbacks.on_accept {
 				Some(on_accept) => {
-					match (on_accept)(&ConnectionData::new(
+					let conn_data = ConnectionData::new(
 						connection_info.get_read_write_connection_info()?.clone(),
 						ctx.guarded_data.clone(),
 						wakeup.clone(),
-					)) {
+					);
+					match (on_accept)(&conn_data) {
 						Ok(_) => {}
 						Err(e) => {
 							warn!("on_accept Callback resulted in error: {}", e)?;
@@ -785,10 +860,12 @@ where
 			ctx.accepted_connections.push(connection_info);
 			Ok(true)
 		} else {
-			error!(
-				"Error accepting connection: {}",
-				std::io::Error::last_os_error()
-			)?;
+			if errno().0 != libc::EAGAIN {
+				error!(
+					"Error accepting connection: {}",
+					std::io::Error::last_os_error()
+				)?;
+			}
 			Ok(false)
 		}
 	}
@@ -925,7 +1002,6 @@ where
 
 		if wakeup.wakeup_handle_read == connection_info.handle {
 			// wakeup event
-			trace!("wakeup len read = {}", len)?;
 		} else if len > 0 {
 			info!("read {} bytes", len)?;
 			// non-wakeup, so execute on_read callback
@@ -1007,56 +1083,44 @@ where
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
 				let connection_id = connection_info.get_connection_id();
 				info!("connection_info={:?}", connection_info)?;
-				let mut block = false;
-				let mut rem_count = 0;
+				let mut len_sum = 0;
 
 				let mut write_status = lockw!(connection_info.write_status)?;
-				let mut len_sum: u128 = 0;
-				for wbuf in &mut (*write_status).pending_wbufs {
-					loop {
-						if wbuf.cur == wbuf.buf.len() {
-							rem_count += 1;
-							if wbuf.close {
-								to_remove.push(connection_id);
-								block = true;
-							}
-							break;
-						} // nothing more to write
-						let (wr, len) = Self::write_loop(event.handle, wbuf)?;
-						match wr {
-							WriteResult::Ok => {
-								if len > 0 {
-									len_sum += len as u128;
-								}
-							}
-							WriteResult::Err => {
-								// error occured. Must close connection
-								to_remove.push(connection_id);
-								block = true;
-								break;
-							}
-							WriteResult::Block => {
-								// would block, need to let selector do other work
-								block = true;
-								break;
+				loop {
+					if (*write_status).write_buffer.len() == 0 {
+						(*write_status).is_pending = false;
+						if (*write_status).close_oncomplete {
+							to_remove.push(connection_id);
+						}
+
+						// add a read event so that only reads will trigger
+						ctx.input_events.push(Event {
+							handle: connection_info.get_handle(),
+							etype: EventType::Read,
+						});
+						break; // we're done
+					}
+					let (wr, len) =
+						Self::write_loop(event.handle, &mut (*write_status).write_buffer)?;
+
+					match wr {
+						WriteResult::Ok => {
+							if len > 0 {
+								len_sum += len as u128;
 							}
 						}
+						WriteResult::Err => {
+							// error occurred. must close conn
+							to_remove.push(connection_id);
+							break;
+						}
+						WriteResult::Block => {
+							// would block, need to exit write loop
+							break;
+						}
 					}
-
-					if block {
-						break;
-					}
 				}
-
-				(*write_status).total_bytes_written += len_sum as u128;
-
-				for _ in 0..rem_count {
-					(*write_status).pending_wbufs.remove(0);
-				}
-
-				if (*write_status).pending_wbufs.len() == 0 {
-					(*write_status).is_pending = false;
-				}
+				(*write_status).total_bytes_written += len_sum;
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
 				warn!("tried to write to a listener: {:?}", event)?;
@@ -1077,8 +1141,8 @@ where
 		Ok(())
 	}
 
-	fn write_loop(handle: Handle, wbuf: &mut WriteBuffer) -> Result<(WriteResult, isize), Error> {
-		let len = write_bytes(handle, &mut wbuf.buf[wbuf.cur..])?;
+	fn write_loop(handle: Handle, wbuf: &mut Vec<u8>) -> Result<(WriteResult, isize), Error> {
+		let len = write_bytes(handle, &mut wbuf[..])?;
 		if len < 0 {
 			let e = errno().0;
 			if e == libc::EAGAIN {
@@ -1087,7 +1151,15 @@ where
 				Ok((WriteResult::Err, -1))
 			}
 		} else {
-			wbuf.cur += len as usize;
+			if len > 0 {
+				let len: usize = len.try_into()?;
+				if len == wbuf.len() {
+					wbuf.clear();
+				} else {
+					let len: usize = len.try_into()?;
+					wbuf.drain(..len);
+				}
+			}
 			Ok((WriteResult::Ok, len))
 		}
 	}
@@ -1150,7 +1222,14 @@ where
 			}
 		}
 
-		let results = epoll_wait(epollfd, &mut ctx.epoll_events, 30000000);
+		let results = epoll_wait(
+			epollfd,
+			&mut ctx.epoll_events,
+			match ctx.saturating_handles.len() > 0 {
+				true => 0,
+				false => 30000000,
+			},
+		);
 
 		events.clear();
 
@@ -1179,7 +1258,6 @@ where
 		}
 
 		ctx.input_events.clear();
-
 		Ok(())
 	}
 
@@ -1248,7 +1326,12 @@ where
 				kevs.len() as i32,
 				ret_kevs.as_mut_ptr(),
 				MAX_EVENTS,
-				&Self::duration_to_timespec(Duration::from_millis(30000000)),
+				&Self::duration_to_timespec(Duration::from_millis(
+					match ctx.saturating_handles.len() > 0 {
+						true => 0,
+						false => 30000000,
+					},
+				)),
 			)
 		};
 
@@ -1309,6 +1392,42 @@ where
 		timespec { tv_sec, tv_nsec }
 	}
 
+	#[cfg(target_os = "linux")]
+	fn _remove_handle(
+		selector: SelectorHandle,
+		connection_handle: Handle,
+		filter_set: &mut HashSet<Handle>,
+	) -> Result<(), Error> {
+		filter_set.remove(&connection_handle);
+		let interest = EpollFlags::empty();
+
+		let mut event = EpollEvent::new(interest, connection_handle.try_into().unwrap_or(0));
+		let res = epoll_ctl(
+			selector,
+			EpollOp::EpollCtlDel,
+			connection_handle,
+			&mut event,
+		);
+		match res {
+			Ok(_) => {}
+			Err(e) => error!(
+				"Error epoll_ctl on remove_handle: {}, fd={}, delete",
+				e, connection_handle
+			)?,
+		}
+
+		Ok(())
+	}
+
+	#[cfg(any(target_os = "macos", dragonfly, freebsd, netbsd, openbsd))]
+	fn _remove_handle(
+		_selector: SelectorHandle,
+		_connection_handle: Handle,
+		_filter_set: &mut HashSet<Handle>,
+	) -> Result<(), Error> {
+		Ok(())
+	}
+
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
@@ -1343,15 +1462,11 @@ where
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
-		for wbuf in &ctx.nwrites {
-			match connection_id_map.get(&wbuf.connection_id) {
+		for connection_id in &ctx.nwrites {
+			match connection_id_map.get(&connection_id) {
 				Some(handle) => match connection_handle_map.get_mut(handle) {
 					Some(conn_info) => match conn_info {
 						EventConnectionInfo::ReadWriteConnection(item) => {
-							{
-								let mut write_status = lockw!(item.write_status)?;
-								(*write_status).pending_wbufs.push(wbuf.clone());
-							}
 							info!("pushing wbuf to item = {:?}", item)?;
 							ctx.input_events.push(Event {
 								handle: item.handle,
@@ -1367,7 +1482,7 @@ where
 					}
 				},
 				None => {
-					trace!("Attempt to write on closed connection: {:?}", wbuf)?;
+					trace!("Attempt to write on closed connection: {:?}", connection_id)?;
 				} // connection already disconnected
 			}
 		}
@@ -1505,7 +1620,8 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 
 #[derive(Debug, Clone)]
 pub struct WriteStatus {
-	pending_wbufs: Vec<WriteBuffer>,
+	write_buffer: Vec<u8>,
+	close_oncomplete: bool,
 	is_pending: bool,
 	is_closed: bool,
 	total_bytes_written: u128,
@@ -1514,7 +1630,8 @@ pub struct WriteStatus {
 impl WriteStatus {
 	fn new() -> Self {
 		Self {
-			pending_wbufs: vec![],
+			write_buffer: vec![],
+			close_oncomplete: false,
 			is_closed: false,
 			is_pending: false,
 			total_bytes_written: 0,
@@ -1664,26 +1781,6 @@ struct Event {
 	etype: EventType,
 }
 
-#[derive(Clone, Debug)]
-struct WriteBuffer {
-	connection_id: u128,
-	buf: Vec<u8>,
-	cur: usize,
-	close: bool,
-}
-
-impl WriteBuffer {
-	fn new(connection_id: u128, buf: Vec<u8>, close: bool) -> Self {
-		let cur = 0;
-		Self {
-			connection_id,
-			buf,
-			cur,
-			close,
-		}
-	}
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Wakeup {
 	wakeup_handle_read: Handle,
@@ -1723,7 +1820,7 @@ impl Wakeup {
 
 #[derive(Debug)]
 struct GuardedData {
-	write_queue: Vec<WriteBuffer>,
+	write_queue: Vec<u128>,
 	nhandles: Vec<EventConnectionInfo>,
 }
 
@@ -1740,7 +1837,7 @@ struct Context {
 	guarded_data: Arc<RwLock<GuardedData>>,
 	add_pending: Vec<EventConnectionInfo>,
 	accepted_connections: Vec<EventConnectionInfo>,
-	nwrites: Vec<WriteBuffer>,
+	nwrites: Vec<u128>,
 	input_events: Vec<Event>,
 	selector: SelectorHandle,
 	tid: usize,
@@ -1749,6 +1846,7 @@ struct Context {
 	#[cfg(target_os = "linux")]
 	epoll_events: Vec<EpollEvent>,
 	counter: usize, // used for handling panics
+	saturating_handles: HashSet<Handle>,
 }
 
 impl Context {
@@ -1778,6 +1876,7 @@ impl Context {
 			selector: unsafe { kqueue() },
 			tid,
 			buffer: [0u8; READ_BUFFER_SIZE],
+			saturating_handles: HashSet::new(),
 		})
 	}
 }
@@ -2207,7 +2306,6 @@ mod tests {
 			}
 			msg.push((i % 256) as u8);
 		}
-
 		let msg_clone = msg.clone();
 
 		let cbuf: Vec<u8> = vec![];

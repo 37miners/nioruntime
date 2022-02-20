@@ -325,7 +325,7 @@ macro_rules! error_all {
 #[macro_export]
 macro_rules! warn {
 	() => {
-		nioruntime_log::do_log!(nioruntime_log::WARN)
+		nioruntime_log::do_log!(nioruntime_log::WARN);
 	};
 	($a:expr) => {
 		{

@@ -242,7 +242,10 @@ fn main() -> Result<(), Error> {
 		}
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |conn_data| {
+			trace!("on close for id = {}", conn_data.get_connection_id())?;
+			Ok(())
+		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf| {
@@ -447,7 +450,12 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 		}
 
 		assert_eq!(len_sum, wlen);
-		assert_eq!(&rbuf[0..len_sum], &wbuf[0..wlen]);
+		for i in 0..len_sum {
+			if rbuf[i] != (i % 256) as u8 {
+				error!("rbuf[{}] was {}. Expected value = {}", i, rbuf[i], i % 256)?;
+				assert!(false);
+			}
+		}
 
 		x += 1;
 		if x == count {
