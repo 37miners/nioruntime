@@ -2145,8 +2145,7 @@ mod tests {
 		Ok(())
 	}
 
-	// work in progress
-	//#[test]
+	#[test]
 	fn test_ssl() -> Result<(), Error> {
 		initialize();
 
@@ -2158,15 +2157,10 @@ mod tests {
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
-
 		let mut evh = EventHandler::new(EventHandlerConfig {
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
-
-		let lock = Arc::new(RwLock::new(0));
-		let lock_clone1 = lock.clone();
-		let lock_clone2 = lock.clone();
 
 		let std_sa = SocketAddr::from_str(&addr).unwrap();
 		let inet_addr = InetAddr::from_std(&std_sa);
@@ -2185,74 +2179,50 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		let cid_accept = Arc::new(RwLock::new(0));
-		let cid_accept_clone = cid_accept.clone();
-		let cid_read = Arc::new(RwLock::new(0));
-		let cid_read_clone = cid_read.clone();
-
-		evh.set_on_accept(move |conn_data| {
-			{
-				let mut cid = cid_accept.write().unwrap();
-				*cid = conn_data.get_connection_id();
-			}
-			{
-				let mut lock = lock_clone1.write().unwrap();
-				*lock += 1;
-			}
-			Ok(())
-		})?;
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
 		evh.set_on_close(move |_conn_data| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
+		let stream = TcpStream::connect(addr)?;
+		let handle = stream.as_raw_fd();
+		let client_id = Arc::new(RwLock::new(0));
+		let client_id_clone = client_id.clone();
+
+		let client_on_read_count = Arc::new(RwLock::new(0));
+		let server_on_read_count = Arc::new(RwLock::new(0));
+		let client_on_read_count_clone = client_on_read_count.clone();
+		let server_on_read_count_clone = server_on_read_count.clone();
+
 		evh.set_on_read(move |conn_data, buf| {
 			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
-			assert_eq!(buf, [1, 2, 3, 4]);
-			{
-				let mut cid_read = cid_read.write().unwrap();
-				*cid_read = conn_data.get_connection_id();
-			}
-			{
-				let mut lock = lock_clone2.write().unwrap();
-				*lock += 1;
-			}
 
-			conn_data.write(&[5, 6, 7, 8, 9])?;
+			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
+				assert_eq!(buf, [5, 6, 7, 8, 9]);
+				*(lockw!(client_on_read_count)?) += 1;
+			} else {
+				assert_eq!(buf, [1, 2, 3, 4]);
+				conn_data.write(&[5, 6, 7, 8, 9])?;
+				*(lockw!(server_on_read_count)?) += 1;
+			}
 			Ok(())
 		})?;
 		evh.start()?;
-
-		let tls_config = Some(TLSServerConfig {
-			certificates_file: "./src/resources/cert.pem".to_string(),
-			private_key_file: "./src/resources/key.pem".to_string(),
-		});
-
-		evh.add_listener_handles(handles, tls_config)?;
-		let mut stream = TcpStream::connect(addr)?;
-		stream.write(&[1, 2, 3, 4])?;
+		evh.add_listener_handles(handles, None)?;
+		let conn_info = evh.add_handle(handle, None)?;
+		{
+			let mut client_id = lockw!(client_id)?;
+			*client_id = conn_info.get_connection_id();
+		}
+		conn_info.write(&[1, 2, 3, 4])?;
 		loop {
-			{
-				let lock = lock.write().unwrap();
-				if *lock > 1 {
-					break;
-				}
-			}
 			std::thread::sleep(std::time::Duration::from_millis(1));
-		}
-		let mut buf = [0u8; 10];
-		let len = stream.read(&mut buf)?;
-		assert_eq!(&buf[0..len], &[5, 6, 7, 8, 9]);
-
-		{
-			let lock = lock.read().unwrap();
-			assert_eq!(*lock, 2);
+			if *(lockr!(client_on_read_count_clone)?) != 0 {
+				break;
+			}
 		}
 
-		{
-			let cid_accept = cid_accept_clone.read().unwrap();
-			let cid_read = cid_read_clone.read().unwrap();
-			assert_eq!(*cid_read, *cid_accept);
-			assert!(*cid_read != 0);
-		}
+		assert_eq!(*(lockr!(server_on_read_count_clone)?), 1);
+		assert_eq!(*(lockr!(client_on_read_count_clone)?), 1);
 
 		Ok(())
 	}
