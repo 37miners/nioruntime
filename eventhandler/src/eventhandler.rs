@@ -98,6 +98,10 @@ impl ConnectionData {
 		self.connection_info.get_connection_id()
 	}
 
+	pub fn get_handle(&self) -> Handle {
+		self.connection_info.get_handle()
+	}
+
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
 		match &self.connection_info.tls_server {
 			Some(tls_conn) => {
@@ -112,6 +116,7 @@ impl ConnectionData {
 						}
 						tls_conn.writer().write_all(&data[start..end])?;
 						tls_conn.write_tls(&mut wbuf)?;
+
 						if end == data.len() {
 							break;
 						}
@@ -139,7 +144,9 @@ impl ConnectionData {
 							start += TLS_CHUNKS;
 						}
 					}
-					self.do_write(&wbuf)
+					let ret = self.do_write(&wbuf);
+
+					ret
 				}
 				None => self.do_write(data),
 			},
@@ -209,7 +216,7 @@ impl ConnectionData {
 					"failed writing to handle={},cid={} with error={}",
 					self.connection_info.handle,
 					self.get_connection_id(),
-					e
+					std::io::Error::last_os_error()
 				))
 				.into())
 			}
@@ -258,7 +265,7 @@ impl Default for EventHandlerConfig {
 	fn default() -> Self {
 		Self {
 			threads: 6,
-			read_buffer_size: 10000,
+			read_buffer_size: 10 * 1024,
 		}
 	}
 }
@@ -717,9 +724,11 @@ where
 							// this is would block and not an error to close
 							None
 						} else {
-							info!(
-								"it was an actual error for {}",
-								connection_info.get_connection_id()
+							warn!(
+								"error for {}, handle={}: {}",
+								connection_info.get_connection_id(),
+								connection_info.get_handle(ctx.tid),
+								std::io::Error::last_os_error()
 							)?;
 							Some((
 								connection_info.get_connection_id(),
@@ -881,21 +890,39 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
-		let (len, _pt_len) = match connection_info.tls_server {
-			Some(ref _tls_server) => Self::do_tls_server_read(&connection_info, ctx, wakeup)?,
+		let (len, do_read_now) = match connection_info.tls_server {
+			Some(ref _tls_server) => {
+				let (raw_len, tls_len) = Self::do_tls_server_read(&connection_info, ctx, wakeup)?;
+				let do_read_now = raw_len <= 0 || tls_len > 0;
+				let len = if tls_len > 0 {
+					tls_len.try_into().unwrap_or(0)
+				} else {
+					raw_len
+				};
+				(len, do_read_now)
+			}
 			None => match connection_info.tls_client {
-				Some(ref _tls_client) => Self::do_tls_client_read(&connection_info, ctx, wakeup)?,
+				Some(ref _tls_client) => {
+					let (raw_len, tls_len) =
+						Self::do_tls_client_read(&connection_info, ctx, wakeup)?;
+					let do_read_now = raw_len <= 0 || tls_len > 0;
+					let len = if tls_len > 0 {
+						tls_len.try_into().unwrap_or(0)
+					} else {
+						raw_len
+					};
+					(len, do_read_now)
+				}
 				None => {
 					let len = Self::do_read(connection_info.handle, &mut ctx.buffer)?;
-					if len >= 0 {
-						(len, len.try_into()?)
-					} else {
-						(len, 0)
-					}
+					(len, true)
 				}
 			},
 		};
-		Self::process_read_result(connection_info, len, wakeup, callbacks, ctx)?;
+
+		if do_read_now {
+			Self::process_read_result(connection_info, len, wakeup, callbacks, ctx)?;
+		}
 
 		Ok(len)
 	}
@@ -914,7 +941,6 @@ where
 			let mut tls_conn =
 				nioruntime_util::lockw!(connection_info.tls_client.as_ref().unwrap())?;
 			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
-
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
@@ -940,7 +966,7 @@ where
 			ctx.guarded_data.clone(),
 			wakeup.clone(),
 		);
-		connection_data.write(&wbuf)?;
+		connection_data.do_write(&wbuf)?;
 
 		Ok((len, pt_len))
 	}
@@ -963,11 +989,10 @@ where
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
-					error!("pt_len = {}, buf_len={}", pt_len, ctx.buffer.len())?;
 					//ctx.buffer.resize(pt_len, 0u8);
 					// TODO: is this safe? What is the maximum buffer size pt_len could be?
 					let buf = &mut ctx.buffer[0..pt_len];
-					tls_conn.reader().read_exact(buf)?;
+					tls_conn.reader().read_exact(&mut buf[..pt_len])?;
 				}
 				Err(e) => {
 					warn!(
@@ -986,7 +1011,8 @@ where
 			ctx.guarded_data.clone(),
 			wakeup.clone(),
 		);
-		connection_data.write(&wbuf)?;
+
+		connection_data.do_write(&wbuf)?;
 
 		Ok((len, pt_len))
 	}
@@ -1260,7 +1286,6 @@ where
 				error!("Error with epoll wait = {}", e.to_string())?;
 			}
 		}
-
 		ctx.input_events.clear();
 		Ok(())
 	}
@@ -1357,7 +1382,6 @@ where
 				},
 			});
 		}
-
 		ctx.input_events.clear();
 		Ok(())
 	}
@@ -2179,11 +2203,18 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_accept(move |conn_data| {
+			trace!("on accept for {}", conn_data.get_handle())?;
+			Ok(())
+		})?;
+		evh.set_on_close(move |conn_data| {
+			trace!("on close conn={}", conn_data.get_handle())?;
+			Ok(())
+		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let stream = TcpStream::connect(addr)?;
+		stream.set_nonblocking(true)?;
 		let handle = stream.as_raw_fd();
 		let client_id = Arc::new(RwLock::new(0));
 		let client_id_clone = client_id.clone();
@@ -2194,7 +2225,11 @@ mod tests {
 		let server_on_read_count_clone = server_on_read_count.clone();
 
 		evh.set_on_read(move |conn_data, buf| {
-			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
+			trace!(
+				"callback on {} with buf={:?}",
+				conn_data.connection_info.handle,
+				buf
+			)?;
 
 			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
 				assert_eq!(buf, [5, 6, 7, 8, 9]);
@@ -2207,12 +2242,30 @@ mod tests {
 			Ok(())
 		})?;
 		evh.start()?;
-		evh.add_listener_handles(handles, None)?;
-		let conn_info = evh.add_handle(handle, None)?;
+
+		// note ordering important. Must add the client handle before the server.
+		// seems to have to do with the handshake.
+		let conn_info = evh.add_handle(
+			handle,
+			Some(TLSClientConfig {
+				server_name: "localhost".to_string(),
+				trusted_cert_full_chain_file: Some("./src/resources/cert.pem".to_string()),
+			}),
+		)?;
+
+		evh.add_listener_handles(
+			handles,
+			Some(TLSServerConfig {
+				certificates_file: "./src/resources/cert.pem".to_string(),
+				private_key_file: "./src/resources/key.pem".to_string(),
+			}),
+		)?;
+
 		{
 			let mut client_id = lockw!(client_id)?;
 			*client_id = conn_info.get_connection_id();
 		}
+
 		conn_info.write(&[1, 2, 3, 4])?;
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(1));
