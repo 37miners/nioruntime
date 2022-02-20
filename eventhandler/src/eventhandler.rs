@@ -68,7 +68,7 @@ use nioruntime_deps::nix::sys::epoll::{
 warn!();
 
 const MAX_EVENTS: i32 = 100;
-const READ_BUFFER_SIZE: usize = 1024 * 10;
+//const READ_BUFFER_SIZE: usize = 1024 * 10;
 const TLS_CHUNKS: usize = 32768;
 
 type SelectorHandle = i32;
@@ -251,11 +251,15 @@ impl ConnectionData {
 #[derive(Clone, Copy)]
 pub struct EventHandlerConfig {
 	pub threads: usize,
+	pub read_buffer_size: usize,
 }
 
 impl Default for EventHandlerConfig {
 	fn default() -> Self {
-		Self { threads: 6 }
+		Self {
+			threads: 6,
+			read_buffer_size: 10000,
+		}
 	}
 }
 
@@ -452,7 +456,7 @@ where
 	) -> Result<(), Error> {
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(vec![]));
-		let mut ctx = Context::new(tid, guarded_data)?;
+		let mut ctx = Context::new(tid, guarded_data, self.config)?;
 		let mut connection_id_map = HashMap::new();
 		let mut connection_handle_map = HashMap::new();
 
@@ -1032,7 +1036,7 @@ where
 		#[cfg(unix)]
 		let len = {
 			let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
-			unsafe { read(handle, cbuf, READ_BUFFER_SIZE) }
+			unsafe { read(handle, cbuf, buf.len()) }
 		};
 		#[cfg(target_os = "windows")]
 		let len = {
@@ -1841,7 +1845,7 @@ struct Context {
 	input_events: Vec<Event>,
 	selector: SelectorHandle,
 	tid: usize,
-	buffer: [u8; READ_BUFFER_SIZE],
+	buffer: Vec<u8>,
 	filter_set: HashSet<Handle>,
 	#[cfg(target_os = "linux")]
 	epoll_events: Vec<EpollEvent>,
@@ -1850,7 +1854,13 @@ struct Context {
 }
 
 impl Context {
-	fn new(tid: usize, guarded_data: Arc<RwLock<GuardedData>>) -> Result<Self, Error> {
+	fn new(
+		tid: usize,
+		guarded_data: Arc<RwLock<GuardedData>>,
+		config: EventHandlerConfig,
+	) -> Result<Self, Error> {
+		let mut buffer = vec![];
+		buffer.resize(config.read_buffer_size, 0u8);
 		#[cfg(target_os = "linux")]
 		let epoll_events = [EpollEvent::new(EpollFlags::empty(), 0); MAX_EVENTS as usize].to_vec();
 		Ok(Self {
@@ -1875,7 +1885,7 @@ impl Context {
 			))]
 			selector: unsafe { kqueue() },
 			tid,
-			buffer: [0u8; READ_BUFFER_SIZE],
+			buffer,
 			saturating_handles: HashSet::new(),
 		})
 	}
