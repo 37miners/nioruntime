@@ -278,8 +278,14 @@ fn main() -> Result<(), Error> {
 			false => 1,
 		};
 
+		let max_rwhandles = match args.is_present("max_rwhandles") {
+			true => args.value_of("max_rwhandles").unwrap().parse()?,
+			false => 1_000_000,
+		};
+
 		let evh_config = EventHandlerConfig {
 			threads,
+			max_rwhandles,
 			..EventHandlerConfig::default()
 		};
 

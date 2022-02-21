@@ -53,3 +53,9 @@ args:
         long: bucket_count
         value_name: bucket_count
         takes_value: true
+    - max_rwhandles:
+        help: max rwhandles to accept on this eventhandler. This includes both client connections and connections accepted by a listener.
+        short: r
+        long: max_rwhandles
+        value_name: max_rwhandles
+        takes_value: true

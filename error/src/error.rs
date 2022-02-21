@@ -154,6 +154,9 @@ pub enum ErrorKind {
 	/// Invalid Type
 	#[fail(display = "Invalid Type error: {}", _0)]
 	InvalidType(String),
+	/// Too many handles have been added/accepted by this eventhandler
+	#[fail(display = "Too many handles on this eventhandler: {}", _0)]
+	MaxHandlesExceeded(String),
 }
 
 impl Display for Error {

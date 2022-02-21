@@ -283,6 +283,7 @@ impl ConnectionData {
 pub struct EventHandlerConfig {
 	pub threads: usize,
 	pub read_buffer_size: usize,
+	pub max_rwhandles: usize,
 }
 
 impl Default for EventHandlerConfig {
@@ -290,6 +291,7 @@ impl Default for EventHandlerConfig {
 		Self {
 			threads: 6,
 			read_buffer_size: 10 * 1024,
+			max_rwhandles: 1_000_000,
 		}
 	}
 }
@@ -300,6 +302,7 @@ pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic> {
 	wakeup: Vec<Wakeup>,
 	callbacks: Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	stopped: Arc<RwLock<bool>>,
+	cur_connections: Arc<RwLock<usize>>,
 }
 
 impl<OnRead, OnAccept, OnClose, OnPanic> EventHandler<OnRead, OnAccept, OnClose, OnPanic>
@@ -328,6 +331,7 @@ where
 			guarded_data,
 			wakeup,
 			stopped: Arc::new(RwLock::new(false)),
+			cur_connections: Arc::new(RwLock::new(0)),
 		})
 	}
 
@@ -426,6 +430,23 @@ where
 		tls_config: Option<TLSClientConfig>,
 	) -> Result<ConnectionData, Error> {
 		self.check_callbacks()?;
+
+		let cap_exceeded = {
+			let mut cur_connections = lockw!(self.cur_connections)?;
+			let ret = *cur_connections >= self.config.max_rwhandles;
+			if !ret {
+				*cur_connections += 1;
+			}
+			ret
+		};
+
+		if cap_exceeded {
+			return Err(ErrorKind::MaxHandlesExceeded(format!(
+				"Max Handles exceeded. Limit = {}",
+				self.config.max_rwhandles,
+			))
+			.into());
+		}
 
 		let connection_info = match tls_config {
 			Some(tls_config) => {
@@ -747,7 +768,7 @@ where
 	fn process_read_event(
 		event: &Event,
 		ctx: &mut Context,
-		_config: &EventHandlerConfig,
+		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
@@ -777,6 +798,7 @@ where
 						if !Self::process_accept(
 							handle,
 							ctx,
+							config,
 							wakeup,
 							callbacks,
 							&c.tls_server_config,
@@ -866,9 +888,15 @@ where
 						EventConnectionInfo::ReadWriteConnection(ref c) => {
 							{
 								ctx.saturating_handles.remove(&handle);
-								let mut write_status = lockw!(c.write_status)?;
-								(*write_status).is_closed = true;
-								(*write_status).write_buffer.clear();
+								{
+									let mut write_status = lockw!(c.write_status)?;
+									(*write_status).is_closed = true;
+									(*write_status).write_buffer.clear();
+								}
+								{
+									let mut cur_connections = lockw!(ctx.cur_connections)?;
+									*cur_connections -= 1;
+								}
 								#[cfg(unix)]
 								unsafe {
 									libc::close(handle);
@@ -907,6 +935,7 @@ where
 	fn process_accept(
 		handle: Handle,
 		ctx: &mut Context,
+		config: &EventHandlerConfig,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		tls_server_config: &Option<ServerConfig>,
@@ -937,13 +966,32 @@ where
 		};
 
 		if handle > 0 {
+			// check that we have not exceeded maximum rwhandles before accepting
+			{
+				let cap_exceeded = {
+					let mut cur_connections = lockw!(ctx.cur_connections)?;
+					let ret = *cur_connections >= config.max_rwhandles;
+					if !ret {
+						*cur_connections += 1;
+					}
+					ret
+				};
+
+				if cap_exceeded {
+					#[cfg(unix)]
+					{
+						unsafe { libc::close(handle) };
+					}
+					return Ok(false);
+				}
+			}
+
 			info!("Accepted handle = {} on tid={}", handle, ctx.tid)?;
 
 			#[cfg(unix)]
 			unsafe {
 				fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK)
 			};
-			#[cfg(windows)]
 			#[cfg(target_os = "windows")]
 			{
 				let fionbio = 0x8004667eu32;
@@ -2170,6 +2218,7 @@ struct Context {
 	epoll_events: Vec<EpollEvent>,
 	counter: usize, // used for handling panics
 	saturating_handles: HashSet<Handle>,
+	cur_connections: Arc<RwLock<usize>>,
 }
 
 impl Context {
@@ -2208,6 +2257,7 @@ impl Context {
 			tid,
 			buffer,
 			saturating_handles: HashSet::new(),
+			cur_connections: Arc::new(RwLock::new(0)),
 		})
 	}
 }
@@ -2745,6 +2795,71 @@ mod tests {
 			let stopped = lockw!(evh.stopped)?;
 			assert!(*stopped);
 		}
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_max_rwhandles() -> Result<(), Error> {
+		let port = 8500;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			max_rwhandles: 2,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		let resp_len = Arc::new(RwLock::new(0));
+		let resp_len_clone = resp_len.clone();
+
+		evh.set_on_read(move |_conn_data, buf| {
+			let mut resp_len = lockw!(resp_len_clone)?;
+			*resp_len += buf.len();
+
+			Ok(())
+		})?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+
+		let mut stream1 = TcpStream::connect(addr.clone())?;
+		let mut stream2 = TcpStream::connect(addr.clone())?;
+		let mut stream3 = TcpStream::connect(addr)?;
+		std::thread::sleep(std::time::Duration::from_millis(1000));
+		stream1.write(&[5, 6, 7, 8, 9])?;
+		stream2.write(&[5, 6, 7, 8, 9])?;
+		stream3.write(&[5, 6, 7, 8, 9])?;
+		stream1.write(&[5, 6, 7, 8, 9])?;
+		stream2.write(&[5, 6, 7, 8, 9])?;
+		stream3.write(&[5, 6, 7, 8, 9])?;
+		std::thread::sleep(std::time::Duration::from_millis(1000));
+		assert_eq!(*(lockr!(resp_len)?), 20);
 
 		Ok(())
 	}
