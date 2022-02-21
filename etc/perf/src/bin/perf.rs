@@ -270,15 +270,21 @@ fn main() -> Result<(), Error> {
 		..Default::default()
 	})?;
 
-	let evh_config = EventHandlerConfig {
-		threads: 6,
-		..EventHandlerConfig::default()
-	};
-
-	let mut evh = EventHandler::new(evh_config.clone())?;
-
 	if is_server {
 		info!("Starting EventHandler!")?;
+
+		let threads = match args.is_present("threads") {
+			true => args.value_of("threads").unwrap().parse()?,
+			false => 1,
+		};
+
+		let evh_config = EventHandlerConfig {
+			threads,
+			..EventHandlerConfig::default()
+		};
+
+		let mut evh = EventHandler::new(evh_config.clone())?;
+
 		let (handles, _listeners) = get_handles(evh_config.threads, "127.0.0.1:8092")?;
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
