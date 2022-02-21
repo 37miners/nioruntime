@@ -1280,13 +1280,13 @@ where
 						(*write_status).is_pending = false;
 						if (*write_status).close_oncomplete {
 							to_remove.push(connection_id);
+						} else {
+							// add a read event so that only reads will trigger
+							ctx.input_events.push(Event {
+								handle: connection_info.get_handle(),
+								etype: EventType::Read,
+							});
 						}
-
-						// add a read event so that only reads will trigger
-						ctx.input_events.push(Event {
-							handle: connection_info.get_handle(),
-							etype: EventType::Read,
-						});
 						break; // we're done
 					}
 					let (wr, len) =
@@ -2977,16 +2977,18 @@ mod tests {
 		let on_read_counter_clone = on_read_counter.clone();
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |conn_data| {
-			info!("on close {}", conn_data.get_connection_id())?;
-			(*(lockw!(on_close_counter_clone)?)) += 1;
+		evh.set_on_close(move |_conn_data| {
+			{
+				(*(lockw!(on_close_counter_clone)?)) += 1;
+			}
 			Ok(())
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf| {
-			info!("on read {}", conn_data.get_connection_id())?;
-			(*(lockw!(on_read_counter_clone)?)) += 1;
+			{
+				(*(lockw!(on_read_counter_clone)?)) += 1;
+			}
 			if buf == &[1] {
 				info!("closing conn {}", conn_data.get_connection_id())?;
 				conn_data.close()?;
@@ -3007,10 +3009,16 @@ mod tests {
 		stream2.write(&[5, 6, 7, 8, 9])?;
 		stream3.write(&[5, 6, 7, 8, 9])?;
 
-		std::thread::sleep(std::time::Duration::from_millis(100));
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
 
-		assert_eq!(*(lockr!(on_close_counter)?), 1);
-		assert_eq!(*(lockr!(on_read_counter)?), 3);
+			if *(lockr!(on_read_counter)?) < 3 || *(lockr!(on_close_counter)?) < 1 {
+				continue;
+			}
+			assert_eq!(*(lockr!(on_close_counter)?), 1);
+			assert_eq!(*(lockr!(on_read_counter)?), 3);
+			break;
+		}
 
 		stream1.write(&[0])?;
 		stream2.write(&[5, 6, 7, 8, 9])?;
