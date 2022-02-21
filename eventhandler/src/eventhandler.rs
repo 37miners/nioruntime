@@ -530,7 +530,7 @@ where
 	) -> Result<(), Error> {
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(vec![]));
-		let mut ctx = Context::new(tid, guarded_data, self.config)?;
+		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
 		let mut connection_id_map = HashMap::new();
 		let mut connection_handle_map = HashMap::new();
 
@@ -2226,6 +2226,7 @@ impl Context {
 		tid: usize,
 		guarded_data: Arc<RwLock<GuardedData>>,
 		config: EventHandlerConfig,
+		cur_connections: Arc<RwLock<usize>>,
 	) -> Result<Self, Error> {
 		let mut buffer = vec![];
 		buffer.resize(config.read_buffer_size, 0u8);
@@ -2257,7 +2258,7 @@ impl Context {
 			tid,
 			buffer,
 			saturating_handles: HashSet::new(),
-			cur_connections: Arc::new(RwLock::new(0)),
+			cur_connections,
 		})
 	}
 }
@@ -2285,21 +2286,8 @@ mod tests {
 	use std::os::unix::io::AsRawFd;
 	use std::os::unix::prelude::FromRawFd;
 	use std::str::FromStr;
-	use std::sync::Once;
 
 	debug!();
-
-	static INIT: Once = Once::new();
-
-	pub fn initialize() {
-		INIT.call_once(|| {
-			log_config!(LogConfig {
-				show_bt: false,
-				..Default::default()
-			})
-			.expect("init logger");
-		});
-	}
 
 	fn get_fd() -> Result<RawFd, Error> {
 		let raw_fd = socket(
@@ -2436,8 +2424,6 @@ mod tests {
 
 	#[test]
 	fn test_client() -> Result<(), Error> {
-		initialize();
-
 		let port = 8100;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
@@ -2518,8 +2504,6 @@ mod tests {
 
 	#[test]
 	fn test_ssl() -> Result<(), Error> {
-		initialize();
-
 		let port = 8200;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
@@ -2629,8 +2613,6 @@ mod tests {
 
 	#[test]
 	fn test_big_msg() -> Result<(), Error> {
-		initialize();
-
 		let port = 8300;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
@@ -2741,8 +2723,6 @@ mod tests {
 
 	#[test]
 	fn test_stop() -> Result<(), Error> {
-		initialize();
-
 		let port = 8400;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
@@ -2855,11 +2835,8 @@ mod tests {
 		stream1.write(&[5, 6, 7, 8, 9])?;
 		stream2.write(&[5, 6, 7, 8, 9])?;
 		stream3.write(&[5, 6, 7, 8, 9])?;
-		stream1.write(&[5, 6, 7, 8, 9])?;
-		stream2.write(&[5, 6, 7, 8, 9])?;
-		stream3.write(&[5, 6, 7, 8, 9])?;
 		std::thread::sleep(std::time::Duration::from_millis(1000));
-		assert_eq!(*(lockr!(resp_len)?), 20);
+		assert_eq!(*(lockr!(resp_len)?), 10);
 
 		Ok(())
 	}
