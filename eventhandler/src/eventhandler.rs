@@ -299,6 +299,7 @@ pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic> {
 	guarded_data: Arc<Vec<Arc<RwLock<GuardedData>>>>,
 	wakeup: Vec<Wakeup>,
 	callbacks: Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+	stopped: Arc<RwLock<bool>>,
 }
 
 impl<OnRead, OnAccept, OnClose, OnPanic> EventHandler<OnRead, OnAccept, OnClose, OnPanic>
@@ -326,6 +327,7 @@ where
 			},
 			guarded_data,
 			wakeup,
+			stopped: Arc::new(RwLock::new(false)),
 		})
 	}
 
@@ -352,6 +354,19 @@ where
 	pub fn start(&self) -> Result<(), Error> {
 		self.check_callbacks()?;
 		self.do_start()
+	}
+
+	pub fn stop(&self) -> Result<(), Error> {
+		for i in 0..self.guarded_data.len() {
+			let guarded_data = &self.guarded_data[i];
+			{
+				let mut guarded_data = lockw!(*guarded_data)?;
+				(*guarded_data).stop = true;
+			}
+			self.wakeup[i].wakeup()?;
+		}
+
+		Ok(())
 	}
 
 	pub fn add_listener_handles(
@@ -473,8 +488,14 @@ where
 	}
 
 	fn do_start(&self) -> Result<(), Error> {
+		let stop_count = Arc::new(RwLock::new(0));
 		for i in 0..self.config.threads {
-			self.start_thread(self.guarded_data[i].clone(), self.wakeup[i].clone(), i)?;
+			self.start_thread(
+				self.guarded_data[i].clone(),
+				self.wakeup[i].clone(),
+				i,
+				stop_count.clone(),
+			)?;
 		}
 		Ok(())
 	}
@@ -484,6 +505,7 @@ where
 		guarded_data: Arc<RwLock<GuardedData>>,
 		wakeup: Wakeup,
 		tid: usize,
+		stop_count: Arc<RwLock<usize>>,
 	) -> Result<(), Error> {
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(vec![]));
@@ -505,6 +527,7 @@ where
 		let ctx = Arc::new(RwLock::new(ctx));
 		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
 		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
+		let stopped = self.stopped.clone();
 
 		std::thread::spawn(move || -> Result<(), Error> {
 			loop {
@@ -522,6 +545,8 @@ where
 					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
 					let callbacks = &mut *lockwp!(callbacks);
 
+					let mut stop = false;
+
 					// process any remaining events from a panic
 					let next = ctx.counter + 1;
 					match Self::thread_loop(
@@ -534,10 +559,16 @@ where
 						&mut connection_handle_map,
 						next,
 					) {
-						Ok(_) => {}
+						Ok(do_stop) => {
+							stop = do_stop;
+						}
 						Err(e) => {
 							fatal!("unexpected error in thread loop: {}", e)?;
 						}
+					}
+
+					if stop {
+						return Ok(());
 					}
 
 					loop {
@@ -551,21 +582,44 @@ where
 							&mut connection_handle_map,
 							0,
 						) {
-							Ok(_) => {}
+							Ok(do_stop) => {
+								stop = do_stop;
+								if do_stop {
+									break;
+								}
+							}
 							Err(e) => {
 								fatal!("unexpected error in thread loop: {}", e)?;
 								break;
 							}
 						}
 					}
+
+					if stop {
+						return Ok(());
+					}
+
 					Ok(())
 				});
 
-				match jh.join() {
-					Ok(_) => {}
+				let stop = match jh.join() {
+					Ok(_) => true,
 					Err(_e) => {
 						error!("thread panic!")?;
+						false
 					}
+				};
+
+				{
+					let mut stop_count = lockw!(stop_count)?;
+					*stop_count += 1;
+					if *stop_count == config.threads {
+						let mut stopped = lockw!(stopped)?;
+						*stopped = true;
+					}
+				}
+				if stop {
+					break;
 				}
 
 				let callbacks = lockwp!(callbacks_clone);
@@ -579,6 +633,7 @@ where
 					None => {}
 				}
 			}
+			Ok(())
 		});
 		Ok(())
 	}
@@ -592,9 +647,18 @@ where
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		start: usize,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
 		if start == 0 {
-			Self::process_new(ctx, config, connection_id_map, connection_handle_map)?;
+			let stop = Self::process_new(
+				ctx,
+				config,
+				connection_id_map,
+				connection_handle_map,
+				wakeup,
+			)?;
+			if stop {
+				return Ok(stop);
+			}
 			Self::get_events(ctx, events)?;
 			debug!("event count = {}", events.len())?;
 		}
@@ -677,7 +741,7 @@ where
 			}
 		}
 
-		Ok(())
+		Ok(false)
 	}
 
 	fn process_read_event(
@@ -1634,26 +1698,47 @@ where
 		_config: &EventHandlerConfig,
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-	) -> Result<(), Error> {
-		{
+		wakeup: &Wakeup,
+	) -> Result<bool, Error> {
+		let stop = {
 			let mut guarded_data = lockw!(ctx.guarded_data)?;
 			ctx.add_pending.append(&mut (*guarded_data).nhandles);
 			ctx.nwrites.append(&mut (*guarded_data).write_queue);
+			guarded_data.stop
+		};
+
+		if stop {
+			Self::process_stop(wakeup)?;
+		} else {
+			ctx.add_pending.append(&mut ctx.accepted_connections);
+
+			debug!(
+				"adding pending conns: {:?} on tid={}",
+				ctx.add_pending, ctx.tid
+			)?;
+
+			Self::process_pending(ctx, connection_id_map, connection_handle_map)?;
+			ctx.add_pending.clear();
+
+			Self::process_nwrites(ctx, connection_id_map, connection_handle_map)?;
+			ctx.nwrites.clear();
 		}
 
-		ctx.add_pending.append(&mut ctx.accepted_connections);
+		Ok(stop)
+	}
 
-		debug!(
-			"adding pending conns: {:?} on tid={}",
-			ctx.add_pending, ctx.tid
-		)?;
+	fn process_stop(wakeup: &Wakeup) -> Result<(), Error> {
+		#[cfg(unix)]
+		{
+			unsafe {
+				libc::close(wakeup.wakeup_handle_read);
+			}
 
-		Self::process_pending(ctx, connection_id_map, connection_handle_map)?;
-		ctx.add_pending.clear();
-
-		Self::process_nwrites(ctx, connection_id_map, connection_handle_map)?;
-		ctx.nwrites.clear();
-
+			unsafe {
+				libc::close(wakeup.wakeup_handle_write);
+			}
+		}
+		// TODO: close in windows.
 		Ok(())
 	}
 
@@ -2058,6 +2143,7 @@ impl Wakeup {
 struct GuardedData {
 	write_queue: Vec<u128>,
 	nhandles: Vec<EventConnectionInfo>,
+	stop: bool,
 }
 
 impl GuardedData {
@@ -2065,6 +2151,7 @@ impl GuardedData {
 		Self {
 			write_queue: vec![],
 			nhandles: vec![],
+			stop: false,
 		}
 	}
 }
@@ -2599,6 +2686,66 @@ mod tests {
 
 		assert_eq!(*(lockr!(server_on_read_count_clone)?), 1);
 		assert_eq!(*(lockr!(client_on_read_count_clone)?), 1);
+		Ok(())
+	}
+
+	#[test]
+	fn test_stop() -> Result<(), Error> {
+		initialize();
+
+		let port = 8400;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+		evh.set_on_read(move |_conn_data, _buf| Ok(()))?;
+		evh.start()?;
+
+		evh.stop()?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			{
+				let stopped = lockw!(evh.stopped)?;
+				if *stopped {
+					break;
+				}
+			}
+		}
+
+		{
+			let stopped = lockw!(evh.stopped)?;
+			assert!(*stopped);
+		}
+
 		Ok(())
 	}
 }
