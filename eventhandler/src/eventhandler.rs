@@ -19,7 +19,7 @@ use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::{lockw, lockwp};
+use nioruntime_util::{lockr, lockw, lockwp};
 use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
 	ServerConnection,
@@ -30,7 +30,7 @@ use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 // unix specific
 #[cfg(unix)]
@@ -558,6 +558,7 @@ where
 				let connection_handle_map = connection_handle_map.clone();
 				let callbacks = callbacks.clone();
 				let callbacks_clone = callbacks.clone();
+				let wakeup = wakeup.clone();
 
 				let jh = std::thread::spawn(move || -> Result<(), Error> {
 					let mut events: &mut Vec<Event> = &mut *lockwp!(events);
@@ -680,7 +681,12 @@ where
 			if stop {
 				return Ok(stop);
 			}
-			Self::get_events(ctx, events)?;
+
+			{
+				let (do_wakeup, _lock) = wakeup.pre_block()?;
+				Self::get_events(ctx, events, do_wakeup)?;
+			}
+			wakeup.post_block()?;
 			debug!("event count = {}", events.len())?;
 		}
 
@@ -1094,7 +1100,7 @@ where
 					(len, do_read_now)
 				}
 				None => {
-					let len = Self::do_read(connection_info.handle, &mut ctx.buffer)?;
+					let len = do_read(connection_info.handle, &mut ctx.buffer)?;
 					(len, true)
 				}
 			},
@@ -1115,7 +1121,7 @@ where
 		let pt_len;
 		let handle = connection_info.handle;
 
-		let len = Self::do_read(handle, &mut ctx.buffer)?;
+		let len = do_read(handle, &mut ctx.buffer)?;
 		let mut wbuf = vec![];
 		{
 			let mut tls_conn =
@@ -1159,7 +1165,7 @@ where
 		let pt_len;
 		let handle = connection_info.handle;
 
-		let len = Self::do_read(handle, &mut ctx.buffer)?;
+		let len = do_read(handle, &mut ctx.buffer)?;
 		let mut wbuf = vec![];
 		{
 			let mut tls_conn =
@@ -1236,27 +1242,6 @@ where
 		}
 
 		Ok(())
-	}
-
-	fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
-		#[cfg(unix)]
-		let len = {
-			let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
-			unsafe { read(handle, cbuf, buf.len()) }
-		};
-		#[cfg(target_os = "windows")]
-		let len = {
-			let cbuf: *mut i8 = buf as *mut _ as *mut i8;
-			set_errno(Errno(0));
-			let mut len =
-				unsafe { ws2_32::recv(handle.try_into()?, cbuf, buf.len().try_into()?, 0) };
-			if errno().0 == 10035 {
-				// would block
-				len = -2;
-			}
-			len
-		};
-		Ok(len.try_into().unwrap_or(-1))
 	}
 
 	fn process_write_event(
@@ -1369,7 +1354,11 @@ where
 	}
 
 	#[cfg(target_os = "windows")]
-	fn get_events(ctx: &mut Context, output_events: &mut Vec<Event>) -> Result<(), Error> {
+	fn get_events(
+		ctx: &mut Context,
+		output_events: &mut Vec<Event>,
+		wakeup: bool,
+	) -> Result<(), Error> {
 		let epollfd = ctx.selector as *mut c_void;
 		let filter_set = &mut ctx.filter_set;
 		for evt in &ctx.input_events {
@@ -1431,7 +1420,17 @@ where
 
 		let mut events: [epoll_event; MAX_EVENTS as usize] =
 			unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-		let results = unsafe { epoll_wait(epollfd, events.as_mut_ptr(), MAX_EVENTS, 30000000) };
+		let results = unsafe {
+			epoll_wait(
+				epollfd,
+				events.as_mut_ptr(),
+				MAX_EVENTS,
+				match ctx.saturating_handles.len() > 0 || wakeup {
+					true => 0,
+					false => 30000000,
+				},
+			)
+		};
 
 		if results > 0 {
 			for i in 0..results {
@@ -1480,7 +1479,7 @@ where
 	}
 
 	#[cfg(any(target_os = "linux"))]
-	fn get_events(ctx: &mut Context, events: &mut Vec<Event>) -> Result<(), Error> {
+	fn get_events(ctx: &mut Context, events: &mut Vec<Event>, wakeup: bool) -> Result<(), Error> {
 		debug!(
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
@@ -1540,7 +1539,7 @@ where
 		let results = epoll_wait(
 			epollfd,
 			&mut ctx.epoll_events,
-			match ctx.saturating_handles.len() > 0 {
+			match ctx.saturating_handles.len() > 0 || wakeup {
 				true => 0,
 				false => 30000000,
 			},
@@ -1582,7 +1581,7 @@ where
 		target_os = "openbsd",
 		target_os = "freebsd"
 	))]
-	fn get_events(ctx: &mut Context, events: &mut Vec<Event>) -> Result<(), Error> {
+	fn get_events(ctx: &mut Context, events: &mut Vec<Event>, wakeup: bool) -> Result<(), Error> {
 		debug!(
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
@@ -1641,7 +1640,7 @@ where
 				ret_kevs.as_mut_ptr(),
 				MAX_EVENTS,
 				&Self::duration_to_timespec(Duration::from_millis(
-					match ctx.saturating_handles.len() > 0 {
+					match ctx.saturating_handles.len() > 0 || wakeup {
 						true => 0,
 						false => 30000000,
 					},
@@ -1862,6 +1861,26 @@ enum WriteResult {
 	Ok,
 	Err,
 	Block,
+}
+
+fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
+	#[cfg(unix)]
+	let len = {
+		let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
+		unsafe { read(handle, cbuf, buf.len()) }
+	};
+	#[cfg(target_os = "windows")]
+	let len = {
+		let cbuf: *mut i8 = buf as *mut _ as *mut i8;
+		set_errno(Errno(0));
+		let mut len = unsafe { ws2_32::recv(handle.try_into()?, cbuf, buf.len().try_into()?, 0) };
+		if errno().0 == 10035 {
+			// would block
+			len = -2;
+		}
+		len
+	};
+	Ok(len.try_into().unwrap_or(-1))
 }
 
 fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
@@ -2115,10 +2134,12 @@ struct Event {
 	etype: EventType,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Wakeup {
 	wakeup_handle_read: Handle,
 	wakeup_handle_write: Handle,
+	needed: Arc<RwLock<bool>>,
+	requested: Arc<RwLock<bool>>,
 }
 
 impl Wakeup {
@@ -2127,11 +2148,50 @@ impl Wakeup {
 		Ok(Self {
 			wakeup_handle_read,
 			wakeup_handle_write,
+			needed: Arc::new(RwLock::new(false)),
+			requested: Arc::new(RwLock::new(false)),
 		})
 	}
 
 	fn wakeup(&self) -> Result<(), Error> {
-		write_bytes(self.wakeup_handle_write, &mut [0u8; 1])?;
+		{
+			let mut requested = lockw!(self.requested)?;
+			*requested = true;
+		}
+
+		let need_wakeup = {
+			let needed = lockr!(self.needed)?;
+			*needed
+		};
+
+		if need_wakeup {
+			write_bytes(self.wakeup_handle_write, &mut [0u8; 1])?;
+		}
+		Ok(())
+	}
+
+	fn pre_block(&self) -> Result<(bool, RwLockReadGuard<bool>), Error> {
+		let requested = { *lockr!(self.requested)? };
+
+		{
+			*(lockw!(self.needed)?) = true;
+		}
+		let lock_guard = lockr!(self.needed)?;
+
+		Ok((requested, lock_guard))
+	}
+
+	fn post_block(&self) -> Result<(), Error> {
+		{
+			let mut needed = lockw!(self.needed)?;
+			*needed = false;
+		}
+
+		{
+			let mut requested = lockw!(self.requested)?;
+			*requested = false;
+		}
+
 		Ok(())
 	}
 
@@ -2645,7 +2705,7 @@ mod tests {
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
 		evh.set_on_close(move |conn_data| {
-			error!("connection closed: {:?}", conn_data.get_connection_id())?;
+			warn!("connection closed: {:?}", conn_data.get_connection_id())?;
 			Ok(())
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
@@ -2837,6 +2897,44 @@ mod tests {
 		stream3.write(&[5, 6, 7, 8, 9])?;
 		std::thread::sleep(std::time::Duration::from_millis(1000));
 		assert_eq!(*(lockr!(resp_len)?), 10);
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_wakeup() -> Result<(), Error> {
+		let check = Arc::new(RwLock::new(false));
+		let check_clone = check.clone();
+
+		let wakeup = Wakeup::new()?;
+		let wakeup_clone = wakeup.clone();
+
+		std::thread::spawn(move || -> Result<(), Error> {
+			let wakeup = wakeup_clone;
+			{
+				let _lock = wakeup.pre_block();
+				let mut buf = [0u8; 1];
+				do_read(wakeup.wakeup_handle_read, &mut buf)?;
+			}
+			wakeup.post_block()?;
+
+			let mut check = lockw!(check_clone)?;
+			*check = true;
+
+			Ok(())
+		});
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
+		wakeup.wakeup()?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			let check = lockw!(check)?;
+			if *check {
+				break;
+			}
+		}
 
 		Ok(())
 	}
