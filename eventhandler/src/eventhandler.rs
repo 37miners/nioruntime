@@ -2938,4 +2938,89 @@ mod tests {
 
 		Ok(())
 	}
+
+	#[test]
+	fn test_close() -> Result<(), Error> {
+		let port = 8600;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		let on_close_counter = Arc::new(RwLock::new(0));
+		let on_read_counter = Arc::new(RwLock::new(0));
+		let on_close_counter_clone = on_close_counter.clone();
+		let on_read_counter_clone = on_read_counter.clone();
+
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |conn_data| {
+			info!("on close {}", conn_data.get_connection_id())?;
+			(*(lockw!(on_close_counter_clone)?)) += 1;
+			Ok(())
+		})?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		evh.set_on_read(move |conn_data, buf| {
+			info!("on read {}", conn_data.get_connection_id())?;
+			(*(lockw!(on_read_counter_clone)?)) += 1;
+			if buf == &[1] {
+				info!("closing conn {}", conn_data.get_connection_id())?;
+				conn_data.close()?;
+
+				// close a second time to ensure no double closes
+				conn_data.close()?;
+			}
+			Ok(())
+		})?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+
+		let mut stream1 = TcpStream::connect(addr.clone())?;
+		let mut stream2 = TcpStream::connect(addr.clone())?;
+		let mut stream3 = TcpStream::connect(addr)?;
+
+		stream1.write(&[1])?;
+		stream2.write(&[5, 6, 7, 8, 9])?;
+		stream3.write(&[5, 6, 7, 8, 9])?;
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
+		assert_eq!(*(lockr!(on_close_counter)?), 1);
+		assert_eq!(*(lockr!(on_read_counter)?), 3);
+
+		stream1.write(&[0])?;
+		stream2.write(&[5, 6, 7, 8, 9])?;
+		stream3.write(&[5, 6, 7, 8, 9])?;
+
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
+		assert_eq!(*(lockr!(on_close_counter)?), 1);
+		assert_eq!(*(lockr!(on_read_counter)?), 5);
+
+		Ok(())
+	}
 }
