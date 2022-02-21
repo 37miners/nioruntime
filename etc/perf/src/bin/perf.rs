@@ -24,19 +24,28 @@ use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_log::*;
 use nioruntime_util::lockw;
-use nix::sys::socket::InetAddr;
-use nix::sys::socket::SockAddr;
 use num_format::{Locale, ToFormattedString};
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::mem;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::FromRawFd;
-use std::os::unix::prelude::RawFd;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+
+// unix
+#[cfg(unix)]
+use nix::sys::socket::{InetAddr, SockAddr};
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::prelude::RawFd;
+
+// windows
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, FromRawSocket};
+#[cfg(windows)]
+use std::os::windows::prelude::RawSocket;
 
 debug!();
 
@@ -163,7 +172,13 @@ impl Histo {
 	}
 }
 
-fn get_fd() -> Result<RawFd, Error> {
+#[cfg(unix)]
+type Handle = RawFd;
+#[cfg(windows)]
+type Handle = u64;
+
+#[cfg(unix)]
+fn get_fd() -> Result<Handle, Error> {
 	let raw_fd = nix::sys::socket::socket(
 		nix::sys::socket::AddressFamily::Inet,
 		nix::sys::socket::SockType::Stream,
@@ -195,6 +210,46 @@ fn get_fd() -> Result<RawFd, Error> {
 	Ok(raw_fd)
 }
 
+#[cfg(windows)]
+fn get_fd() -> Result<u64, Error> {
+	Ok(0)
+}
+
+#[cfg(unix)]
+fn get_handles(count: usize, addr: &str) -> Result<(Vec<Handle>, Vec<TcpListener>), Error> {
+	let std_sa = SocketAddr::from_str(addr).unwrap();
+	let inet_addr = InetAddr::from_std(&std_sa);
+	let sock_addr = SockAddr::new_inet(inet_addr);
+
+	let mut handles = vec![];
+	let mut listeners = vec![];
+
+	for _ in 0..count {
+		let fd = get_fd()?;
+		nix::sys::socket::bind(fd, &sock_addr)?;
+		nix::sys::socket::listen(fd, 1000)?;
+
+		#[cfg(unix)]
+		let listener = unsafe { TcpListener::from_raw_fd(fd) };
+		#[cfg(windows)]
+		let listener = unsafe { TcpListener::from(OwnedSocket::from_raw_socket(RawSocket::from(fd))) };
+		listener.set_nonblocking(true)?;
+
+		#[cfg(unix)]
+		handles.push(listener.as_raw_fd());
+		#[cfg(windows)]
+		handles.push(listener.as_raw_socket());
+		listeners.push(listener);
+	}
+
+	Ok((handles, listeners))
+}
+
+#[cfg(windows)]
+fn get_handles(count: usize, addr: &str) -> Result<(Vec<Handle>, Vec<TcpListener>), Error> {
+	Ok((vec![], vec![]))
+}
+
 // include build information
 pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -224,23 +279,7 @@ fn main() -> Result<(), Error> {
 
 	if is_server {
 		info!("Starting EventHandler!")?;
-		let std_sa = SocketAddr::from_str("127.0.0.1:8092").unwrap();
-		let inet_addr = InetAddr::from_std(&std_sa);
-		let sock_addr = SockAddr::new_inet(inet_addr);
-
-		let mut handles = vec![];
-		let mut listeners = vec![];
-
-		for _ in 0..evh_config.threads {
-			let fd = get_fd()?;
-			nix::sys::socket::bind(fd, &sock_addr)?;
-			nix::sys::socket::listen(fd, 1000)?;
-
-			let listener = unsafe { TcpListener::from_raw_fd(fd) };
-			listener.set_nonblocking(true)?;
-			handles.push(listener.as_raw_fd());
-			listeners.push(listener);
-		}
+		let (handles, _listeners) = get_handles(evh_config.threads, "127.0.0.1:8092")?;
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
 		evh.set_on_close(move |conn_data| {

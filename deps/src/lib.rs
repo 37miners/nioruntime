@@ -21,6 +21,13 @@
 ))]
 pub use kqueue_sys;
 
+#[cfg(windows)]
+pub use wepoll_sys;
+#[cfg(windows)]
+pub use winapi;
+#[cfg(windows)]
+pub use ws2_32;
+
 pub use backtrace;
 pub use base64;
 pub use byteorder;

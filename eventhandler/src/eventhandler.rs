@@ -15,7 +15,7 @@
 //! An event handler library.
 
 use nioruntime_deps::errno::{errno, set_errno, Errno};
-use nioruntime_deps::libc::{self, accept, c_int, c_void, fcntl, pipe, read, write};
+use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
@@ -29,9 +29,14 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use std::os::unix::prelude::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+
+// unix specific
+#[cfg(unix)]
+use nioruntime_deps::libc::fcntl;
+#[cfg(unix)]
+use std::os::unix::prelude::RawFd;
 
 // mac/bsd variant specific deps
 #[cfg(any(
@@ -65,14 +70,34 @@ use nioruntime_deps::nix::sys::epoll::{
 	epoll_create1, epoll_ctl, epoll_wait, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp,
 };
 
+#[cfg(windows)]
+use nioruntime_deps::wepoll_sys::{
+	epoll_create, epoll_ctl, epoll_data_t, epoll_event, epoll_wait, EPOLLIN, EPOLLOUT, EPOLLRDHUP,
+	EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD,
+};
+#[cfg(windows)]
+use nioruntime_deps::{winapi, ws2_32};
+#[cfg(windows)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
+
 warn!();
 
 const MAX_EVENTS: i32 = 100;
-//const READ_BUFFER_SIZE: usize = 1024 * 10;
+#[cfg(target_os = "windows")]
+const WINSOCK_BUF_SIZE: winapi::c_int = 100_000_000;
 const TLS_CHUNKS: usize = 32768;
 
+#[cfg(unix)]
 type SelectorHandle = i32;
+#[cfg(target_os = "windows")]
+type SelectorHandle = u64;
+
+#[cfg(unix)]
 type Handle = RawFd;
+#[cfg(windows)]
+type Handle = u64;
 
 #[derive(Debug)]
 pub struct ConnectionData {
@@ -780,8 +805,13 @@ where
 								let mut write_status = lockw!(c.write_status)?;
 								(*write_status).is_closed = true;
 								(*write_status).write_buffer.clear();
+								#[cfg(unix)]
 								unsafe {
 									libc::close(handle);
+								}
+								#[cfg(windows)]
+								unsafe {
+									ws2_32::closesocket(handle);
 								}
 							}
 							match callbacks.on_close.as_ref() {
@@ -817,6 +847,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		tls_server_config: &Option<ServerConfig>,
 	) -> Result<bool, Error> {
+		#[cfg(unix)]
 		let handle = unsafe {
 			set_errno(Errno(0));
 			accept(
@@ -829,10 +860,48 @@ where
 					.unwrap_or(0),
 			)
 		};
+		#[cfg(windows)]
+		let handle = unsafe {
+			set_errno(Errno(0));
+			ws2_32::accept(
+				handle,
+				&mut winapi::ws2def::SOCKADDR {
+					..std::mem::zeroed()
+				},
+				&mut (std::mem::size_of::<winapi::ws2def::SOCKADDR>() as u32).try_into()?,
+			)
+		};
 
 		if handle > 0 {
 			info!("Accepted handle = {} on tid={}", handle, ctx.tid)?;
-			unsafe { fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK) };
+
+			#[cfg(unix)]
+			unsafe {
+				fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK)
+			};
+			#[cfg(windows)]
+			#[cfg(target_os = "windows")]
+			{
+				let fionbio = 0x8004667eu32;
+				let ioctl_res = unsafe { ws2_32::ioctlsocket(handle, fionbio as c_int, &mut 1) };
+
+				if ioctl_res != 0 {
+					error!("complete fion with error: {}", errno().to_string());
+				}
+				let sockoptres = unsafe {
+					ws2_32::setsockopt(
+						handle,
+						winapi::SOL_SOCKET,
+						winapi::SO_SNDBUF,
+						&WINSOCK_BUF_SIZE as *const _ as *const i8,
+						std::mem::size_of_val(&WINSOCK_BUF_SIZE) as winapi::c_int,
+					)
+				};
+
+				if sockoptres != 0 {
+					error!("setsockopt resulted in error: {}", errno().to_string());
+				}
+			}
 
 			let tls_server = match tls_server_config {
 				Some(tls_server_config) => {
@@ -1066,15 +1135,9 @@ where
 		#[cfg(target_os = "windows")]
 		let len = {
 			let cbuf: *mut i8 = buf as *mut _ as *mut i8;
-			errno::set_errno(Errno(0));
-			let mut len = unsafe {
-				ws2_32::recv(
-					handle.try_into().unwrap_or(0),
-					cbuf,
-					BUFFER_SIZE.try_into().unwrap_or(0),
-					0,
-				)
-			};
+			set_errno(Errno(0));
+			let mut len =
+				unsafe { ws2_32::recv(handle.try_into()?, cbuf, buf.len().try_into()?, 0) };
 			if errno().0 == 10035 {
 				// would block
 				len = -2;
@@ -1191,6 +1254,117 @@ where
 			}
 			Ok((WriteResult::Ok, len))
 		}
+	}
+
+	#[cfg(target_os = "windows")]
+	fn get_events(ctx: &mut Context, output_events: &mut Vec<Event>) -> Result<(), Error> {
+		let epollfd = ctx.selector as *mut c_void;
+		let filter_set = &mut ctx.filter_set;
+		for evt in &ctx.input_events {
+			if evt.etype == EventType::Read || evt.etype == EventType::Accept {
+				let handle = evt.handle;
+				let op = if filter_set.remove(&handle) {
+					EPOLL_CTL_MOD
+				} else {
+					EPOLL_CTL_ADD
+				};
+
+				filter_set.insert(handle);
+
+				let data = epoll_data_t {
+					fd: handle.try_into()?,
+				};
+
+				let mut event = epoll_event {
+					events: EPOLLIN | EPOLLRDHUP,
+					data,
+				};
+
+				let res =
+					unsafe { epoll_ctl(epollfd, op.try_into()?, handle as usize, &mut event) };
+
+				if res != 0 {
+					// socket already closed
+					warn!("socket {} already closed in get_events", handle);
+					filter_set.remove(&handle);
+				};
+			} else if evt.etype == EventType::Write {
+				let handle = evt.handle;
+				let op = if filter_set.remove(&handle) {
+					EPOLL_CTL_MOD
+				} else {
+					EPOLL_CTL_ADD
+				};
+				filter_set.insert(handle);
+
+				let data = epoll_data_t {
+					fd: handle.try_into()?,
+				};
+				let mut event = epoll_event {
+					events: EPOLLIN | EPOLLOUT | EPOLLRDHUP,
+					data,
+				};
+
+				let res =
+					unsafe { epoll_ctl(epollfd, op.try_into()?, handle.try_into()?, &mut event) };
+				if res != 0 {
+					filter_set.remove(&handle);
+					error!(
+						"epoll_ctl (write) resulted in an unexpected error: {}, fd={}, op={}, epoll_ctl_add={}",
+						errno().to_string(), handle, op, EPOLL_CTL_ADD,
+					);
+				}
+			}
+		}
+
+		let mut events: [epoll_event; MAX_EVENTS as usize] =
+			unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+		let results = unsafe { epoll_wait(epollfd, events.as_mut_ptr(), MAX_EVENTS, 30000000) };
+
+		if results > 0 {
+			for i in 0..results {
+				if !(events[i as usize].events & EPOLLOUT == 0) {
+					output_events.push(Event {
+						handle: unsafe { events[i as usize].data.fd } as Handle,
+						etype: EventType::Write,
+					});
+				}
+				if !(events[i as usize].events & EPOLLIN == 0) {
+					output_events.push(Event {
+						handle: unsafe { events[i as usize].data.fd } as Handle,
+						etype: EventType::Read,
+					});
+				}
+				if events[i as usize].events & (EPOLLIN | EPOLLOUT) == 0 {
+					let fd = unsafe { events[i as usize].data.fd };
+					let data = epoll_data_t {
+						fd: fd.try_into().unwrap_or(0),
+					};
+					let mut event = epoll_event {
+						events: 0, // not used for del
+						data,
+					};
+					let res = unsafe {
+						epoll_ctl(
+							epollfd,
+							EPOLL_CTL_DEL.try_into()?,
+							fd.try_into()?,
+							&mut event,
+						)
+					};
+
+					if res != 0 {
+						error!(
+							"Unexpected error with EPOLLHUP. res = {}, err={}",
+							res,
+							errno().to_string(),
+						);
+					}
+				}
+			}
+		}
+
+		Ok(())
 	}
 
 	#[cfg(any(target_os = "linux"))]
@@ -1566,7 +1740,7 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	};
 	#[cfg(target_os = "windows")]
 	let len = {
-		let cbuf: *mut i8 = buf as *mut _ as *mut i8;
+		let cbuf: *mut i8 = buf as *const _ as *mut i8;
 		unsafe {
 			ws2_32::send(
 				handle.try_into().unwrap_or(0),
@@ -1828,10 +2002,45 @@ impl Wakeup {
 		Ok(())
 	}
 
+	#[cfg(target_os = "windows")]
+	fn socket_pipe(fds: *mut i32) -> Result<(TcpListener, TcpStream), Error> {
+		let port = nioruntime_deps::portpicker::pick_unused_port().unwrap_or(9999);
+		let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
+		let stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+		let res = unsafe {
+			accept(
+				listener.as_raw_socket().try_into().unwrap_or(0),
+				&mut libc::sockaddr {
+					..std::mem::zeroed()
+				},
+				&mut (std::mem::size_of::<libc::sockaddr>() as u32)
+					.try_into()
+					.unwrap_or(0),
+			)
+		};
+		let fds: &mut [i32] = unsafe { std::slice::from_raw_parts_mut(fds, 2) };
+		fds[0] = res as i32;
+		fds[1] = stream.as_raw_socket().try_into().unwrap_or(0);
+
+		Ok((listener, stream))
+	}
+
 	fn build_pipe() -> Result<(Handle, Handle), Error> {
 		#[cfg(target_os = "windows")]
 		{
-			// TODO: support windows
+			let mut rethandles = [0u64; 2];
+			let handles: *mut c_int = &mut rethandles as *mut _ as *mut c_int;
+			let res = Self::socket_pipe(handles);
+			match res {
+				Ok((listener, stream)) => {
+					//self._pipe_listener[_i] = Some(listener);
+					//self._pipe_stream[_i] = Some(stream);
+				}
+				Err(e) => {
+					error!("Error creating socket_pipe on windows, {}", e.to_string());
+				}
+			}
+			Ok((rethandles[0].try_into()?, rethandles[1].try_into()?))
 		}
 		#[cfg(unix)]
 		{
@@ -1907,6 +2116,8 @@ impl Context {
 				target_os = "freebsd"
 			))]
 			selector: unsafe { kqueue() },
+			#[cfg(any(target_os = "windows"))]
+			selector: unsafe { epoll_create(1) } as u64,
 			tid,
 			buffer,
 			saturating_handles: HashSet::new(),
