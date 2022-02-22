@@ -12,6 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub struct TorServerConfig {}
+use crate::config::TorClientConfig;
+use crate::io::{Reader, Writer};
+use nioruntime_err::Error;
+use std::io::{Read, Write};
 
-pub struct TorClientConfig {}
+pub struct TorClient {}
+
+impl TorClient {
+	pub fn new(config: TorClientConfig) -> Self {
+		Self {}
+	}
+
+	pub fn start() -> Result<(), Error> {
+		Ok(())
+	}
+}

@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod client;
+mod common;
 mod config;
+mod directory;
 mod io;
-mod tor;
+mod server;
 
-pub use crate::config::TorConfig;
-pub use crate::tor::TorCircuit;
+pub use crate::client::TorClient;
+pub use crate::config::{TorClientConfig, TorServerConfig};
+pub use crate::server::TorServer;

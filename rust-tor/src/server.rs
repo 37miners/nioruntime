@@ -12,19 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::TorConfig;
+use crate::common::{IoState, TorCommon};
+use crate::config::TorServerConfig;
 use crate::io::{Reader, Writer};
 use nioruntime_err::Error;
 use std::io::{Read, Write};
 
-pub struct TorCircuit {}
+pub struct TorServer {}
 
-impl TorCircuit {
-	pub fn new(config: TorConfig) -> Self {
+impl TorServer {
+	pub fn new(config: TorServerConfig) -> Self {
 		Self {}
 	}
 
 	pub fn start() -> Result<(), Error> {
 		Ok(())
+	}
+}
+
+impl TorCommon for TorServer {
+	fn reader(&mut self) -> Reader {
+		todo!()
+	}
+
+	fn writer(&mut self) -> Writer {
+		todo!()
+	}
+
+	fn process_new_packets(&mut self) -> Result<IoState, Error> {
+		todo!()
+	}
+
+	fn read_tls(&mut self, rd: &mut dyn Read) -> Result<usize, Error> {
+		todo!()
+	}
+
+	fn write_tls(&mut self, wr: &mut dyn Write) -> Result<usize, Error> {
+		todo!()
 	}
 }

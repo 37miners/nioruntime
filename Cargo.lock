@@ -1270,7 +1270,6 @@ dependencies = [
 name = "rust-tor"
 version = "0.0.3-beta1"
 dependencies = [
- "nioruntime_deps",
  "nioruntime_err",
  "nioruntime_log",
 ]

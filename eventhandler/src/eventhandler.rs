@@ -835,7 +835,7 @@ where
 					let mut sat_count = 0;
 					loop {
 						set_errno(Errno(0));
-						len = Self::process_read(c.clone(), ctx, wakeup, callbacks)?;
+						len = Self::process_read(c.clone(), ctx, wakeup, callbacks, config)?;
 						info!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							ctx.saturating_handles.remove(&c.get_handle());
@@ -1089,6 +1089,7 @@ where
 		ctx: &mut Context,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		config: &EventHandlerConfig,
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
 		let (len, do_read_now) = match connection_info.tls_server {
@@ -1122,7 +1123,7 @@ where
 		};
 
 		if do_read_now {
-			Self::process_read_result(connection_info, len, wakeup, callbacks, ctx)?;
+			Self::process_read_result(connection_info, len, wakeup, callbacks, ctx, config)?;
 		}
 
 		Ok(len)
@@ -1145,9 +1146,12 @@ where
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
-					// TODO: is this safe? What is the maximum buffer size pt_len could be?
+
+					if pt_len > ctx.buffer.len() {
+						ctx.buffer.resize(pt_len, 0u8);
+					}
+
 					let buf = &mut ctx.buffer[0..pt_len];
-					//ctx.buffer.resize(pt_len, 0u8);
 					tls_conn.reader().read_exact(buf)?;
 				}
 				Err(e) => {
@@ -1190,8 +1194,10 @@ where
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
-					//ctx.buffer.resize(pt_len, 0u8);
-					// TODO: is this safe? What is the maximum buffer size pt_len could be?
+					if pt_len > ctx.buffer.len() {
+						ctx.buffer.resize(pt_len, 0u8);
+					}
+
 					let buf = &mut ctx.buffer[0..pt_len];
 					tls_conn.reader().read_exact(&mut buf[..pt_len])?;
 				}
@@ -1224,6 +1230,7 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		ctx: &mut Context,
+		config: &EventHandlerConfig,
 	) -> Result<(), Error> {
 		if len >= 0 {
 			debug!("read {:?}", &ctx.buffer[0..len.try_into()?])?;
@@ -1254,6 +1261,12 @@ where
 					error!("no on_read callback found!")?;
 				}
 			}
+		}
+
+		// now that read reasult has been processed, we resize the buffer if it was made
+		// bigger for tls
+		if ctx.buffer.len() > config.read_buffer_size {
+			ctx.buffer.resize(config.read_buffer_size, 0u8);
 		}
 
 		Ok(())
