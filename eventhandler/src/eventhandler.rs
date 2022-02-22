@@ -421,6 +421,7 @@ where
 			}
 			self.wakeup[i].wakeup()?;
 		}
+
 		Ok(())
 	}
 
@@ -471,6 +472,8 @@ where
 			let mut guarded_data = lockw!(guarded_data)?;
 			guarded_data.nhandles.push(connection_info.clone());
 		}
+
+		wakeup.wakeup()?;
 
 		Ok(ConnectionData::new(
 			connection_info.as_read_write_connection()?,
@@ -529,7 +532,7 @@ where
 		stop_count: Arc<RwLock<usize>>,
 	) -> Result<(), Error> {
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
-		let events = Arc::new(RwLock::new(vec![]));
+		let events = Arc::new(RwLock::new(HashSet::new()));
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
 		let mut connection_id_map = HashMap::new();
 		let mut connection_handle_map = HashMap::new();
@@ -561,7 +564,7 @@ where
 				let wakeup = wakeup.clone();
 
 				let jh = std::thread::spawn(move || -> Result<(), Error> {
-					let mut events: &mut Vec<Event> = &mut *lockwp!(events);
+					let mut events: &mut HashSet<Event> = &mut *lockwp!(events);
 					let mut ctx = &mut *lockwp!(ctx);
 					let mut connection_id_map = &mut *lockwp!(connection_id_map);
 					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
@@ -663,13 +666,15 @@ where
 	fn thread_loop(
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
-		events: &mut Vec<Event>,
+		events: &mut HashSet<Event>,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut HashMap<u128, Handle>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		start: usize,
 	) -> Result<bool, Error> {
+		// this is logic to deal with panics. If there was a panic, start will be > 0.
+		// and we don't need to get new events yet.
 		if start == 0 {
 			let stop = Self::process_new(
 				ctx,
@@ -681,16 +686,26 @@ where
 			if stop {
 				return Ok(stop);
 			}
-
 			{
 				let (do_wakeup, _lock) = wakeup.pre_block()?;
 				Self::get_events(ctx, events, do_wakeup)?;
 			}
 			wakeup.post_block()?;
+			ctx.input_events.clear();
+
 			debug!("event count = {}", events.len())?;
 		}
 
 		ctx.counter = start;
+
+		let events = {
+			let mut ret = vec![];
+			for event in events.iter() {
+				ret.push(event);
+			}
+			ret
+		};
+
 		loop {
 			if ctx.counter >= events.len() {
 				break;
@@ -1356,7 +1371,7 @@ where
 	#[cfg(target_os = "windows")]
 	fn get_events(
 		ctx: &mut Context,
-		output_events: &mut Vec<Event>,
+		output_events: &mut HashSet<Event>,
 		wakeup: bool,
 	) -> Result<(), Error> {
 		let epollfd = ctx.selector as *mut c_void;
@@ -1435,13 +1450,13 @@ where
 		if results > 0 {
 			for i in 0..results {
 				if !(events[i as usize].events & EPOLLOUT == 0) {
-					output_events.push(Event {
+					output_events.insert(Event {
 						handle: unsafe { events[i as usize].data.fd } as Handle,
 						etype: EventType::Write,
 					});
 				}
 				if !(events[i as usize].events & EPOLLIN == 0) {
-					output_events.push(Event {
+					output_events.insert(Event {
 						handle: unsafe { events[i as usize].data.fd } as Handle,
 						etype: EventType::Read,
 					});
@@ -1479,7 +1494,11 @@ where
 	}
 
 	#[cfg(any(target_os = "linux"))]
-	fn get_events(ctx: &mut Context, events: &mut Vec<Event>, wakeup: bool) -> Result<(), Error> {
+	fn get_events(
+		ctx: &mut Context,
+		events: &mut HashSet<Event>,
+		wakeup: bool,
+	) -> Result<(), Error> {
 		debug!(
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
@@ -1552,13 +1571,13 @@ where
 				if results > 0 {
 					for i in 0..results {
 						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLOUT).is_empty() {
-							events.push(Event {
+							events.insert(Event {
 								handle: ctx.epoll_events[i].data() as Handle,
 								etype: EventType::Write,
 							});
 						}
 						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLIN).is_empty() {
-							events.push(Event {
+							events.insert(Event {
 								handle: ctx.epoll_events[i].data() as Handle,
 								etype: EventType::Read,
 							});
@@ -1570,7 +1589,6 @@ where
 				error!("Error with epoll wait = {}", e.to_string())?;
 			}
 		}
-		ctx.input_events.clear();
 		Ok(())
 	}
 
@@ -1581,7 +1599,11 @@ where
 		target_os = "openbsd",
 		target_os = "freebsd"
 	))]
-	fn get_events(ctx: &mut Context, events: &mut Vec<Event>, wakeup: bool) -> Result<(), Error> {
+	fn get_events(
+		ctx: &mut Context,
+		events: &mut HashSet<Event>,
+		wakeup: bool,
+	) -> Result<(), Error> {
 		debug!(
 			"in get events with {} events. tid={}",
 			ctx.input_events.len(),
@@ -1651,7 +1673,7 @@ where
 		debug!("kqueue wakeup with ret_count = {}", ret_count)?;
 		events.clear();
 		for i in 0..ret_count as usize {
-			events.push(Event {
+			events.insert(Event {
 				handle: ret_kevs[i].ident.try_into()?,
 				etype: match ret_kevs[i].filter {
 					EventFilter::EVFILT_READ => EventType::Read,
@@ -1666,7 +1688,6 @@ where
 				},
 			});
 		}
-		ctx.input_events.clear();
 		Ok(())
 	}
 
@@ -2121,14 +2142,14 @@ impl EventConnectionInfo {
 	}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 enum EventType {
 	Accept,
 	Read,
 	Write,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, Eq, PartialEq)]
 struct Event {
 	handle: Handle,
 	etype: EventType,
@@ -2634,21 +2655,19 @@ mod tests {
 		})?;
 		evh.start()?;
 
-		// note ordering important. Must add the client handle before the server.
-		// seems to have to do with the handshake.
-		let conn_info = evh.add_handle(
-			handle,
-			Some(TLSClientConfig {
-				server_name: "localhost".to_string(),
-				trusted_cert_full_chain_file: Some("./src/resources/cert.pem".to_string()),
-			}),
-		)?;
-
 		evh.add_listener_handles(
 			handles,
 			Some(TLSServerConfig {
 				certificates_file: "./src/resources/cert.pem".to_string(),
 				private_key_file: "./src/resources/key.pem".to_string(),
+			}),
+		)?;
+
+		let conn_info = evh.add_handle(
+			handle,
+			Some(TLSClientConfig {
+				server_name: "localhost".to_string(),
+				trusted_cert_full_chain_file: Some("./src/resources/cert.pem".to_string()),
 			}),
 		)?;
 
