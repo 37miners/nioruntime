@@ -3050,4 +3050,184 @@ mod tests {
 
 		Ok(())
 	}
+
+	#[test]
+	fn test_panic() -> Result<(), Error> {
+		let port = 8700;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			threads: 1,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+
+		let fd = get_fd()?;
+		bind(fd, &sock_addr)?;
+		listen(fd, 10)?;
+
+		let listener = unsafe { TcpListener::from_raw_fd(fd) };
+		listener.set_nonblocking(true)?;
+		handles.push(listener.as_raw_fd());
+		listeners.push(listener);
+
+		evh.set_on_accept(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |_conn_data| Ok(()))?;
+
+		let on_panic_counter = Arc::new(RwLock::new(0));
+		let on_panic_counter_clone = on_panic_counter.clone();
+
+		evh.set_on_panic(move || {
+			let mut on_panic_counter = lockw!(on_panic_counter_clone)?;
+			*on_panic_counter += 1;
+			Ok(())
+		})?;
+
+		let counter = Arc::new(RwLock::new(0));
+		let complete_count = Arc::new(RwLock::new(0));
+		let complete_count_clone = complete_count.clone();
+		let panic_count = Arc::new(RwLock::new(0));
+		let panic_count_clone = panic_count.clone();
+		let in_wait_mode = Arc::new(RwLock::new(false));
+		let in_wait_mode_clone = in_wait_mode.clone();
+
+		let error_counter = Arc::new(RwLock::new(0));
+		let error_complete_count = Arc::new(RwLock::new(0));
+		let error_complete_count_clone = error_complete_count.clone();
+
+		evh.set_on_read(move |_conn_data, buf| {
+			match buf[0] {
+				// sleep to wait for other requests to queue up
+				0 => {
+					{
+						let mut in_wait_mode = lockw!(in_wait_mode_clone)?;
+						*in_wait_mode = true;
+					}
+					std::thread::sleep(std::time::Duration::from_millis(100));
+				}
+				// respond normally
+				1 | 2 | 3 => {
+					let mut counter = lockwp!(counter);
+					*counter += 1;
+					if *counter == 2 {
+						{
+							let mut panic_count = lockw!(panic_count_clone)?;
+							*panic_count += 1;
+						}
+						let a: Option<usize> = None;
+						a.unwrap();
+					} else {
+						let mut complete_count = lockw!(complete_count_clone)?;
+						*complete_count += 1;
+					}
+				}
+				4 | 5 | 6 => {
+					let mut error_counter = lockwp!(error_counter);
+					*error_counter += 1;
+					if *error_counter == 2 {
+						return Err(ErrorKind::ApplicationError("anything".to_string()).into());
+					} else {
+						let mut error_complete_count = lockw!(error_complete_count_clone)?;
+						*error_complete_count += 1;
+					}
+				}
+				_ => {}
+			}
+
+			Ok(())
+		})?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+
+		let mut stream1 = TcpStream::connect(addr.clone())?;
+		let mut stream2 = TcpStream::connect(addr.clone())?;
+		let mut stream3 = TcpStream::connect(addr.clone())?;
+		let mut stream4 = TcpStream::connect(addr)?;
+
+		stream1.write(&[0])?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if *(lockw!(in_wait_mode)?) {
+				break;
+			}
+		}
+		stream2.write(&[1])?;
+		stream3.write(&[2])?;
+		stream4.write(&[3])?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			{
+				let complete_count = lockw!(complete_count)?;
+				if *complete_count < 2 {
+					continue;
+				}
+				assert_eq!(*complete_count, 2);
+			}
+
+			{
+				let panic_count = lockw!(panic_count)?;
+				assert_eq!(*panic_count, 1);
+			}
+			break;
+		}
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			let on_panic_counter = lockr!(on_panic_counter)?;
+			if *on_panic_counter == 0 {
+				continue;
+			}
+
+			assert_eq!(*on_panic_counter, 1);
+			break;
+		}
+
+		{
+			(*(lockw!(in_wait_mode)?)) = false;
+		}
+
+		stream4.write(&[0])?;
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if *(lockw!(in_wait_mode)?) {
+				break;
+			}
+		}
+
+		stream1.write(&[4])?;
+		stream2.write(&[5])?;
+		stream3.write(&[6])?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			{
+				let error_complete_count = lockw!(error_complete_count)?;
+				if *error_complete_count < 2 {
+					continue;
+				}
+				assert_eq!(*error_complete_count, 2);
+			}
+
+			{
+				let panic_count = lockw!(panic_count)?;
+				assert_eq!(*panic_count, 1);
+			}
+			break;
+		}
+
+		Ok(())
+	}
 }
