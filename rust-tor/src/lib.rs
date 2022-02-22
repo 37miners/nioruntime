@@ -1,4 +1,4 @@
-// Copyright 2021 The BMW Developers
+// Copyright 2021 37 Miners, LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod eventhandler;
+mod config;
+mod io;
+mod tor;
 
-pub use crate::eventhandler::{
-	ConnectionData, EventHandler, EventHandlerConfig, TLSClientConfig, TLSServerConfig,
-};
+pub use crate::config::TorConfig;
+pub use crate::tor::TorCircuit;

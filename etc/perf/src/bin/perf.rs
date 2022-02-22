@@ -20,6 +20,7 @@ const SEPARATOR: &str =
 use clap::load_yaml;
 use clap::App;
 use colored::Colorize;
+use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_log::*;
@@ -261,6 +262,7 @@ fn main() -> Result<(), Error> {
 		.version(built_info::PKG_VERSION)
 		.get_matches();
 	let is_client = args.is_present("client");
+	let tls = args.is_present("tls");
 	let is_server = !is_client;
 
 	log_config!(LogConfig {
@@ -272,6 +274,29 @@ fn main() -> Result<(), Error> {
 
 	if is_server {
 		info!("Starting EventHandler!")?;
+
+		if tls && !args.is_present("tls_certificates_file") {
+			return Err(ErrorKind::ApplicationError(
+				"tls_certificates_file must be specified with tls enabled".to_string(),
+			)
+			.into());
+		}
+
+		if tls && !args.is_present("tls_private_key_file") {
+			return Err(ErrorKind::ApplicationError(
+				"tls_private_key_file must be specified with tls enabled".to_string(),
+			)
+			.into());
+		}
+
+		let tls_config = if tls {
+			Some(TLSServerConfig {
+				private_key_file: args.value_of("tls_private_key_file").unwrap().to_string(),
+				certificates_file: args.value_of("tls_certificates_file").unwrap().to_string(),
+			})
+		} else {
+			None
+		};
 
 		let threads = match args.is_present("threads") {
 			true => args.value_of("threads").unwrap().parse()?,
@@ -305,10 +330,12 @@ fn main() -> Result<(), Error> {
 			Ok(())
 		})?;
 		evh.start()?;
-		evh.add_listener_handles(handles, None)?;
+		evh.add_listener_handles(handles, tls_config)?;
 		std::thread::park();
 	}
 	if is_client {
+		let tls = args.is_present("tls");
+
 		let count = match args.is_present("count") {
 			true => args.value_of("count").unwrap().parse()?,
 			false => 1,
@@ -378,7 +405,7 @@ fn main() -> Result<(), Error> {
 				let histo = histo.clone();
 				let lat_sum_total_clone = lat_sum_total.clone();
 				jhs.push(std::thread::spawn(move || {
-					match run_thread(count, min, max, histo) {
+					match run_thread(count, min, max, histo, tls) {
 						Ok(lat_sum) => {
 							let mut lat_sum_total = lockw!(lat_sum_total_clone).unwrap();
 							*lat_sum_total += lat_sum;
@@ -473,7 +500,13 @@ fn main() -> Result<(), Error> {
 	Ok(())
 }
 
-fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Result<u128, Error> {
+fn run_thread(
+	count: usize,
+	min: usize,
+	max: usize,
+	histo: Option<Histo>,
+	tls: bool,
+) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	let cap = if max > min { max } else { min };
@@ -483,7 +516,24 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 		wbuf[i] = (i % 256) as u8;
 	}
 
-	let mut stream = TcpStream::connect("127.0.0.1:8092")?;
+	let (mut stream, mut tls_stream) = match tls {
+		true => {
+			let connector = TlsConnector::builder()
+				.danger_accept_invalid_hostnames(true)
+				.danger_accept_invalid_certs(true)
+				.build()
+				.unwrap();
+			(
+				None,
+				Some(
+					connector
+						.connect("example.com", TcpStream::connect("127.0.0.1:8092")?)
+						.unwrap(),
+				),
+			)
+		}
+		false => (Some(TcpStream::connect("127.0.0.1:8092")?), None),
+	};
 	let mut x = 0;
 	let mut lat_sum = 0;
 	loop {
@@ -493,10 +543,31 @@ fn run_thread(count: usize, min: usize, max: usize, histo: Option<Histo>) -> Res
 		let mut len_sum = 0;
 
 		let start_time = std::time::SystemTime::now();
-		stream.write(&wbuf[0..wlen])?;
+		let _len = match stream {
+			Some(ref mut stream) => stream.write(&wbuf[0..wlen])?,
+			None => match tls_stream {
+				Some(ref mut tls_stream) => tls_stream.write(&wbuf[0..wlen])?,
+				None => {
+					return Err(
+						ErrorKind::ApplicationError("no streams configured".to_string()).into(),
+					);
+				}
+			},
+		};
 
 		loop {
-			let len = stream.read(&mut rbuf[len_sum..])?;
+			let len = match stream {
+				Some(ref mut stream) => stream.read(&mut rbuf[len_sum..])?,
+				None => match tls_stream {
+					Some(ref mut tls_stream) => tls_stream.read(&mut rbuf[len_sum..])?,
+					None => {
+						return Err(ErrorKind::ApplicationError(
+							"no streams configured".to_string(),
+						)
+						.into());
+					}
+				},
+			};
 			len_sum += len;
 			trace!("len={},len_sum={}", len, len_sum)?;
 			if len_sum >= wlen {

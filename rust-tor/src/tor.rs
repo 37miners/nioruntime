@@ -1,4 +1,4 @@
-// Copyright 2021 The BMW Developers
+// Copyright 2021 37 Miners, LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod eventhandler;
+use crate::config::TorConfig;
+use crate::io::{Reader, Writer};
+use nioruntime_err::Error;
+use std::io::{Read, Write};
 
-pub use crate::eventhandler::{
-	ConnectionData, EventHandler, EventHandlerConfig, TLSClientConfig, TLSServerConfig,
-};
+pub struct TorCircuit {}
+
+impl TorCircuit {
+	pub fn new(config: TorConfig) -> Self {
+		Self {}
+	}
+
+	pub fn start() -> Result<(), Error> {
+		Ok(())
+	}
+}

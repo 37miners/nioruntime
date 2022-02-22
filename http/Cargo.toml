@@ -16,20 +16,21 @@ nioruntime_evh  = { path = "../eventhandler" }
 nioruntime_log  = { path = "../log"          }
 nioruntime_tor  = { path = "../tor"          }
 nioruntime_err  = { path = "../error"        }
-nioruntime_deps = { path = "../deps" }
+nioruntime_deps = { path = "../deps"         }
 
-grin_secp256k1zkp = { git = "https://github.com/bitcoinmw/rust-secp256k1-zkp", features = ["bullet-proof-sizing"] }
 
-ed25519-dalek = "1.0.1"
-rand = "0.6.0"
-chrono = "0.4.7"
-dirs = "3.0.2"
-fsutils = "0.1.0"
-bytefmt = "0.1.7"
-num-format = "0.4.0"
-lazy_static = "1.4.0"
-itoa = "0.4.8"
-backtrace = "0.3.63"
-sha-1 = "0.10.0"
-base64 = "0.13.0"
-byteorder = "1.4.2"
+
+#grin_secp256k1zkp = { git = "https://github.com/bitcoinmw/rust-secp256k1-zkp", features = ["bullet-proof-sizing"] }
+#ed25519-dalek = "1.0.1"
+#rand = "0.6.0"
+#chrono = "0.4.7"
+#dirs = "3.0.2"
+#fsutils = "0.1.0"
+#bytefmt = "0.1.7"
+#num-format = "0.4.0"
+#lazy_static = "1.4.0"
+#itoa = "0.4.8"
+#backtrace = "0.3.63"
+#sha-1 = "0.10.0"
+#base64 = "0.13.0"
+#byteorder = "1.4.2"
