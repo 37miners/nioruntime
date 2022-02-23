@@ -15,7 +15,7 @@
 mod client;
 mod common;
 mod config;
-mod directory;
+pub mod directory;
 mod io;
 mod server;
 

@@ -14,7 +14,7 @@
 
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 
 debug!();
@@ -74,24 +74,23 @@ impl TorDirectory {
 			}
 		};
 
-		debug!("Returned guards:");
+		debug!("Returned guards:")?;
 		let mut count = 0;
 		for guard in &self.guards {
-			debug!("guard[{}]={:?}", count, guard);
+			debug!("guard[{}]={:?}", count, guard)?;
 			count += 1;
 		}
 
-		debug!("Returned relays:");
+		debug!("Returned relays:")?;
 		let mut count = 0;
 		for relay in &self.relays {
-			debug!("relay[{}]={:?}", count, relay);
+			debug!("relay[{}]={:?}", count, relay)?;
 			count += 1;
 		}
 
 		Ok(())
 	}
 
-	// Load from the server
 	fn load_from_server(
 		&self,
 		directory_server: &String,
@@ -127,9 +126,11 @@ impl TorDirectory {
 	}
 }
 
+#[cfg(test)]
 mod test {
-	use crate::directory::*;
+	use crate::directory::TorDirectory;
 	use nioruntime_err::Error;
+	use std::io::{Read, Write};
 	use std::net::TcpListener;
 
 	#[test]
@@ -141,7 +142,7 @@ mod test {
 			for stream in listener.incoming() {
 				let mut stream = stream.unwrap();
 				let buf = &mut [0u8; 100];
-				let len = stream.read(&mut buf[..]).unwrap();
+				stream.read(&mut buf[..]).unwrap();
 				stream.write(
 b"r plithismos GRdTUVgUe1VLSfpLIkV1HB7yHS4 uf5xsxMQy/gJxTNnCtlBtnXOzCg 2022-02-22 14:02:49 45.61.184.239 9001 9030\r\n\
 s Fast Guard Running Stable V2Dir Valid\r\n\

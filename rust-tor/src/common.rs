@@ -23,7 +23,7 @@ pub struct IoState {
 }
 
 impl IoState {
-	fn new(
+	pub fn new(
 		tls_bytes_to_write: usize,
 		plaintext_bytes_to_read: usize,
 		peer_has_closed: bool,

@@ -21,7 +21,7 @@ use std::io::{Read, Write};
 pub struct TorServer {}
 
 impl TorServer {
-	pub fn new(config: TorServerConfig) -> Self {
+	pub fn new(_config: TorServerConfig) -> Self {
 		Self {}
 	}
 
@@ -43,11 +43,11 @@ impl TorCommon for TorServer {
 		todo!()
 	}
 
-	fn read_tls(&mut self, rd: &mut dyn Read) -> Result<usize, Error> {
+	fn read_tls(&mut self, _rd: &mut dyn Read) -> Result<usize, Error> {
 		todo!()
 	}
 
-	fn write_tls(&mut self, wr: &mut dyn Write) -> Result<usize, Error> {
+	fn write_tls(&mut self, _wr: &mut dyn Write) -> Result<usize, Error> {
 		todo!()
 	}
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::common::{IoState, TorCommon};
 use crate::config::TorClientConfig;
 use crate::io::{Reader, Writer};
 use nioruntime_err::Error;
@@ -20,11 +21,37 @@ use std::io::{Read, Write};
 pub struct TorClient {}
 
 impl TorClient {
-	pub fn new(config: TorClientConfig) -> Self {
+	pub fn new(_config: TorClientConfig) -> Self {
 		Self {}
 	}
 
 	pub fn start() -> Result<(), Error> {
 		Ok(())
+	}
+}
+
+impl TorCommon for TorClient {
+	fn reader(&mut self) -> Reader {
+		todo!()
+	}
+
+	fn writer(&mut self) -> Writer {
+		todo!()
+	}
+
+	fn process_new_packets(&mut self) -> Result<IoState, Error> {
+		let ret = IoState::new(1, 1, true);
+		ret.peer_has_closed();
+		ret.plaintext_bytes_to_read();
+		ret.tls_bytes_to_write();
+		todo!()
+	}
+
+	fn read_tls(&mut self, _rd: &mut dyn Read) -> Result<usize, Error> {
+		todo!()
+	}
+
+	fn write_tls(&mut self, _wr: &mut dyn Write) -> Result<usize, Error> {
+		todo!()
 	}
 }
