@@ -55,13 +55,10 @@ impl TorDirectory {
 		let res = loop {
 			match self.load_from_server(&self.directory_servers[i]) {
 				Ok(info) => break info,
-				Err(e) => {
-					// warn and try next
-					warn!(
-						"Error connecting to directory server [{}]: {}",
-						self.directory_servers[i], e
-					)?;
-				}
+				Err(e) => warn!(
+					"Error connecting to directory server [{}]: {}",
+					self.directory_servers[i], e
+				)?,
 			}
 
 			i += 1;
@@ -103,23 +100,31 @@ impl TorDirectory {
 		stream.write(b"GET /tor/status-vote/current/consensus/ HTTP/1.0\r\n\r\n")?;
 		let mut reader = BufReader::new(stream);
 		let mut next_host: Option<TorHost> = None;
+
 		loop {
 			let mut line = String::new();
 			let count = reader.read_line(&mut line)?;
 			if count == 0 {
 				break;
 			}
-
 			if &line[..2] == "r " {
 				let split: Vec<&str> = line.split(" ").collect();
 				let addr = format!("{}:{}", split[6], split[7]);
 				next_host = Some(TorHost { addr });
 			}
 			if &line[..2] == "s " {
-				let last_host = next_host.clone().unwrap();
-				match line.find(" Guard") {
-					Some(_) => guards.push(last_host),
-					None => relays.push(last_host),
+				match next_host.clone() {
+					Some(last_host) => match line.find(" Guard") {
+						Some(_) => guards.push(last_host),
+						None => relays.push(last_host),
+					},
+					None => {
+						return Err(ErrorKind::ApplicationError(
+							"Invalid format for directory data. 'r' must be followed by 's'."
+								.to_string(),
+						)
+						.into())
+					}
 				}
 			}
 		}
@@ -132,13 +137,17 @@ impl TorDirectory {
 mod test {
 	use crate::directory::TorDirectory;
 	use nioruntime_err::Error;
+	use nioruntime_log::*;
 	use std::io::{Read, Write};
 	use std::net::TcpListener;
+
+	debug!();
 
 	#[test]
 	fn test_directory_load() -> Result<(), Error> {
 		let listener = TcpListener::bind("127.0.0.1:8093")?;
 
+		info!("starting new thread to process requests")?;
 		// make a mock directory server that returns two entries.
 		std::thread::spawn(move || {
 			for stream in listener.incoming() {
@@ -148,24 +157,78 @@ mod test {
 				stream.write(
 b"r plithismos GRdTUVgUe1VLSfpLIkV1HB7yHS4 uf5xsxMQy/gJxTNnCtlBtnXOzCg 2022-02-22 14:02:49 45.61.184.239 9001 9030\r\n\
 s Fast Guard Running Stable V2Dir Valid\r\n\
-r emandeman44678gudno GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 82.220.109.130 9001 0
-s Fast HSDir Running Stable V2Dir Valid").unwrap();
+r emandeman44678gudno GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 82.220.109.130 9001 0\r\n\
+s Fast HSDir Running Stable V2Dir Valid\r\n\
+r emandeman44678gudno2 GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 83.220.109.130 9002 0\r\n\
+p something\r\n\
+s Fast HSDir V2Dir Valid\r\n\
+").unwrap();
 			}
 		});
 
-		let directories = vec!["127.0.0.1:8093".to_string()];
+		let directories = vec![
+			"127.0.0.1:8094".to_string(), // test failing
+			"127.0.0.1:8093".to_string(),
+		];
 
 		let mut tor_dir = TorDirectory::new(directories);
 
 		tor_dir.load()?;
 
 		let relays = tor_dir.relays();
-		assert_eq!(relays.len(), 1);
+		assert_eq!(relays.len(), 2);
 		let guards = tor_dir.guards();
 		assert_eq!(guards.len(), 1);
 
 		assert_eq!(relays[0].addr, "82.220.109.130:9001");
+		assert_eq!(relays[1].addr, "83.220.109.130:9002");
 		assert_eq!(guards[0].addr, "45.61.184.239:9001");
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_all_dirs_fail() -> Result<(), Error> {
+		let directories = vec![
+			"127.0.0.1:8094".to_string(), // test failing
+			"127.0.0.1:8095".to_string(),
+		];
+
+		let mut tor_dir = TorDirectory::new(directories);
+		assert!(tor_dir.load().is_err());
+		Ok(())
+	}
+
+	#[test]
+	fn test_invalid_file() -> Result<(), Error> {
+		let listener = TcpListener::bind("127.0.0.1:8099")?;
+
+		info!("starting new thread to process requests")?;
+		// make a mock directory server that returns two entries.
+		std::thread::spawn(move || {
+			for stream in listener.incoming() {
+				let mut stream = stream.unwrap();
+				let buf = &mut [0u8; 100];
+				stream.read(&mut buf[..]).unwrap();
+				stream.write(
+b"x plithismos GRdTUVgUe1VLSfpLIkV1HB7yHS4 uf5xsxMQy/gJxTNnCtlBtnXOzCg 2022-02-22 14:02:49 45.61.184.239 9001 9030\r\n\
+s Fast Guard Running Stable V2Dir Valid\r\n\
+r emandeman44678gudno GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 82.220.109.130 9001 0\r\n\
+s Fast HSDir Running Stable V2Dir Valid\r\n\
+r emandeman44678gudno2 GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 83.220.109.130 9002 0\r\n\
+s Fast HSDir V2Dir Valid\r\n\
+").unwrap();
+			}
+		});
+
+		let directories = vec![
+			"127.0.0.1:8094".to_string(), // test failing
+			"127.0.0.1:8099".to_string(),
+		];
+
+		let mut tor_dir = TorDirectory::new(directories);
+
+		assert!(tor_dir.load().is_err());
 
 		Ok(())
 	}
