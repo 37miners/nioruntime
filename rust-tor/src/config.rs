@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub struct TorServerConfig {}
+pub struct TorServerConfig {
+	_secret_bytes: [u8; 32],
+}
 
 pub struct TorClientConfig {}

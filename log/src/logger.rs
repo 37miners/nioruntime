@@ -259,10 +259,10 @@ impl LogImpl {
 							Some(lineno) => lineno.to_string(),
 							None => "".to_string(),
 						};
-						if filename.find("nioruntime/log/src/logger.rs").is_some() {
+						if filename.find("/log/src/logger.rs").is_some() {
 							found_logger = true;
 						}
-						if filename.find("nioruntime/log/src/logger.rs").is_none() && found_logger {
+						if filename.find("/log/src/logger.rs").is_none() && found_logger {
 							logged_from_file = format!("{}:{}", filename, lineno);
 							found_frame = true;
 						}

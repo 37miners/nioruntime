@@ -13,3 +13,4 @@ edition = "2018"
 
 nioruntime_log  = { path = "../log"   }
 nioruntime_err  = { path = "../error" }
+nioruntime_deps = { path = "../deps"  }
