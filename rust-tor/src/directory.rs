@@ -52,7 +52,7 @@ impl TorDirectory {
 	// load the guard/relay nodes from the tor directory servers. Try in order specified in [`TorDirectory::new`].
 	pub fn load(&mut self) -> Result<(), Error> {
 		let mut i = 0;
-		(self.guards, self.relays) = loop {
+		let res = loop {
 			match self.load_from_server(&self.directory_servers[i]) {
 				Ok(info) => break info,
 				Err(e) => {
@@ -73,6 +73,8 @@ impl TorDirectory {
 				.into());
 			}
 		};
+		self.guards = res.0;
+		self.relays = res.1;
 
 		debug!("Returned guards:")?;
 		let mut count = 0;
