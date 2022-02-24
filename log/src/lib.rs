@@ -19,12 +19,23 @@
 //! with the [log](https://docs.rs/log/latest/log/) crate. So any code
 //! that was written to work with that crate will work with this crate.
 //! In addition to the [`trace`], [`debug`], [`info`], [`warn`], [`error`]
-//! and [`fatal`] log levels, this crate provides an all version and no_ts
+//! and [`fatal`] log levels, this crate provides an 'all' version and 'no_ts'
 //! version of each macro. For example: [`info_all`] and [`info_no_ts`].
 //! These macros allow for logging to standard out, no matter how the log is
 //! configured and log without the timestamp respectively. The main difference
 //! is that this crate returns errors so you will have to add the error handling
 //! which can be as simple as using the question mark operator.
+//!
+//! The output will look something like this:
+//!
+//! ```
+//! [2022-02-24 13:52:24]: (FATAL) [..ioruntime/src/main.rs:116]: fatal
+//! [2022-02-24 13:52:24]: (ERROR) [..ioruntime/src/main.rs:120]: error
+//! [2022-02-24 13:52:24]: (WARN) [..ioruntime/src/main.rs:124]: warn
+//! [2022-02-24 13:52:24]: (INFO) [..ioruntime/src/main.rs:128]: info
+//! [2022-02-24 13:52:24]: (DEBUG) [..ioruntime/src/main.rs:132]: debug
+//! [2022-02-24 13:52:24]: (TRACE) [..ioruntime/src/main.rs:136]: trace
+//! ```
 //!
 //! # Examples
 //!
@@ -39,7 +50,7 @@
 //!
 //! fn test() -> Result<(), Error> {
 //!     // if the log_config! macro is not called, a default logger will be used.
-//!     log_config!(nioruntime_log::LogConfig {
+//!     log_config!(LogConfig {
 //!         file_path: Some("/path/to/mylog.log".to_string()),
 //!         max_age_millis: 300_0000, // set log rotations to every 300 seconds (5 minutes)
 //!         max_size: 100_000, // set log rotations to every 100,000 bytes
@@ -53,7 +64,37 @@
 //! ```
 //!
 //! ```
-//! //
+//! // This example shows a log rotation
+//! use nioruntime_log::*;
+//! use nioruntime_err::Error;
+//! info!();
+//!
+//! fn test() -> Result<(), Error> {
+//!     log_config!(LogConfig {
+//!         file_path: Some("/path/to/mylog.log".to_string()),
+//!         auto_rotate: false, // set to false to show manual rotation
+//!         max_size: 10, // set to a very low number to demonstrate
+//!         ..Default::default() // use defaults for the rest of the options
+//!     });
+//!
+//!     info!("0")?;
+//!
+//!     // log less than the max size
+//!     let status = rotation_status!()?;
+//!     assert_eq!(status, RotationStatus::NotNeeded); // not needed yet
+//!
+//!     // log enough to push us over the limit
+//!     info!("0123456789")?;
+//!     let status = rotation_status!()?;
+//!     assert_eq!(status, RotationStatus::Needed); // rotation is needed
+//!
+//!     rotate!(); // do a manual rotation
+//!     let status = rotation_status!()?;
+//!     assert_eq!(status, RotationStatus::NotNeeded); // now rotation is not needed
+//!     
+//!     Ok(())
+//! }
+//!
 //! ```
 //! # Using in Cargo.toml
 //! To use the crate in a project add the following two line to Cargo.toml:

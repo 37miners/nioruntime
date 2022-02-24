@@ -280,7 +280,7 @@ impl LogImpl {
 				let start = len - self.config.max_file_name_len;
 				logged_from_file = format!("..{}", &logged_from_file[start..]);
 			}
-			self.cur_size += logged_from_file.len().try_into().unwrap_or(0) + 2;
+			self.cur_size += logged_from_file.len().try_into().unwrap_or(0) + 4;
 			logged_from_file
 		} else {
 			"".to_string()
@@ -376,7 +376,6 @@ impl LogImpl {
 				let bt = Backtrace::new();
 				let bt_text = format!("{:?}", bt);
 				print!("{}", bt_text);
-				self.cur_size += bt_text.len() as u64;
 			}
 		}
 
@@ -1101,6 +1100,49 @@ mod tests {
 			config: LogConfig::default(),
 			has_rotated: false,
 		};
+
+		let mut log = Log::new();
+		let config = LogConfig {
+			file_path: Some(".test_log.nio/test14.log".to_string()),
+			..Default::default()
+		};
+		log.init(config)?;
+		log.update_show_line_num(false)?;
+		log.update_show_log_level(false)?;
+		log.update_show_timestamp(false)?;
+
+		log.log(INFO, "0123456789")?;
+		assert_eq!(
+			log.log_impl.as_ref().unwrap().cur_size,
+			std::fs::metadata(".test_log.nio/test14.log")?.len()
+		);
+
+		log.update_show_line_num(true)?;
+		log.log(INFO, "0123456789")?;
+		assert_eq!(
+			log.log_impl.as_ref().unwrap().cur_size,
+			std::fs::metadata(".test_log.nio/test14.log")?.len()
+		);
+
+		log.update_show_timestamp(true)?;
+		log.log(INFO, "0123456789")?;
+		assert_eq!(
+			log.log_impl.as_ref().unwrap().cur_size,
+			std::fs::metadata(".test_log.nio/test14.log")?.len()
+		);
+
+		log.update_show_log_level(true)?;
+		log.log(INFO, "0123456789")?;
+		assert_eq!(
+			log.log_impl.as_ref().unwrap().cur_size,
+			std::fs::metadata(".test_log.nio/test14.log")?.len()
+		);
+
+		log.log(FATAL, "0123456789")?;
+		assert_eq!(
+			log.log_impl.as_ref().unwrap().cur_size,
+			std::fs::metadata(".test_log.nio/test14.log")?.len()
+		);
 
 		tear_down_test_dir()?;
 		Ok(())
