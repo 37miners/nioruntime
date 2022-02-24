@@ -33,6 +33,7 @@ pub use base64;
 pub use byteorder;
 pub use bytes;
 pub use chrono;
+pub use colored;
 pub use ed25519_dalek;
 pub use errno;
 pub use failure;

@@ -18,6 +18,7 @@
 
 use crate::backtrace::Backtrace;
 use crate::chrono::{DateTime, Local, Utc};
+use crate::colored::*;
 use crate::nioruntime_err::{Error, ErrorKind};
 use crate::rand::random;
 use std::convert::TryInto;
@@ -119,6 +120,8 @@ pub struct LogConfig {
 	pub max_file_name_len: usize,
 	/// Show the backtrace when log level is set to ERROR or FATAL. The default value is true.
 	pub show_bt: bool,
+	/// Use color coded logging. The default value is true.
+	pub colors: bool,
 }
 
 /// Return a default logging object.
@@ -137,6 +140,7 @@ impl Default for LogConfig {
 			auto_rotate: true,
 			show_bt: true,
 			max_file_name_len: 25,
+			colors: true,
 		}
 	}
 }
@@ -276,11 +280,11 @@ impl LogImpl {
 				let start = len - self.config.max_file_name_len;
 				logged_from_file = format!("..{}", &logged_from_file[start..]);
 			}
-			format!("[{}]: ", logged_from_file)
+			self.cur_size += logged_from_file.len().try_into().unwrap_or(0) + 2;
+			logged_from_file
 		} else {
 			"".to_string()
 		};
-		self.cur_size += line_num_text.len().try_into().unwrap_or(0);
 
 		// if we're showing the timestamp, print it
 		if self.config.show_timestamp {
@@ -293,7 +297,11 @@ impl LogImpl {
 					.write(format!("[{}]: ", formatted_ts).as_bytes())?;
 			}
 			if self.config.show_stdout {
-				print!("[{}]: ", formatted_ts);
+				if self.config.colors {
+					print!("[{}]: ", formatted_ts.to_string().dimmed());
+				} else {
+					print!("[{}]: ", formatted_ts);
+				}
 			}
 		}
 
@@ -307,19 +315,43 @@ impl LogImpl {
 				)?;
 			}
 			if self.config.show_stdout {
-				print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)]);
+				if self.config.colors {
+					match level {
+						TRACE | DEBUG => {
+							print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)])
+						}
+						INFO => print!(
+							"({}) ",
+							DISPLAY_ARRAY[level.try_into().unwrap_or(0)].green()
+						),
+						WARN => print!(
+							"({}) ",
+							DISPLAY_ARRAY[level.try_into().unwrap_or(0)].yellow()
+						),
+						ERROR | FATAL => {
+							print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)].red())
+						}
+						_ => {}
+					}
+				} else {
+					print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)]);
+				}
 			}
 		}
 
 		if line_num_text.len() > 0 {
 			match &mut self.file {
 				Some(file) => {
-					file.write(line_num_text.as_bytes())?;
+					file.write(format!("[{}]: ", line_num_text).as_bytes())?;
 				}
 				None => {}
 			}
 			if self.config.show_stdout {
-				print!("{}", line_num_text);
+				if self.config.colors {
+					print!("[{}]: ", line_num_text.yellow());
+				} else {
+					print!("[{}]: ", line_num_text);
+				}
 			}
 		}
 
@@ -1015,6 +1047,7 @@ mod tests {
 			show_line_num: true,
 			auto_rotate: true,
 			max_file_name_len: 25,
+			colors: false,
 			show_bt: true,
 		};
 		let mut log = Log::new();

@@ -29,6 +29,7 @@
 //! # Examples
 //!
 //! ```
+//! // This is a basic example showing configuration and a single logged line.
 //! use nioruntime_log::*;
 //! use nioruntime_err::Error;
 //!
@@ -42,7 +43,6 @@
 //!         file_path: Some("/path/to/mylog.log".to_string()),
 //!         max_age_millis: 300_0000, // set log rotations to every 300 seconds (5 minutes)
 //!         max_size: 100_000, // set log rotations to every 100,000 bytes
-//!         auto_rotate: false, // do not auto rotate for this logger
 //!         ..Default::default() // use defaults for the rest of the options
 //!     });
 //!
@@ -50,6 +50,10 @@
 //!     info!("This will be logged. Value: {}", value)?;
 //!     Ok(())
 //! }
+//! ```
+//!
+//! ```
+//! //
 //! ```
 //! # Using in Cargo.toml
 //! To use the crate in a project add the following two line to Cargo.toml:
@@ -66,6 +70,7 @@
 
 use nioruntime_deps::backtrace;
 use nioruntime_deps::chrono;
+use nioruntime_deps::colored;
 use nioruntime_deps::lazy_static;
 use nioruntime_deps::rand;
 
