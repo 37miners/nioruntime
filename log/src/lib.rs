@@ -52,10 +52,15 @@
 //! }
 //! ```
 //! # Using in Cargo.toml
-//! To use the crate in a project add the following two lines to Cargo.toml:
+//! To use the crate in a project add the following two line to Cargo.toml:
 //! ```toml
 //! [dependencies]
 //! nioruntime_log = { git = "https://github.com/37miners/nioruntime" }
+//! ```
+//!
+//! Optionally you may want to add the nioruntime_err crate to the project:
+//! ```toml
+//! [dependencies]
 //! nioruntime_err = { git = "https://github.com/37miners/nioruntime" }
 //! ```
 
@@ -63,7 +68,6 @@ use nioruntime_deps::backtrace;
 use nioruntime_deps::chrono;
 use nioruntime_deps::lazy_static;
 use nioruntime_deps::rand;
-use nioruntime_err;
 
 mod logger;
 mod macros;
@@ -74,5 +78,7 @@ pub use crate::macros::{DEFAULT_LOG_NAME, STATIC_LOG};
 
 #[doc(hidden)]
 pub use nioruntime_deps;
+#[doc(hidden)]
+pub use nioruntime_err;
 #[doc(hidden)]
 pub use nioruntime_util;

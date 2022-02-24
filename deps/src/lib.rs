@@ -48,6 +48,7 @@ pub use rustls;
 pub use rustls_pemfile;
 pub use serde;
 pub use webpki_roots;
+pub use x509_signature;
 
 // we put this here because util has macros so it needs to be external to the crate
 use std::collections::HashMap;

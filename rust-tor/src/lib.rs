@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nioruntime_deps::native_tls;
 use nioruntime_deps::num_enum;
+use nioruntime_deps::x509_signature;
 
 pub mod channel;
 mod client;
