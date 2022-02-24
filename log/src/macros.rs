@@ -187,7 +187,7 @@ macro_rules! fatal_all {
 }
 
 /// Log at the 'error' (4) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`trace`], [`debug`], [`info`], [`warn`], or [`fatal`].
 /// # Examples
 /// ```
@@ -297,7 +297,7 @@ macro_rules! error_all {
 }
 
 /// Log at the 'warn' (3) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`trace`], [`debug`], [`info`], [`error`], or [`fatal`].
 /// # Examples
 /// ```
@@ -407,7 +407,7 @@ macro_rules! warn_all {
 }
 
 /// Log at the 'info' (2) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`trace`], [`debug`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
 /// ```
@@ -515,7 +515,7 @@ macro_rules! info_all {
 }
 
 /// Log at the 'debug' (1) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`trace`], [`info`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
 /// ```
@@ -626,7 +626,7 @@ macro_rules! debug_all {
 }
 
 /// Log at the 'trace' (0) log level. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros.
+/// logger, see [`log_config`]. It is used like the println/format macros.
 /// Also see [`debug`], [`info`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
 /// ```
@@ -738,7 +738,7 @@ macro_rules! trace_all {
 
 /// Same as [`log_multi`] except that the log line is logged to stdout as well, no matter
 /// what the existing configuration is. To configure this
-/// logger, see [`log_config_multi`]. It is used like the pritln/format macros. The first
+/// logger, see [`log_config_multi`]. It is used like the println/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace_all`], [`debug_all`],
 /// [`info_all`], [`warn_all`], [`error_all`], or [`fatal_all`].
 /// # Examples
@@ -822,7 +822,7 @@ macro_rules! log_multi_all {
 }
 
 /// The main logging macro for use with multiple loggers. To configure this
-/// logger, see [`log_config_multi`]. It is used like the pritln/format macros. The first
+/// logger, see [`log_config_multi`]. It is used like the println/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace`], [`debug`],
 /// [`info`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
@@ -920,7 +920,7 @@ macro_rules! log_multi {
 }
 
 /// The main logging macro. This macro calls the default logger. To configure this
-/// logger, see [`log_config`]. It is used like the pritln/format macros. The first
+/// logger, see [`log_config`]. It is used like the println/format macros. The first
 /// parameter is the log level. To avoid specifying level, see [`trace`], [`debug`],
 /// [`info`], [`warn`], [`error`], or [`fatal`].
 /// # Examples
