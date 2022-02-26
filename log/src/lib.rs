@@ -94,7 +94,75 @@
 //!     
 //!     Ok(())
 //! }
+//! ```
 //!
+//! ```
+//! // This example shows updating the settings
+//! use nioruntime_log::*;
+//! use nioruntime_err::Error;
+//!
+//! info!();
+//!
+//! fn test() -> Result<(), Error> {
+//!     log_config!(LogConfig {
+//!         file_path: Some("/path/to/mylog.log".to_string()),
+//!         show_stdout: true,
+//!         ..Default::default()
+//!     });
+//!
+//!     info!("Log with initial settings")?;
+//!     set_config_option!(Settings::Stdout, false)?;
+//!
+//!     info!("Log with updated settings. This will not go to stdout.")?;
+//!     set_config_option!(Settings::Stdout, true)?;
+//!
+//!     info!("This will also go to stdout")?;
+//!
+//!     Ok(())
+//! }
+//!
+//! ```
+//!
+//! ```
+//! // This example shows all the named logging functions
+//! use nioruntime_log::*;
+//! use nioruntime_err::Error;
+//!
+//! info!();
+//!
+//! fn test() -> Result<(), Error> {
+//!     log_config!(LogConfig {
+//!         file_path: Some("/path/to/mylog.log".to_string()),
+//!         show_stdout: false,
+//!         ..Default::default()
+//!     });
+//!
+//!     fatal!("fatal").expect("failed to log");
+//!     fatal_no_ts!("fatal_no_ts").expect("failed to log");
+//!     fatal_all!("fatal all").expect("failed to log");
+//!
+//!     error!("error").expect("failed to log");
+//!     error_no_ts!("error_no_ts").expect("failed to log");
+//!     error_all!("error all").expect("failed to log");
+//!
+//!     warn!("warn").expect("failed to log");
+//!     warn_no_ts!("warn_no_ts").expect("failed to log");
+//!     warn_all!("warn all").expect("failed to log");
+//!
+//!     info!("info").expect("failed to log");
+//!     info_no_ts!("info no ts").expect("failed to log");
+//!     info_all!("info all").expect("failed to log");
+//!
+//!     debug!("debug").expect("failed to log");
+//!     debug_no_ts!("debug no ts").expect("failed to log");
+//!     debug_all!("debug all").expect("failed to log");
+//!
+//!     trace!("trace").expect("failed to log");
+//!     trace_no_ts!("trace_no_ts").expect("failed to log");
+//!     trace_all!("trace all").expect("failed to log");
+//!
+//!     Ok(())
+//! }
 //! ```
 //! # Using in Cargo.toml
 //! To use the crate in a project add the following two line to Cargo.toml:
