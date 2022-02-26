@@ -215,9 +215,7 @@ impl NetInfo {
 			return Ok(None);
 		}
 		let timestamp = u32::from_be_bytes(*array_ref![in_buf, 5, 4]);
-		let remote;
-		let mut ptr;
-		(remote, ptr) = match Self::parse_address(in_buf, 9)? {
+		let (remote, mut ptr) = match Self::parse_address(in_buf, 9)? {
 			Some(remote) => remote,
 			None => return Ok(None),
 		};
