@@ -321,10 +321,18 @@ fn test_thread_pool() -> Result<(), Error> {
 		.unwrap();
 	});
 
-	// wait for executors to complete
-	std::thread::sleep(std::time::Duration::from_millis(300));
-	let x = x3.lock().unwrap();
-	assert_eq!(*x, 6);
+	let mut attempts = 0;
+	loop {
+		// wait for executors to complete
+		std::thread::sleep(std::time::Duration::from_millis(300));
+		let x = x3.lock().unwrap();
+		attempts += 1;
+		if *x < 6 && attempts <= 30 {
+			continue;
+		};
+		assert_eq!(*x, 6);
+		break;
+	}
 
 	Ok(())
 }
@@ -378,10 +386,18 @@ fn test_stop_thread_pool() -> Result<(), Error> {
 		.unwrap();
 	});
 
-	// wait for executors to complete
-	std::thread::sleep(std::time::Duration::from_millis(300));
-	let x = x3.lock().unwrap();
-	assert_eq!(*x, 3);
+	let mut attempts = 0;
+	loop {
+		// wait for executors to complete
+		std::thread::sleep(std::time::Duration::from_millis(300));
+		let x = x3.lock().unwrap();
+		attempts += 1;
+		if *x < 3 && attempts <= 30 {
+			continue;
+		};
+		assert_eq!(*x, 3);
+		break;
+	}
 
 	Ok(())
 }
