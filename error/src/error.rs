@@ -20,6 +20,7 @@ use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Display;
+use std::net::AddrParseError;
 use std::num::ParseIntError;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
@@ -157,6 +158,9 @@ pub enum ErrorKind {
 	/// Too many handles have been added/accepted by this eventhandler
 	#[fail(display = "Too many handles on this eventhandler: {}", _0)]
 	MaxHandlesExceeded(String),
+	/// AddrParseError
+	#[fail(display = "AddrParseError: {}", _0)]
+	AddrParseError(String),
 }
 
 impl Display for Error {
@@ -339,6 +343,17 @@ impl From<InvalidDnsNameError> for Error {
 	fn from(e: InvalidDnsNameError) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::TLSError(format!("InvalidDNS: {}", e))),
+		}
+	}
+}
+
+impl From<AddrParseError> for Error {
+	fn from(e: AddrParseError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::AddrParseError(format!(
+				"Error parsing address: {}",
+				e
+			))),
 		}
 	}
 }

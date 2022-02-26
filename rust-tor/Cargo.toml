@@ -11,6 +11,9 @@ edition = "2018"
 
 [dependencies]
 
-nioruntime_log  = { path = "../log"   }
-nioruntime_err  = { path = "../error" }
-nioruntime_deps = { path = "../deps"  }
+nioruntime_log  = { path = "../log"           }
+nioruntime_err  = { path = "../error"         }
+nioruntime_deps = { path = "../deps"          }
+tor-llcrypto    = { path = "../tor-llcrypto"  }
+tor-checkable   = { path = "../tor-checkable" }
+tor-bytes       = { path = "../tor-bytes"     }

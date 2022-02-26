@@ -15,14 +15,18 @@
 use nioruntime_deps::num_enum;
 use nioruntime_deps::x509_signature;
 
+mod cell;
 pub mod channel;
 mod client;
 mod common;
 mod config;
 pub mod directory;
+mod ed25519;
 mod io;
+mod rsa;
 mod server;
 
 pub use crate::client::TorClient;
 pub use crate::config::{TorClientConfig, TorServerConfig};
+pub use crate::ed25519::Ed25519Cert;
 pub use crate::server::TorServer;

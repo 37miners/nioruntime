@@ -28,16 +28,20 @@ pub use winapi;
 #[cfg(windows)]
 pub use ws2_32;
 
+pub use arrayref;
 pub use backtrace;
 pub use base64;
 pub use byteorder;
 pub use bytes;
+pub use caret;
 pub use chrono;
 pub use colored;
+pub use digest;
 pub use ed25519_dalek;
 pub use errno;
 pub use failure;
 pub use futures;
+pub use hex_literal;
 pub use lazy_static;
 pub use libc;
 pub use native_tls;
@@ -48,6 +52,7 @@ pub use rand;
 pub use rustls;
 pub use rustls_pemfile;
 pub use serde;
+pub use signature;
 pub use webpki_roots;
 pub use x509_signature;
 

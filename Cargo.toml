@@ -12,7 +12,10 @@ build = "src/build/build.rs"
 edition = "2018"
 
 [workspace]
-members = ["http", "eventhandler", "util", "error", "deps", "log", "rust-tor"]
+members = [
+	"http", "eventhandler", "util", "error", "deps", "log", "rust-tor",
+	"tor-llcrypto", "tor-checkable", "tor-bytes"
+]
 exclude = ["etc/perf"]
 
 [dependencies]

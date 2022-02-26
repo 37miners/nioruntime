@@ -48,6 +48,16 @@ impl IoState {
 	}
 }
 
+impl From<nioruntime_deps::rustls::IoState> for IoState {
+	fn from(io_state: nioruntime_deps::rustls::IoState) -> IoState {
+		IoState::new(
+			io_state.tls_bytes_to_write(),
+			io_state.plaintext_bytes_to_read(),
+			io_state.peer_has_closed(),
+		)
+	}
+}
+
 pub trait TorCommon {
 	fn reader(&mut self) -> Reader;
 	fn writer(&mut self) -> Writer;

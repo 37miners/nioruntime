@@ -28,7 +28,7 @@
 //!
 //! The output will look something like this:
 //!
-//! ```
+//! ```text
 //! [2022-02-24 13:52:24]: (FATAL) [..ioruntime/src/main.rs:116]: fatal
 //! [2022-02-24 13:52:24]: (ERROR) [..ioruntime/src/main.rs:120]: error
 //! [2022-02-24 13:52:24]: (WARN) [..ioruntime/src/main.rs:124]: warn
