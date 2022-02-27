@@ -106,6 +106,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5024ee8015f02155eee35c711107ddd9a9bf3cb689cf2a9089c97e79b6e1ae83"
+
+[[package]]
 name = "base64"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2029,6 +2035,7 @@ version = "0.0.3"
 dependencies = [
  "aes",
  "arrayref",
+ "base58",
  "base64",
  "cipher",
  "curve25519-dalek",

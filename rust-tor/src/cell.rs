@@ -12,61 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{ChanCmd, CELL_LEN};
 use nioruntime_deps::arrayref::array_ref;
 use nioruntime_deps::byteorder::WriteBytesExt;
-use nioruntime_deps::caret::caret_int;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 info!();
-
-caret_int! {
-		/// A ChanCmd is the type of a channel cell.  The value of the ChanCmd
-		/// indicates the meaning of the cell, and (possibly) its length.
-		pub struct ChanCmd(u8) {
-				/// A fixed-length cell that will be dropped.
-				PADDING = 0,
-				/// Create a new circuit (obsolete format)
-				CREATE = 1,
-				/// Finish circuit-creation handshake (obsolete format)
-				CREATED = 2,
-				/// Relay cell, transmitted over a circuit.
-				RELAY = 3,
-				/// Destroy a circuit
-				DESTROY = 4,
-				/// Create a new circuit (no public-key)
-				CREATE_FAST = 5,
-				/// Finish a circuit-creation handshake (no public-key)
-				CREATED_FAST = 6,
-				// note gap in numbering: 7 is grouped with the variable-length cells
-				/// Finish a channel handshake with time and address information
-				NETINFO = 8,
-				/// Relay cell, transmitted over a circuit.  Limited.
-				RELAY_EARLY = 9,
-				/// Create a new circuit (current format)
-				CREATE2 = 10,
-				/// Finish a circuit-creation handshake (current format)
-				CREATED2 = 11,
-				/// Adjust channel-padding settings
-				PADDING_NEGOTIATE = 12,
-
-				/// Variable-length cell, despite its number: negotiate versions
-				VERSIONS = 7,
-				/// Variable-length channel-padding cell
-				VPADDING = 128,
-				/// Provide additional certificates beyond those given in the TLS
-				/// handshake
-				CERTS = 129,
-				/// Challenge material used in relay-to-relay handshake.
-				AUTH_CHALLENGE = 130,
-				/// Response material used in relay-to-relay handshake.
-				AUTHENTICATE = 131,
-				/// Indicates client permission to use relay.  Not currently used.
-				AUTHORIZE = 132,
-		}
-}
 
 #[derive(Debug)]
 pub struct TorCert {
@@ -139,12 +93,18 @@ pub struct AuthChallenge {}
 impl AuthChallenge {
 	fn deserialize(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
 		let circ_id = u32::from_be_bytes(*array_ref![in_buf, 0, 4]);
-		if in_buf.len() < 38 {
+		let cell_len = u16::from_be_bytes(*array_ref![in_buf, 5, 2]);
+		debug!("cell_len={}", cell_len)?;
+		if in_buf.len() <= (cell_len + 6).into() {
 			return Ok(None);
 		}
 		let _challenge = &in_buf[7..39];
 		let n_methods = u16::from_be_bytes(*array_ref![in_buf, 39, 2]);
 		let end: usize = (n_methods * 2 + 41).into();
+		if in_buf.len() <= end {
+			return Ok(None);
+		}
+
 		in_buf.drain(..end);
 		Ok(Some(Cell {
 			cell_body: CellBody::AuthChallenge(AuthChallenge {}),
@@ -178,6 +138,11 @@ impl NetInfo {
 			ret.append(&mut vec![atype, alen]);
 			ret.append(&mut Self::ser_addr(ni.local[i]));
 		}
+
+		let mut padding = vec![];
+		padding.resize(CELL_LEN - ret.len(), 0u8);
+
+		ret.append(&mut padding);
 
 		Ok(ret)
 	}

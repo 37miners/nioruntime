@@ -10,6 +10,7 @@
 //! protocol to uniquely identify a relay.
 
 use arrayref::array_ref;
+use base58::ToBase58;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Display, Formatter};
 use subtle::{Choice, ConstantTimeEq};
@@ -64,6 +65,11 @@ impl Ed25519Identity {
 	/// Return a reference to the bytes in this key.
 	pub fn as_bytes(&self) -> &[u8] {
 		&self.id[..]
+	}
+
+	/// Return a base58 String representation of this key.
+	pub fn to_base58(&self) -> String {
+		self.id.to_base58()
 	}
 }
 

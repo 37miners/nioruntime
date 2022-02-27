@@ -23,6 +23,7 @@ hsv3-client = []
 aes = { version = "0.7.0", features = ["ctr"] }
 arrayref = "0.3"
 base64 = "0.13.0"
+base58 = "0.1.0"
 curve25519-dalek = "3.2"
 digest = "0.10.0"
 ed25519-dalek = { version = "1", features = ["batch"] }

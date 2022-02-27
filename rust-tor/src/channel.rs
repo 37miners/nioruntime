@@ -14,8 +14,8 @@
 
 use crate::cell::{next_cell, CellBody, Certs, NetInfo};
 use crate::common::IoState;
-use crate::num_enum::IntoPrimitive;
 use crate::x509_signature;
+use crate::{ChanCmd, CELL_LEN};
 use nioruntime_deps::arrayref::array_ref;
 use nioruntime_deps::digest::Digest;
 use nioruntime_deps::rustls::client::{
@@ -40,7 +40,7 @@ use tor_checkable::{ExternallySigned, Timebound};
 use tor_llcrypto as ll;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 
-info!();
+debug!();
 
 #[derive(Clone, Debug)]
 struct Verifier {}
@@ -141,14 +141,6 @@ fn convert_scheme(
 	})
 }
 
-#[derive(IntoPrimitive)]
-#[repr(u8)]
-/// We don't support everything for now. Just what we need to use
-enum ChanCmd {
-	/// Variable-length cell, despite its number: negotiate versions
-	Versions = 7,
-}
-
 pub struct Channel {
 	tls_conn: ClientConnection,
 	in_buf: Vec<u8>,
@@ -178,7 +170,7 @@ impl Channel {
 	}
 
 	pub fn start(&mut self, wbuf: &mut Vec<u8>) -> Result<(), Error> {
-		let versions_msg: &[u8] = &[0, 0, ChanCmd::Versions.into(), 0, 2, 0, 4];
+		let versions_msg: &[u8] = &[0, 0, ChanCmd::VERSIONS.into(), 0, 2, 0, 4];
 		self.tls_conn.writer().write_all(&versions_msg)?;
 		self.tls_conn.write_tls(wbuf)?;
 		Ok(())
@@ -288,8 +280,22 @@ impl Channel {
 				self.verified = true;
 				debug!("Verified the channel!")?;
 				self.send_net_info()?;
+				self.send_create_fast()?
 			}
 		}
+
+		Ok(())
+	}
+
+	fn send_create_fast(&mut self) -> Result<(), Error> {
+		let mut create_fast = vec![255, 255, 255, 255, ChanCmd::CREATE_FAST.into()];
+		let rand_bytes: [u8; 20] = nioruntime_deps::rand::random();
+		create_fast.append(&mut rand_bytes.to_vec());
+		create_fast.resize(CELL_LEN, 0u8);
+
+		debug!("sending create_fast = {:?}", create_fast)?;
+
+		self.writer().write(&create_fast)?;
 
 		Ok(())
 	}
@@ -509,7 +515,11 @@ impl Channel {
 
 		let rsa_id = pkrsa.to_rsa_identity();
 
-		trace!("Validated identity as {} [{}]", ed25519_id, rsa_id)?;
+		debug!(
+			"Validated identity as {:?} [{}]",
+			nioruntime_deps::base64::encode(ll::d::Sha256::digest(ed25519_id.as_bytes())),
+			rsa_id
+		)?;
 
 		// all checks passed. We're ok which will mark the channel as verified
 		Ok(())
@@ -609,13 +619,19 @@ mod test {
 		let now = Instant::now();
 		//let ip = "45.66.33.45";
 		//let addr = format!("{}:{}", ip, 443);
-		let ip = "66.111.2.131";
+		//let ip = "66.111.2.131";
+		//let addr = format!("{}:{}", ip, 9001);
+		//let ip = "148.251.81.16";
+		//let addr = format!("{}:{}", ip, 110);
+		let ip = "127.0.0.1";
 		let addr = format!("{}:{}", ip, 9001);
 
 		// note creating the channel will automatically initiate
-		// the handshake, version exchange, and netinfo.
+		// the handshake, version exchange, netinfo,
+		// and call create_fast to initiate circuit creation.
 		// beyond that is the responsibility of the caller to initiate.
 		let mut channel = Channel::new(ip.parse()?)?;
+
 		let mut wbuf = vec![];
 		channel.start(&mut wbuf)?;
 		debug!("wbuf.len={}", wbuf.len())?;
@@ -664,13 +680,18 @@ mod test {
 				channel.write_tor(&mut wbuf)?;
 
 				if pt_len > 0 {
-					debug!("read pt_len bytes = {} '{:?}'", pt_len, &buffer[0..pt_len])?;
+					info!(
+						"read pt_len bytes = {} [elapsed={}] '{:?}'",
+						pt_len,
+						now.elapsed().as_millis(),
+						&buffer[0..pt_len]
+					)?;
 				} else {
 					debug!("pt_len = {}", pt_len)?;
 				}
 
 				if wbuf.len() > 0 {
-					info!(
+					debug!(
 						"writing {} bytes to the channel [elapsed={}]",
 						wbuf.len(),
 						now.elapsed().as_millis()
@@ -682,6 +703,7 @@ mod test {
 			Ok(())
 		});
 
+		// TODO: test with an actual relay
 		//std::thread::park();
 
 		Ok(())
