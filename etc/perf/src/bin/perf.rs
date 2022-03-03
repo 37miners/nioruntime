@@ -326,7 +326,6 @@ fn main() -> Result<(), Error> {
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf| {
-			warn!("read data = {:?}", buf)?;
 			conn_data.write(buf)?;
 			Ok(())
 		})?;
