@@ -165,6 +165,21 @@ pub enum ErrorKind {
 	/// HexError
 	#[fail(display = "HexError: {}", _0)]
 	HexError(String),
+	/// Bad key len
+	#[fail(display = "Keylen not correct {} != {}", _0, _1)]
+	BadKeyLen(usize, u8),
+	/// Bad value len
+	#[fail(display = "Valuelen not correct {} != {}", _0, _1)]
+	BadValueLen(usize, u8),
+	/// Other error
+	#[fail(display = "Other error {}", _0)]
+	OtherError(String),
+	/// Max Load Capacity has been exceeded
+	#[fail(display = "Max Load Capacity Exceeded")]
+	MaxLoadCapacityExceeded,
+	/// Invalid MaxLoadCapacity
+	#[fail(display = "Invalid Max Load Capacity")]
+	InvalidMaxLoadCapacity,
 }
 
 impl Display for Error {

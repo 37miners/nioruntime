@@ -31,6 +31,7 @@ pub use ws2_32;
 pub use arrayref;
 pub use backtrace;
 pub use base64;
+pub use byte_tools;
 pub use byteorder;
 pub use bytes;
 pub use caret;

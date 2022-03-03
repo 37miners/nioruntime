@@ -1007,6 +1007,7 @@ dependencies = [
  "arrayref",
  "backtrace",
  "base64",
+ "byte-tools",
  "byteorder",
  "bytes 0.5.6",
  "caret",

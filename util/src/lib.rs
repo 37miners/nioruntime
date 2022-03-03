@@ -15,6 +15,7 @@
 mod macros;
 
 pub mod ser;
+pub mod static_hash;
 pub mod threadpool;
 
 pub use nioruntime_deps;
