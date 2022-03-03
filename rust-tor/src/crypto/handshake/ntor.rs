@@ -177,25 +177,18 @@ where
 	T: AsRef<[u8]>,
 {
 	let mut cur = Reader::from_slice(msg.as_ref());
-	debug!("1: {}", msg.as_ref().len());
 	let their_pk: PublicKey = cur.extract()?;
-	debug!("2,rm={}", cur.remaining());
 	let auth: Authcode = cur.extract()?;
-	debug!("3,rm={}", cur.remaining());
 	let xy = state.my_sk.diffie_hellman(&their_pk);
 	let xb = state.my_sk.diffie_hellman(&state.relay_public.pk);
-	debug!("4");
 	let (keygen, authcode) =
 		ntor_derive(&xy, &xb, &state.relay_public, &state.my_public, &their_pk);
-	debug!("5");
 	let okay = authcode.ct_eq(&auth)
 		& ct::bool_to_choice(xy.was_contributory())
 		& ct::bool_to_choice(xb.was_contributory());
-	debug!("6");
 	if okay.into() {
 		Ok(keygen)
 	} else {
-		debug!("err: {:?}", okay);
 		Err(ErrorKind::Tor("BadCircHandshake".into()).into())
 	}
 }

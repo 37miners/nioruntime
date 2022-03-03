@@ -16,6 +16,7 @@ use crate::failure::{Backtrace, Context, Fail};
 #[cfg(unix)]
 use crate::nix::errno::Errno;
 use crate::rustls::client::InvalidDnsNameError;
+use nioruntime_deps::hex::FromHexError;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
@@ -161,6 +162,9 @@ pub enum ErrorKind {
 	/// AddrParseError
 	#[fail(display = "AddrParseError: {}", _0)]
 	AddrParseError(String),
+	/// HexError
+	#[fail(display = "HexError: {}", _0)]
+	HexError(String),
 }
 
 impl Display for Error {
@@ -354,6 +358,14 @@ impl From<AddrParseError> for Error {
 				"Error parsing address: {}",
 				e
 			))),
+		}
+	}
+}
+
+impl From<FromHexError> for Error {
+	fn from(e: FromHexError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::HexError(format!("Error parsing hex: {}", e))),
 		}
 	}
 }

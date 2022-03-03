@@ -764,6 +764,12 @@ dependencies = [
 
 [[package]]
 name = "hex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
+
+[[package]]
+name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
@@ -1014,6 +1020,7 @@ dependencies = [
  "failure_derive",
  "futures",
  "generic-array 0.14.5",
+ "hex 0.3.2",
  "hex-literal",
  "hkdf",
  "hmac",
@@ -2069,7 +2076,7 @@ dependencies = [
  "digest 0.10.3",
  "ed25519-dalek",
  "getrandom 0.2.4",
- "hex",
+ "hex 0.4.3",
  "hex-literal",
  "rand 0.8.4",
  "rand_core 0.5.1",

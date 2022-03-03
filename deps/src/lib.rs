@@ -43,6 +43,7 @@ pub use errno;
 pub use failure;
 pub use futures;
 pub use generic_array;
+pub use hex;
 pub use hex_literal;
 pub use hkdf;
 pub use hmac;

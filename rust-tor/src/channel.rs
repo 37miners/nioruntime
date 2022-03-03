@@ -42,7 +42,7 @@ use tor_checkable::{ExternallySigned, Timebound};
 use tor_llcrypto as ll;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 
-debug!();
+info!();
 
 //pub const FAST_C_HANDSHAKE_LEN: usize = 20;
 //pub struct CreateFastClientState(pub [u8; FAST_C_HANDSHAKE_LEN]);

@@ -12,23 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cell::{next_cell, CellBody, CreatedFast};
+use crate::cell::{next_cell, CellBody};
 use crate::channel::Channel;
 use crate::common::IoState;
 use crate::crypto::handshake::ntor::{NtorClient, NtorHandshakeState, NtorPublicKey};
-use crate::crypto::handshake::{ClientHandshake, ShakeKeyGenerator, TapKeyGenerator};
+use crate::crypto::handshake::{ClientHandshake, TapKeyGenerator};
 use crate::crypto::ll::kdf::Kdf;
 use crate::crypto::ll::kdf::LegacyKdf;
 use crate::crypto::ClientLayer;
 use crate::crypto::CryptInit;
+use crate::crypto::RelayCellBody;
 use crate::crypto::Tor1RelayCrypto;
 use crate::crypto::{InboundClientCrypt, OutboundClientCrypt};
-use crate::crypto::{RawCellBody, RelayCellBody};
-use crate::SecretBytes;
 use crate::{ChanCmd, RelayCmd};
 use nioruntime_deps::arrayref::array_ref;
 use nioruntime_deps::base64;
-use nioruntime_deps::hex_literal::hex;
+use nioruntime_deps::hex;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
@@ -37,8 +36,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
-use tor_llcrypto::pk::curve25519::{PublicKey, StaticSecret};
-use tor_llcrypto::pk::ed25519::Ed25519Identity;
+use tor_llcrypto::pk::curve25519::PublicKey;
 use tor_llcrypto::pk::rsa::RsaIdentity;
 use tor_llcrypto::util::ct::bytes_eq;
 use tor_llcrypto::util::rand_compat::RngCompatExt;
@@ -66,24 +64,25 @@ pub struct CircuitPlan {
 }
 
 #[derive(Clone)]
-pub struct Circuit<OnComplete> {
+pub struct Circuit<OnComplete, OnError> {
 	channel: Option<Arc<RwLock<Channel>>>,
 	on_complete: Option<Pin<Box<OnComplete>>>,
-	hop: Arc<RwLock<usize>>,
+	on_error: Option<Pin<Box<OnError>>>,
 	is_complete: bool,
 	circuit_plan: Option<CircuitPlan>,
 	layers: Arc<RwLock<Option<Layers>>>,
 }
 
-impl<OnComplete> Circuit<OnComplete>
+impl<OnComplete, OnError> Circuit<OnComplete, OnError>
 where
 	OnComplete: Fn(u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnError: Fn(Error) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
 	pub fn new() -> Self {
 		Self {
 			channel: None,
 			on_complete: None,
-			hop: Arc::new(RwLock::new(0)),
+			on_error: None,
 			is_complete: false,
 			circuit_plan: None,
 			layers: Arc::new(RwLock::new(None)),
@@ -95,6 +94,11 @@ where
 		Ok(())
 	}
 
+	pub fn set_on_error(&mut self, on_error: OnError) -> Result<(), Error> {
+		self.on_error = Some(Box::pin(on_error));
+		Ok(())
+	}
+
 	pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
 		match &self.channel {
 			Some(channel) => Ok(lockw!(channel)?.reader().read_exact(buf)?),
@@ -102,7 +106,7 @@ where
 		}
 	}
 
-	pub fn write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
+	pub fn _write_all(&mut self, buf: &[u8]) -> Result<(), Error> {
 		match &self.channel {
 			Some(channel) => Ok(lockw!(channel)?.writer().write_all(buf)?),
 			None => Err(ErrorKind::Tor("must add first hop to use channel".into()).into()),
@@ -132,14 +136,18 @@ where
 				} else {
 					let io_state = channel.process_new_packets()?;
 					let wlen = io_state.tls_bytes_to_write();
-					Self::process_incomplete(
+					self.is_complete = Self::process_incomplete(
 						&mut *channel,
 						io_state,
 						self.on_complete.clone(),
-						self.hop.clone(),
+						self.on_error.clone(),
 						self.circuit_plan.as_ref(),
 						self.layers.clone(),
 					)?;
+
+					if self.is_complete {
+						debug!("circuit now complete. packets will go to user")?;
+					}
 					Ok(IoState::new(wlen, 0, false))
 				}
 			}
@@ -162,10 +170,11 @@ where
 		channel: &mut Channel,
 		io_state: IoState,
 		on_complete: Option<Pin<Box<OnComplete>>>,
-		hop: Arc<RwLock<usize>>,
+		on_error: Option<Pin<Box<OnError>>>,
 		plan: Option<&CircuitPlan>,
 		layers: Arc<RwLock<Option<Layers>>>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
+		let mut ret = false;
 		let pt_len = io_state.plaintext_bytes_to_read();
 		let mut buffer = vec![];
 		buffer.resize(pt_len, 0u8);
@@ -207,16 +216,15 @@ where
 							None => error!("no on_complete handler!")?,
 						}
 
-						let mut hop = lockw!(hop)?;
-						*hop += 1;
 						match &plan {
 							Some(ref plan) => {
-								if *hop == plan.hops.len() {
+								if plan.hops.len() <= 1 {
 									debug!("circuit complete!")?;
+									ret = true;
 								} else {
-									debug!("connect to hop = {:?}", plan.hops[*hop])?;
+									debug!("connect to hop = {:?}", plan.hops[1])?;
 									let (mut extend, handshake_state) =
-										Self::build_extend(&plan.hops[*hop])?;
+										Self::build_extend(&plan.hops[1])?;
 									let mut cc_out = OutboundClientCrypt::new();
 									let mut cc_in = InboundClientCrypt::new();
 									let pair = Tor1RelayCrypto::construct(generator).unwrap();
@@ -239,13 +247,18 @@ where
 									}
 								}
 							}
-							None => {
-								warn!("no plan for the circuit!")?;
-							}
+							None => match on_error {
+								Some(on_error) => {
+									(on_error)(
+										ErrorKind::Tor("no plan for the circuit!".into()).into(),
+									)?;
+								}
+								None => error!("no plan for the circuit!")?,
+							},
 						}
 					}
 					CellBody::Relay(mut r) => {
-						debug!("got a relay cell");
+						debug!("got a relay cell")?;
 						{
 							let mut layers = lockw!(layers)?;
 							let layers = (*layers).as_mut();
@@ -253,7 +266,7 @@ where
 								Some(layers) => {
 									Self::decode_relay(&mut r.body, &mut layers.cc_in)?;
 									debug!("decrypted cell: {:?}", r.body)?;
-									Self::process_relay_cell(
+									ret = Self::process_relay_cell(
 										channel,
 										r.body,
 										layers,
@@ -261,23 +274,38 @@ where
 										plan,
 									)?;
 								}
-								None => {
-									error!("got a relay cell before created_fast!")?;
-								}
+								None => match on_error {
+									Some(on_error) => (on_error)(
+										ErrorKind::Tor("got a relay cell too early".into()).into(),
+									)?,
+									None => error!("got a relay cell too early")?,
+								},
 							}
 						}
 					}
+					CellBody::Destroy(d) => match on_error {
+						Some(on_error) => (on_error)(
+							ErrorKind::Tor(format!(
+								"Got a destroy circuit cell. Reason = {}",
+								d.reason
+							))
+							.into(),
+						)?,
+						None => error!("Got a destroy circuit cell. Reason = {}", d.reason)?,
+					},
 					_ => {
+						// for now we ignore other cells
 						debug!("other: {:?}", cell)?;
 					}
 				}
 			}
 			None => {
+				// could mean that we don't have enough data to process the next cell
 				debug!("none")?;
 			}
 		}
 
-		Ok(())
+		Ok(ret)
 	}
 
 	fn process_relay_cell(
@@ -286,18 +314,18 @@ where
 		layers: &mut Layers,
 		on_complete: Option<Pin<Box<OnComplete>>>,
 		plan: Option<&CircuitPlan>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
+		let mut ret = false;
 		match RelayCmd(cell[5]) {
 			RelayCmd::EXTENDED2 => {
 				debug!("processing extended2")?;
-				// TODO: confirm the digest
-				Self::process_extended2(channel, cell, layers, on_complete, plan)?;
+				ret = Self::process_extended2(channel, cell, layers, on_complete, plan)?;
 			}
 			_ => {
-				error!("Unknown command: {}", cell[5]);
+				error!("Unknown command: {}", cell[5])?;
 			}
 		}
-		Ok(())
+		Ok(ret)
 	}
 
 	fn process_extended2(
@@ -306,7 +334,8 @@ where
 		layers: &mut Layers,
 		on_complete: Option<Pin<Box<OnComplete>>>,
 		plan: Option<&CircuitPlan>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
+		let mut ret = false;
 		let len = u16::from_be_bytes(*array_ref![cell, 14, 2]);
 		let inner_len = u16::from_be_bytes(*array_ref![cell, 16, 2]);
 		let msg = *array_ref![cell, 18, 64];
@@ -318,7 +347,7 @@ where
 		layers.cc_out.add_layer(Box::new(outbound));
 		layers.cur_hops += 1;
 
-		debug!("handshake complete!");
+		debug!("handshake complete!")?;
 
 		match on_complete {
 			Some(on_complete) => (on_complete)(layers.cur_hops)?,
@@ -333,13 +362,16 @@ where
 			layers.handshake_state = handhsake_state;
 			Self::encode_extend(&mut extend, &mut layers.cc_out, layers.cur_hops - 1)?;
 			channel.writer().write_all(&extend)?;
+		} else {
+			// circuit complete
+			ret = true;
 		}
-		Ok(())
+		Ok(ret)
 	}
 
 	fn decode_relay(cell: &mut Vec<u8>, cc_in: &mut InboundClientCrypt) -> Result<(), Error> {
 		let mut relay_cell_body = RelayCellBody(*array_ref![cell, 5, 509]);
-		cc_in.decrypt(&mut relay_cell_body);
+		cc_in.decrypt(&mut relay_cell_body)?;
 		(&mut cell[5..514]).clone_from_slice(relay_cell_body.as_ref());
 		Ok(())
 	}
@@ -350,10 +382,10 @@ where
 		hop_num: u8,
 	) -> Result<(), Error> {
 		let mut relay_cell_body = RelayCellBody(*array_ref![cell, 5, 509]);
-		cc_out.encrypt(&mut relay_cell_body, hop_num.into());
+		cc_out.encrypt(&mut relay_cell_body, hop_num.into())?;
 		// TODO: remove this memcpy. Too expensive.
 		(&mut cell[5..514]).clone_from_slice(relay_cell_body.as_ref());
-		debug!("encrypted cell={:?}", cell);
+		debug!("encrypted cell={:?}", cell)?;
 		Ok(())
 	}
 
@@ -424,7 +456,7 @@ where
 			}
 		}
 
-		debug!("relay early command = {:?}", extend);
+		debug!("relay early command = {:?}", extend)?;
 
 		Ok((extend, state))
 	}
@@ -434,12 +466,11 @@ where
 mod test {
 	use crate::circuit::*;
 	use nioruntime_err::Error;
-	use nioruntime_log::*;
 	use std::net::TcpStream;
 	use std::net::{IpAddr, Ipv4Addr};
 	use std::time::Instant;
 
-	debug!();
+	info!();
 
 	#[test]
 	fn test_circuit() -> Result<(), Error> {
@@ -447,46 +478,36 @@ mod test {
 		let mut circuit = Circuit::new();
 
 		circuit.set_on_complete(move |hop| {
-			info!("hop {} complete!", hop)?;
+			info!(
+				"hop {} complete! time elapsed = {}ms.",
+				hop,
+				now.elapsed().as_millis()
+			)?;
 			Ok(())
 		})?;
 
-		let mut ntor_onion_bytes: [u8; 32] =
-			base64::decode("xrJHE75Bm1HbjcSqMYBkVpFo21ua7Gb2jvpqnjBDXuk")?[..].try_into()?;
+		circuit.set_on_error(move |e| {
+			error!("Connecting to circuit resulted in error: {}", e)?;
+			Ok(())
+		})?;
 
-		debug!("ntor_onion_bytes = {:?}", ntor_onion_bytes);
-		//let ntor_onion_bytes = [0u8; 32];
 		let plan = CircuitPlan {
 			hops: vec![
-				/*
-								Hop {
-									ipaddr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-									port: 9001,
-									identity_bytes: hex!("58696DEBEB6CFCBC11A07849894A262DEFD4D84B"),
-									ntor_onion_bytes: base64::decode(
-										"xrJHE75Bm1HbjcSqMYBkVpFo21ua7Gb2jvpqnjBDXuk",
-									)?[..]
-										.try_into()?,
-								},
-				*/
-				/*
-								Hop {
-									ipaddr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-									port: 19001,
-									identity_bytes: hex!("58696DEBEB6CFCBC11A07849894A262DEFD4D84B"),
-
-									ntor_onion_bytes: base64::decode(
-										"xrJHE75Bm1HbjcSqMYBkVpFo21ua7Gb2jvpqnjBDXuk",
-									)?[..]
-										.try_into()?,
-
-									ntor_onion_bytes,
-								},
-				*/
+				Hop {
+					ipaddr: IpAddr::V4(Ipv4Addr::new(37, 200, 99, 251)),
+					port: 9001,
+					identity_bytes: hex::decode("F6EC46933CE8D4FAD5CCDAA8B1C5A377685FC521")?[..]
+						.try_into()?,
+					ntor_onion_bytes: base64::decode(
+						"rS0cP7NMq/d/9SzjYkuAQ8uMA/WLhwUxy6/mng+2CXw",
+					)?[..]
+						.try_into()?,
+				},
 				Hop {
 					ipaddr: IpAddr::V4(Ipv4Addr::new(45, 66, 33, 45)),
 					port: 443,
-					identity_bytes: hex!("7EA6EAD6FD83083C538F44038BBFA077587DD755"),
+					identity_bytes: hex::decode("7EA6EAD6FD83083C538F44038BBFA077587DD755")?[..]
+						.try_into()?,
 					ntor_onion_bytes: base64::decode(
 						"OJktsaEmqNHWpEa6zxPIAc6T2MaNM8b/VEZPl58+em8",
 					)?[..]
@@ -495,19 +516,10 @@ mod test {
 				Hop {
 					ipaddr: IpAddr::V4(Ipv4Addr::new(199, 249, 230, 149)),
 					port: 443,
-					identity_bytes: hex!("7070199EF60B5B1AE4EA2EFB4881F9F90B6FA9EF"),
+					identity_bytes: hex::decode("7070199EF60B5B1AE4EA2EFB4881F9F90B6FA9EF")?[..]
+						.try_into()?,
 					ntor_onion_bytes: base64::decode(
 						"JPkT/DoMZN20DR1efZ0UIOI56SjgLDUF069FwNzzCSY",
-					)?[..]
-						.try_into()?,
-				},
-				Hop {
-					// 37.200.99.251
-					ipaddr: IpAddr::V4(Ipv4Addr::new(37, 200, 99, 251)),
-					port: 9001,
-					identity_bytes: hex!("F6EC46933CE8D4FAD5CCDAA8B1C5A377685FC521"),
-					ntor_onion_bytes: base64::decode(
-						"rS0cP7NMq/d/9SzjYkuAQ8uMA/WLhwUxy6/mng+2CXw",
 					)?[..]
 						.try_into()?,
 				},

@@ -293,6 +293,21 @@ impl NetInfo {
 }
 
 #[derive(Debug)]
+pub struct Destroy {
+	pub reason: u8,
+}
+
+impl Destroy {
+	fn deserialize(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
+		let circ_id = u32::from_be_bytes(*array_ref![in_buf, 0, 4]);
+		Ok(Some(Cell {
+			circ_id,
+			cell_body: CellBody::Destroy(Destroy { reason: in_buf[5] }),
+		}))
+	}
+}
+
+#[derive(Debug)]
 pub struct Relay {
 	pub body: Vec<u8>,
 }
@@ -316,6 +331,7 @@ pub enum CellBody {
 	NetInfo(NetInfo),
 	CreatedFast(CreatedFast),
 	Relay(Relay),
+	Destroy(Destroy),
 }
 
 #[derive(Debug)]
@@ -335,6 +351,7 @@ pub fn next_cell(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
 		ChanCmd::NETINFO => NetInfo::deserialize(in_buf)?,
 		ChanCmd::CREATED_FAST => CreatedFast::deserialize(in_buf)?,
 		ChanCmd::RELAY => Relay::deserialize(in_buf)?,
+		ChanCmd::DESTROY => Destroy::deserialize(in_buf)?,
 		_ => None,
 	})
 }
