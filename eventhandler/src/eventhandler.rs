@@ -227,7 +227,7 @@ impl ConnectionData {
 			}
 		};
 
-		if res == len.try_into().unwrap_or(0) {
+		if res == len.try_into()? {
 			Ok(())
 		} else if res < 0 {
 			let e = errno().0;
@@ -969,9 +969,7 @@ where
 				&mut libc::sockaddr {
 					..std::mem::zeroed()
 				},
-				&mut (std::mem::size_of::<libc::sockaddr>() as u32)
-					.try_into()
-					.unwrap_or(0),
+				&mut (std::mem::size_of::<libc::sockaddr>() as u32).try_into()?,
 			)
 		};
 		#[cfg(windows)]
@@ -1093,23 +1091,24 @@ where
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
 		let (len, do_read_now) = match connection_info.tls_server {
-			Some(ref _tls_server) => {
-				let (raw_len, tls_len) = Self::do_tls_server_read(&connection_info, ctx, wakeup)?;
+			Some(ref tls_server) => {
+				let (raw_len, tls_len) =
+					Self::do_tls_server_read(&connection_info, ctx, wakeup, tls_server)?;
 				let do_read_now = raw_len <= 0 || tls_len > 0;
 				let len = if tls_len > 0 {
-					tls_len.try_into().unwrap_or(0)
+					tls_len.try_into()?
 				} else {
 					raw_len
 				};
 				(len, do_read_now)
 			}
 			None => match connection_info.tls_client {
-				Some(ref _tls_client) => {
+				Some(ref tls_client) => {
 					let (raw_len, tls_len) =
-						Self::do_tls_client_read(&connection_info, ctx, wakeup)?;
+						Self::do_tls_client_read(&connection_info, ctx, wakeup, tls_client)?;
 					let do_read_now = raw_len <= 0 || tls_len > 0;
 					let len = if tls_len > 0 {
-						tls_len.try_into().unwrap_or(0)
+						tls_len.try_into()?
 					} else {
 						raw_len
 					};
@@ -1133,16 +1132,17 @@ where
 		connection_info: &ReadWriteConnection,
 		ctx: &mut Context,
 		wakeup: &Wakeup,
+		tls_client: &Arc<RwLock<ClientConnection>>,
 	) -> Result<(isize, usize), Error> {
-		let pt_len;
+		let mut pt_len = 0;
 		let handle = connection_info.handle;
 
 		let len = do_read(handle, &mut ctx.buffer)?;
+
 		let mut wbuf = vec![];
-		{
-			let mut tls_conn =
-				nioruntime_util::lockw!(connection_info.tls_client.as_ref().unwrap())?;
-			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
+		if len > 0 {
+			let mut tls_conn = nioruntime_util::lockw!(tls_client)?;
+			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into()?])?;
 			match tls_conn.process_new_packets() {
 				Ok(io_state) => {
 					pt_len = io_state.plaintext_bytes_to_read();
@@ -1166,12 +1166,14 @@ where
 			tls_conn.write_tls(&mut wbuf)?;
 		}
 
-		let connection_data = &ConnectionData::new(
-			connection_info.clone(),
-			ctx.guarded_data.clone(),
-			wakeup.clone(),
-		);
-		connection_data.do_write(&wbuf)?;
+		if len > 0 {
+			let connection_data = &ConnectionData::new(
+				connection_info.clone(),
+				ctx.guarded_data.clone(),
+				wakeup.clone(),
+			);
+			connection_data.do_write(&wbuf)?;
+		}
 
 		Ok((len, pt_len))
 	}
@@ -1180,15 +1182,15 @@ where
 		connection_info: &ReadWriteConnection,
 		ctx: &mut Context,
 		wakeup: &Wakeup,
+		tls_server: &Arc<RwLock<ServerConnection>>,
 	) -> Result<(isize, usize), Error> {
-		let pt_len;
+		let mut pt_len = 0;
 		let handle = connection_info.handle;
 
 		let len = do_read(handle, &mut ctx.buffer)?;
 		let mut wbuf = vec![];
-		{
-			let mut tls_conn =
-				nioruntime_util::lockw!(connection_info.tls_server.as_ref().unwrap())?;
+		if len > 0 {
+			let mut tls_conn = nioruntime_util::lockw!(tls_server)?;
 			tls_conn.read_tls(&mut &ctx.buffer[0..len.try_into().unwrap_or(0)])?;
 
 			match tls_conn.process_new_packets() {
@@ -1213,13 +1215,15 @@ where
 			tls_conn.write_tls(&mut wbuf)?;
 		}
 
-		let connection_data = &ConnectionData::new(
-			connection_info.clone(),
-			ctx.guarded_data.clone(),
-			wakeup.clone(),
-		);
+		if len > 0 {
+			let connection_data = &ConnectionData::new(
+				connection_info.clone(),
+				ctx.guarded_data.clone(),
+				wakeup.clone(),
+			);
 
-		connection_data.do_write(&wbuf)?;
+			connection_data.do_write(&wbuf)?;
+		}
 
 		Ok((len, pt_len))
 	}
@@ -1899,12 +1903,12 @@ enum WriteResult {
 
 fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
 	#[cfg(unix)]
-	let len = {
+	{
 		let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
-		unsafe { read(handle, cbuf, buf.len()) }
-	};
+		Ok(unsafe { read(handle, cbuf, buf.len()) })
+	}
 	#[cfg(target_os = "windows")]
-	let len = {
+	{
 		let cbuf: *mut i8 = buf as *mut _ as *mut i8;
 		set_errno(Errno(0));
 		let mut len = unsafe { ws2_32::recv(handle.try_into()?, cbuf, buf.len().try_into()?, 0) };
@@ -1912,9 +1916,8 @@ fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
 			// would block
 			len = -2;
 		}
-		len
-	};
-	Ok(len.try_into().unwrap_or(-1))
+		Ok(len.try_into().unwrap_or(-1))
+	}
 }
 
 fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
@@ -1974,8 +1977,7 @@ fn make_config(trusted_cert_full_chain_file: Option<String>) -> Result<Arc<Clien
 	let config = ClientConfig::builder()
 		.with_safe_default_cipher_suites()
 		.with_safe_default_kx_groups()
-		.with_safe_default_protocol_versions()
-		.unwrap()
+		.with_safe_default_protocol_versions()?
 		.with_root_certificates(root_store)
 		.with_no_client_auth();
 
