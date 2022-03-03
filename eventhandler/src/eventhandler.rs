@@ -14,6 +14,7 @@
 
 //! An event handler library.
 
+use nioruntime_deps::bitvec::prelude::*;
 use nioruntime_deps::errno::{errno, set_errno, Errno};
 use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
@@ -284,6 +285,7 @@ pub struct EventHandlerConfig {
 	pub threads: usize,
 	pub read_buffer_size: usize,
 	pub max_rwhandles: usize,
+	pub max_handle_numeric_value: usize,
 }
 
 impl Default for EventHandlerConfig {
@@ -292,6 +294,9 @@ impl Default for EventHandlerConfig {
 			threads: 6,
 			read_buffer_size: 10 * 1024,
 			max_rwhandles: 1_000_000,
+			// 100 fd overhead for unix, windows skips handles, but should not be used
+			// for high performance so 1 million+ is enough there
+			max_handle_numeric_value: 1_000_100,
 		}
 	}
 }
@@ -943,7 +948,8 @@ where
 					None => warn!("no connection info for handle: {}", handle)?,
 				}
 
-				ctx.filter_set.remove(&handle);
+				let handle_as_usize: usize = handle.try_into()?;
+				ctx.filter_set.set(handle_as_usize, false);
 			}
 			None => {
 				warn!("Tried to close a connection that does not exist: {}", id)?;
@@ -1532,12 +1538,18 @@ where
 				interest |= EpollFlags::EPOLLET;
 				interest |= EpollFlags::EPOLLRDHUP;
 
-				let op = if ctx.filter_set.remove(&fd) {
-					EpollOp::EpollCtlMod
-				} else {
-					EpollOp::EpollCtlAdd
+				let handle_as_usize: usize = fd.try_into()?;
+				let op = match ctx.filter_set.get(handle_as_usize) {
+					Some(bitref) => {
+						if *bitref {
+							EpollOp::EpollCtlMod
+						} else {
+							EpollOp::EpollCtlAdd
+						}
+					}
+					None => EpollOp::EpollCtlAdd,
 				};
-				ctx.filter_set.insert(fd);
+				ctx.filter_set.set(handle_as_usize, true);
 
 				let mut event = EpollEvent::new(interest, evt.handle.try_into().unwrap_or(0));
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
@@ -1552,12 +1564,18 @@ where
 				interest |= EpollFlags::EPOLLRDHUP;
 				interest |= EpollFlags::EPOLLET;
 
-				let op = if ctx.filter_set.remove(&fd) {
-					EpollOp::EpollCtlMod
-				} else {
-					EpollOp::EpollCtlAdd
+				let handle_as_usize: usize = fd.try_into()?;
+				let op = match ctx.filter_set.get(handle_as_usize) {
+					Some(bitref) => {
+						if *bitref {
+							EpollOp::EpollCtlMod
+						} else {
+							EpollOp::EpollCtlAdd
+						}
+					}
+					None => EpollOp::EpollCtlAdd,
 				};
-				ctx.filter_set.insert(fd);
+				ctx.filter_set.set(handle_as_usize, true);
 
 				let mut event = EpollEvent::new(interest, evt.handle.try_into().unwrap_or(0));
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
@@ -1742,38 +1760,11 @@ where
 		timespec { tv_sec, tv_nsec }
 	}
 
-	#[cfg(target_os = "linux")]
-	fn _remove_handle(
-		selector: SelectorHandle,
-		connection_handle: Handle,
-		filter_set: &mut HashSet<Handle>,
-	) -> Result<(), Error> {
-		filter_set.remove(&connection_handle);
-		let interest = EpollFlags::empty();
-
-		let mut event = EpollEvent::new(interest, connection_handle.try_into().unwrap_or(0));
-		let res = epoll_ctl(
-			selector,
-			EpollOp::EpollCtlDel,
-			connection_handle,
-			&mut event,
-		);
-		match res {
-			Ok(_) => {}
-			Err(e) => error!(
-				"Error epoll_ctl on remove_handle: {}, fd={}, delete",
-				e, connection_handle
-			)?,
-		}
-
-		Ok(())
-	}
-
 	#[cfg(any(target_os = "macos", dragonfly, freebsd, netbsd, openbsd))]
 	fn _remove_handle(
 		_selector: SelectorHandle,
 		_connection_handle: Handle,
-		_filter_set: &mut HashSet<Handle>,
+		_filter_set: &mut BitVec,
 	) -> Result<(), Error> {
 		Ok(())
 	}
@@ -2309,7 +2300,7 @@ struct Context {
 	selector: SelectorHandle,
 	tid: usize,
 	buffer: Vec<u8>,
-	filter_set: HashSet<Handle>,
+	filter_set: BitVec,
 	#[cfg(target_os = "linux")]
 	epoll_events: Vec<EpollEvent>,
 	counter: usize, // used for handling panics
@@ -2328,12 +2319,17 @@ impl Context {
 		buffer.resize(config.read_buffer_size, 0u8);
 		#[cfg(target_os = "linux")]
 		let epoll_events = [EpollEvent::new(EpollFlags::empty(), 0); MAX_EVENTS as usize].to_vec();
+
+		let cap = config.max_handle_numeric_value;
+		let mut filter_set: BitVec = BitVec::with_capacity(cap);
+		filter_set.resize(cap, false);
+
 		Ok(Self {
 			counter: 0,
 			#[cfg(target_os = "linux")]
 			epoll_events,
 			guarded_data,
-			filter_set: HashSet::new(),
+			filter_set,
 			add_pending: vec![],
 			accepted_connections: vec![],
 			nwrites: vec![],
