@@ -20,6 +20,7 @@ use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
+use nioruntime_util::static_hash::StaticHash;
 use nioruntime_util::{lockr, lockw, lockwp};
 use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
@@ -539,7 +540,15 @@ where
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(HashSet::new()));
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
-		let mut connection_id_map = HashMap::new();
+		let mut connection_id_map = StaticHash::new(
+			3 * self.config.max_handle_numeric_value / self.config.threads,
+			16,
+			#[cfg(windows)]
+			8,
+			#[cfg(unix)]
+			4,
+			0.5,
+		)?;
 		let mut connection_handle_map = HashMap::new();
 
 		let config = self.config.clone();
@@ -547,7 +556,10 @@ where
 			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None);
 		let connection_id = connection_info.get_connection_id();
 		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
-		connection_id_map.insert(connection_id, wakeup.wakeup_handle_read);
+		connection_id_map.put(
+			&connection_id.to_be_bytes(),
+			&wakeup.wakeup_handle_read.to_be_bytes(),
+		);
 		ctx.input_events.push(Event {
 			handle: wakeup.wakeup_handle_read,
 			etype: EventType::Read,
@@ -674,7 +686,7 @@ where
 		events: &mut HashSet<Event>,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		start: usize,
 	) -> Result<bool, Error> {
@@ -796,7 +808,7 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
@@ -900,14 +912,26 @@ where
 		id: u128,
 		ctx: &mut Context,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		let handle = connection_id_map.remove(&id);
+		#[cfg(windows)]
+		let (found, handle) = {
+			let mut handle_bytes = [0u8; 8];
+			let found = connection_id_map.get(&id.to_be_bytes(), &mut handle_bytes)?;
+			(found, u64::from_be_bytes(handle_bytes))
+		};
+		#[cfg(unix)]
+		let (found, handle) = {
+			let mut handle_bytes = [0u8; 4];
+			let found = connection_id_map.get(&id.to_be_bytes(), &mut handle_bytes)?;
+			(found, i32::from_be_bytes(handle_bytes))
+		};
+		connection_id_map.remove(&id.to_be_bytes());
 
-		match handle {
-			Some(handle) => {
+		match found {
+			true => {
 				let connection_info = connection_handle_map.remove(&handle);
 				match connection_info {
 					Some(connection_info) => match connection_info {
@@ -951,7 +975,7 @@ where
 				let handle_as_usize: usize = handle.try_into()?;
 				ctx.filter_set.set(handle_as_usize, false);
 			}
-			None => {
+			false => {
 				warn!("Tried to close a connection that does not exist: {}", id)?;
 			}
 		}
@@ -1287,7 +1311,7 @@ where
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
@@ -1772,7 +1796,7 @@ where
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		wakeup: &Wakeup,
 	) -> Result<bool, Error> {
@@ -1820,13 +1844,28 @@ where
 
 	fn process_nwrites(
 		ctx: &mut Context,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
-			match connection_id_map.get(&connection_id) {
-				Some(handle) => match connection_handle_map.get_mut(handle) {
+			#[cfg(windows)]
+			let (found, handle) = {
+				let mut handle_bytes = [0u8; 8];
+				let found =
+					connection_id_map.get(&connection_id.to_be_bytes(), &mut handle_bytes)?;
+				(found, u64::from_be_bytes(handle_bytes))
+			};
+			#[cfg(unix)]
+			let (found, handle) = {
+				let mut handle_bytes = [0u8; 4];
+				let found =
+					connection_id_map.get(&connection_id.to_be_bytes(), &mut handle_bytes)?;
+				(found, i32::from_be_bytes(handle_bytes))
+			};
+
+			match found {
+				true => match connection_handle_map.get_mut(&handle) {
 					Some(conn_info) => match conn_info {
 						EventConnectionInfo::ReadWriteConnection(item) => {
 							info!("pushing wbuf to item = {:?}", item)?;
@@ -1843,7 +1882,7 @@ where
 						warn!("Handle not found for connection_id!")?;
 					}
 				},
-				None => {
+				false => {
 					trace!("Attempt to write on closed connection: {:?}", connection_id)?;
 				} // connection already disconnected
 			}
@@ -1854,14 +1893,14 @@ where
 
 	fn process_pending(
 		ctx: &mut Context,
-		connection_id_map: &mut HashMap<u128, Handle>,
+		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					connection_id_map.insert(item.id, item.handle);
+					connection_id_map.put(&item.id.to_be_bytes(), &item.handle.to_be_bytes());
 					connection_handle_map.insert(item.handle, pending.clone());
 					ctx.input_events.push(Event {
 						handle: item.handle,
@@ -1869,7 +1908,8 @@ where
 					});
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					connection_id_map.insert(item.id, item.handles[ctx.tid]);
+					connection_id_map
+						.put(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes());
 					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
 					info!(
 						"pushing accept handle: {} to tid={}",
@@ -2424,6 +2464,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -2525,6 +2566,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -2605,6 +2647,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -2712,6 +2755,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -2822,6 +2866,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -2880,6 +2925,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			max_rwhandles: 2,
 			..EventHandlerConfig::default()
@@ -2980,6 +3026,7 @@ mod tests {
 
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
 			threads: 3,
 			..EventHandlerConfig::default()
 		})?;
@@ -3074,6 +3121,7 @@ mod tests {
 		info!("Starting Eventhandler on {}", addr)?;
 		let mut evh = EventHandler::new(EventHandlerConfig {
 			threads: 1,
+			max_handle_numeric_value: 500,
 			..EventHandlerConfig::default()
 		})?;
 
