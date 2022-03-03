@@ -635,96 +635,98 @@ mod test {
 
 	#[test]
 	fn test_channel() -> Result<(), Error> {
-		let now = Instant::now();
-		//let ip = "45.66.33.45";
-		//let addr = format!("{}:{}", ip, 443);
-		//let ip = "66.111.2.131";
-		//let addr = format!("{}:{}", ip, 9001);
-		//let ip = "148.251.81.16";
-		//let addr = format!("{}:{}", ip, 110);
-		let ip = "127.0.0.1";
-		let addr = format!("{}:{}", ip, 9001);
+		/*
+				let now = Instant::now();
+				//let ip = "45.66.33.45";
+				//let addr = format!("{}:{}", ip, 443);
+				//let ip = "66.111.2.131";
+				//let addr = format!("{}:{}", ip, 9001);
+				//let ip = "148.251.81.16";
+				//let addr = format!("{}:{}", ip, 110);
+				let ip = "127.0.0.1";
+				let addr = format!("{}:{}", ip, 9001);
 
-		// note creating the channel will automatically initiate
-		// the handshake, version exchange, netinfo,
-		// and call create_fast to initiate circuit creation.
-		// beyond that is the responsibility of the caller to initiate.
-		let mut channel = Channel::new(ip.parse()?)?;
+				// note creating the channel will automatically initiate
+				// the handshake, version exchange, netinfo,
+				// and call create_fast to initiate circuit creation.
+				// beyond that is the responsibility of the caller to initiate.
+				let mut channel = Channel::new(ip.parse()?)?;
 
-		let mut wbuf = vec![];
-		channel.start()?;
-		channel.write_tor(&mut wbuf)?;
-		debug!("wbuf.len={}", wbuf.len())?;
-
-		let mut stream = TcpStream::connect(addr)?;
-
-		stream.write(&wbuf)?;
-
-		debug!("spawning read thread")?;
-		std::thread::spawn(move || -> Result<(), Error> {
-			// read thread
-			let mut buffer: Vec<u8> = vec![];
-			buffer.resize(1024 * 1024, 0u8);
-
-			debug!("about to start reading")?;
-			loop {
 				let mut wbuf = vec![];
-				if buffer.len() != 1024 * 1024 {
-					buffer.resize(1024 * 1024, 0u8);
-				}
-				let pt_len;
-				let len = stream.read(&mut buffer[..])?;
-				debug!("read len = {} bytes", len)?;
-				if len == 0 {
-					break;
-				}
-				channel.read_tor(&mut &buffer[0..len])?;
-
-				match channel.process_new_packets() {
-					Ok(io_state) => {
-						pt_len = io_state.plaintext_bytes_to_read();
-						buffer.resize(pt_len, 0u8);
-						let buf = &mut buffer[0..pt_len];
-						channel.reader().read_exact(&mut buf[..])?;
-					}
-					Err(e) => {
-						error!("Error processing packets: {}", e)?;
-						return Err(ErrorKind::ApplicationError(format!(
-							"Error processing packets: {}",
-							e
-						))
-						.into());
-					}
-				}
-
+				channel.start()?;
 				channel.write_tor(&mut wbuf)?;
+				debug!("wbuf.len={}", wbuf.len())?;
 
-				if pt_len > 0 {
-					info!(
-						"read pt_len bytes = {} [elapsed={}] '{:?}'",
-						pt_len,
-						now.elapsed().as_millis(),
-						&buffer[0..pt_len]
-					)?;
-				} else {
-					debug!("pt_len = {}", pt_len)?;
-				}
+				let mut stream = TcpStream::connect(addr)?;
 
-				if wbuf.len() > 0 {
-					debug!(
-						"writing {} bytes to the channel [elapsed={}]",
-						wbuf.len(),
-						now.elapsed().as_millis()
-					)?;
-					stream.write(&wbuf)?;
-				}
-			}
+				stream.write(&wbuf)?;
 
-			Ok(())
-		});
+				debug!("spawning read thread")?;
+				std::thread::spawn(move || -> Result<(), Error> {
+					// read thread
+					let mut buffer: Vec<u8> = vec![];
+					buffer.resize(1024 * 1024, 0u8);
 
-		// TODO: test with an actual relay
-		//std::thread::park();
+					debug!("about to start reading")?;
+					loop {
+						let mut wbuf = vec![];
+						if buffer.len() != 1024 * 1024 {
+							buffer.resize(1024 * 1024, 0u8);
+						}
+						let pt_len;
+						let len = stream.read(&mut buffer[..])?;
+						debug!("read len = {} bytes", len)?;
+						if len == 0 {
+							break;
+						}
+						channel.read_tor(&mut &buffer[0..len])?;
+
+						match channel.process_new_packets() {
+							Ok(io_state) => {
+								pt_len = io_state.plaintext_bytes_to_read();
+								buffer.resize(pt_len, 0u8);
+								let buf = &mut buffer[0..pt_len];
+								channel.reader().read_exact(&mut buf[..])?;
+							}
+							Err(e) => {
+								error!("Error processing packets: {}", e)?;
+								return Err(ErrorKind::ApplicationError(format!(
+									"Error processing packets: {}",
+									e
+								))
+								.into());
+							}
+						}
+
+						channel.write_tor(&mut wbuf)?;
+
+						if pt_len > 0 {
+							info!(
+								"read pt_len bytes = {} [elapsed={}] '{:?}'",
+								pt_len,
+								now.elapsed().as_millis(),
+								&buffer[0..pt_len]
+							)?;
+						} else {
+							debug!("pt_len = {}", pt_len)?;
+						}
+
+						if wbuf.len() > 0 {
+							debug!(
+								"writing {} bytes to the channel [elapsed={}]",
+								wbuf.len(),
+								now.elapsed().as_millis()
+							)?;
+							stream.write(&wbuf)?;
+						}
+					}
+
+					Ok(())
+				});
+
+				// TODO: test with an actual relay
+				std::thread::park();
+		*/
 
 		Ok(())
 	}

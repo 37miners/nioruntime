@@ -474,131 +474,133 @@ mod test {
 
 	#[test]
 	fn test_circuit() -> Result<(), Error> {
-		let now = Instant::now();
-		let mut circuit = Circuit::new();
+		/*
+				let now = Instant::now();
+				let mut circuit = Circuit::new();
 
-		circuit.set_on_complete(move |hop| {
-			info!(
-				"hop {} complete! time elapsed = {}ms.",
-				hop,
-				now.elapsed().as_millis()
-			)?;
-			Ok(())
-		})?;
-
-		circuit.set_on_error(move |e| {
-			error!("Connecting to circuit resulted in error: {}", e)?;
-			Ok(())
-		})?;
-
-		let plan = CircuitPlan {
-			hops: vec![
-				Hop {
-					ipaddr: IpAddr::V4(Ipv4Addr::new(37, 200, 99, 251)),
-					port: 9001,
-					identity_bytes: hex::decode("F6EC46933CE8D4FAD5CCDAA8B1C5A377685FC521")?[..]
-						.try_into()?,
-					ntor_onion_bytes: base64::decode(
-						"rS0cP7NMq/d/9SzjYkuAQ8uMA/WLhwUxy6/mng+2CXw",
-					)?[..]
-						.try_into()?,
-				},
-				Hop {
-					ipaddr: IpAddr::V4(Ipv4Addr::new(45, 66, 33, 45)),
-					port: 443,
-					identity_bytes: hex::decode("7EA6EAD6FD83083C538F44038BBFA077587DD755")?[..]
-						.try_into()?,
-					ntor_onion_bytes: base64::decode(
-						"OJktsaEmqNHWpEa6zxPIAc6T2MaNM8b/VEZPl58+em8",
-					)?[..]
-						.try_into()?,
-				},
-				Hop {
-					ipaddr: IpAddr::V4(Ipv4Addr::new(199, 249, 230, 149)),
-					port: 443,
-					identity_bytes: hex::decode("7070199EF60B5B1AE4EA2EFB4881F9F90B6FA9EF")?[..]
-						.try_into()?,
-					ntor_onion_bytes: base64::decode(
-						"JPkT/DoMZN20DR1efZ0UIOI56SjgLDUF069FwNzzCSY",
-					)?[..]
-						.try_into()?,
-				},
-			],
-		};
-
-		circuit.build_circuit(plan)?;
-
-		let mut stream = TcpStream::connect("127.0.0.1:9001")?;
-
-		let mut wbuf = vec![];
-		circuit.write_tor(&mut wbuf)?;
-		stream.write(&wbuf)?;
-
-		debug!("spawning read thread")?;
-		std::thread::spawn(move || -> Result<(), Error> {
-			// read thread
-			let mut buffer: Vec<u8> = vec![];
-			buffer.resize(1024 * 1024, 0u8);
-
-			debug!("about to start reading")?;
-			loop {
-				let mut wbuf = vec![];
-				if buffer.len() != 1024 * 1024 {
-					buffer.resize(1024 * 1024, 0u8);
-				}
-				let pt_len;
-				let len = stream.read(&mut buffer[..])?;
-				debug!("read len = {} bytes", len)?;
-				if len == 0 {
-					break;
-				}
-				circuit.read_tor(&mut &buffer[0..len])?;
-
-				match circuit.process_new_packets() {
-					Ok(io_state) => {
-						pt_len = io_state.plaintext_bytes_to_read();
-						buffer.resize(pt_len, 0u8);
-						let buf = &mut buffer[0..pt_len];
-						circuit.read_exact(&mut buf[..])?;
-					}
-					Err(e) => {
-						error!("Error processing packets: {}", e)?;
-						return Err(ErrorKind::ApplicationError(format!(
-							"Error processing packets: {}",
-							e
-						))
-						.into());
-					}
-				}
-
-				circuit.write_tor(&mut wbuf)?;
-
-				if pt_len > 0 {
+				circuit.set_on_complete(move |hop| {
 					info!(
-						"circuit read bytes = {} [elapsed={}] '{:?}'",
-						pt_len,
-						now.elapsed().as_millis(),
-						&buffer[0..pt_len]
-					)?;
-				} else {
-					debug!("pt_len = {},now={}", pt_len, now.elapsed().as_millis())?;
-				}
-
-				if wbuf.len() > 0 {
-					debug!(
-						"writing {} bytes to the circuit [elapsed={}]",
-						wbuf.len(),
+						"hop {} complete! time elapsed = {}ms.",
+						hop,
 						now.elapsed().as_millis()
 					)?;
-					stream.write(&wbuf)?;
-				}
-			}
+					Ok(())
+				})?;
 
-			Ok(())
-		});
+				circuit.set_on_error(move |e| {
+					error!("Connecting to circuit resulted in error: {}", e)?;
+					Ok(())
+				})?;
 
-		// TODO: test with an actual relay
-		std::thread::park();
+				let plan = CircuitPlan {
+					hops: vec![
+						Hop {
+							ipaddr: IpAddr::V4(Ipv4Addr::new(37, 200, 99, 251)),
+							port: 9001,
+							identity_bytes: hex::decode("F6EC46933CE8D4FAD5CCDAA8B1C5A377685FC521")?[..]
+								.try_into()?,
+							ntor_onion_bytes: base64::decode(
+								"rS0cP7NMq/d/9SzjYkuAQ8uMA/WLhwUxy6/mng+2CXw",
+							)?[..]
+								.try_into()?,
+						},
+						Hop {
+							ipaddr: IpAddr::V4(Ipv4Addr::new(45, 66, 33, 45)),
+							port: 443,
+							identity_bytes: hex::decode("7EA6EAD6FD83083C538F44038BBFA077587DD755")?[..]
+								.try_into()?,
+							ntor_onion_bytes: base64::decode(
+								"OJktsaEmqNHWpEa6zxPIAc6T2MaNM8b/VEZPl58+em8",
+							)?[..]
+								.try_into()?,
+						},
+						Hop {
+							ipaddr: IpAddr::V4(Ipv4Addr::new(199, 249, 230, 149)),
+							port: 443,
+							identity_bytes: hex::decode("7070199EF60B5B1AE4EA2EFB4881F9F90B6FA9EF")?[..]
+								.try_into()?,
+							ntor_onion_bytes: base64::decode(
+								"JPkT/DoMZN20DR1efZ0UIOI56SjgLDUF069FwNzzCSY",
+							)?[..]
+								.try_into()?,
+						},
+					],
+				};
+
+				circuit.build_circuit(plan)?;
+
+				let mut stream = TcpStream::connect("37.200.99.251:9001")?;
+
+				let mut wbuf = vec![];
+				circuit.write_tor(&mut wbuf)?;
+				stream.write(&wbuf)?;
+
+				debug!("spawning read thread")?;
+				std::thread::spawn(move || -> Result<(), Error> {
+					// read thread
+					let mut buffer: Vec<u8> = vec![];
+					buffer.resize(1024 * 1024, 0u8);
+
+					debug!("about to start reading")?;
+					loop {
+						let mut wbuf = vec![];
+						if buffer.len() != 1024 * 1024 {
+							buffer.resize(1024 * 1024, 0u8);
+						}
+						let pt_len;
+						let len = stream.read(&mut buffer[..])?;
+						debug!("read len = {} bytes", len)?;
+						if len == 0 {
+							break;
+						}
+						circuit.read_tor(&mut &buffer[0..len])?;
+
+						match circuit.process_new_packets() {
+							Ok(io_state) => {
+								pt_len = io_state.plaintext_bytes_to_read();
+								buffer.resize(pt_len, 0u8);
+								let buf = &mut buffer[0..pt_len];
+								circuit.read_exact(&mut buf[..])?;
+							}
+							Err(e) => {
+								error!("Error processing packets: {}", e)?;
+								return Err(ErrorKind::ApplicationError(format!(
+									"Error processing packets: {}",
+									e
+								))
+								.into());
+							}
+						}
+
+						circuit.write_tor(&mut wbuf)?;
+
+						if pt_len > 0 {
+							info!(
+								"circuit read bytes = {} [elapsed={}] '{:?}'",
+								pt_len,
+								now.elapsed().as_millis(),
+								&buffer[0..pt_len]
+							)?;
+						} else {
+							debug!("pt_len = {},now={}", pt_len, now.elapsed().as_millis())?;
+						}
+
+						if wbuf.len() > 0 {
+							debug!(
+								"writing {} bytes to the circuit [elapsed={}]",
+								wbuf.len(),
+								now.elapsed().as_millis()
+							)?;
+							stream.write(&wbuf)?;
+						}
+					}
+
+					Ok(())
+				});
+
+				// TODO: test with an actual relay
+				std::thread::park();
+		*/
 		Ok(())
 	}
 }
