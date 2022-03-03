@@ -86,6 +86,31 @@ impl Certs {
 	}
 }
 
+#[derive(Debug)]
+pub struct CreatedFast {
+	pub key_y: [u8; 20],
+	pub derivative_key_data: [u8; 20],
+}
+
+impl CreatedFast {
+	fn deserialize(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
+		let circ_id = u32::from_be_bytes(*array_ref![in_buf, 0, 4]);
+		let end = 514;
+		if in_buf.len() < end {
+			warn!("less then needed {}", in_buf.len())?;
+			Ok(None)
+		} else {
+			Ok(Some(Cell {
+				cell_body: CellBody::CreatedFast(CreatedFast {
+					key_y: *array_ref![in_buf, 5, 20],
+					derivative_key_data: *array_ref![in_buf, 25, 20],
+				}),
+				circ_id,
+			}))
+		}
+	}
+}
+
 // We don't fully support AuthChallenge because we are only a client
 #[derive(Debug)]
 pub struct AuthChallenge {}
@@ -268,10 +293,29 @@ impl NetInfo {
 }
 
 #[derive(Debug)]
+pub struct Relay {
+	pub body: Vec<u8>,
+}
+
+impl Relay {
+	fn deserialize(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
+		let circ_id = u32::from_be_bytes(*array_ref![in_buf, 0, 4]);
+		Ok(Some(Cell {
+			circ_id,
+			cell_body: CellBody::Relay(Relay {
+				body: in_buf[0..514].to_vec(),
+			}),
+		}))
+	}
+}
+
+#[derive(Debug)]
 pub enum CellBody {
 	Certs(Certs),
 	AuthChallenge(AuthChallenge),
 	NetInfo(NetInfo),
+	CreatedFast(CreatedFast),
+	Relay(Relay),
 }
 
 #[derive(Debug)]
@@ -289,6 +333,8 @@ pub fn next_cell(in_buf: &mut Vec<u8>) -> Result<Option<Cell>, Error> {
 		ChanCmd::CERTS => Certs::deserialize(in_buf)?,
 		ChanCmd::AUTH_CHALLENGE => AuthChallenge::deserialize(in_buf)?,
 		ChanCmd::NETINFO => NetInfo::deserialize(in_buf)?,
+		ChanCmd::CREATED_FAST => CreatedFast::deserialize(in_buf)?,
+		ChanCmd::RELAY => Relay::deserialize(in_buf)?,
 		_ => None,
 	})
 }

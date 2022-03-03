@@ -97,7 +97,7 @@ impl TorDirectory {
 		let mut relays = vec![];
 		let mut guards = vec![];
 		let mut stream = TcpStream::connect(directory_server)?;
-		stream.write(b"GET /tor/status-vote/current/consensus/ HTTP/1.0\r\n\r\n")?;
+		stream.write(b"GET /tor/status-vote/current/consensus-Microdesc HTTP/1.0\r\n\r\n")?;
 		let mut reader = BufReader::new(stream);
 		let mut next_host: Option<TorHost> = None;
 

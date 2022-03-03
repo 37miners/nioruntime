@@ -14,6 +14,8 @@
 
 use crate::cell::{next_cell, CellBody, Certs, NetInfo};
 use crate::common::IoState;
+use crate::crypto::handshake::fast::{CreateFastClient, CreateFastClientState, CreateFastServer};
+use crate::crypto::handshake::{ClientHandshake, KeyGenerator, ServerHandshake};
 use crate::x509_signature;
 use crate::{ChanCmd, CELL_LEN};
 use nioruntime_deps::arrayref::array_ref;
@@ -41,6 +43,9 @@ use tor_llcrypto as ll;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 
 debug!();
+
+//pub const FAST_C_HANDSHAKE_LEN: usize = 20;
+//pub struct CreateFastClientState(pub [u8; FAST_C_HANDSHAKE_LEN]);
 
 #[derive(Clone, Debug)]
 struct Verifier {}
@@ -149,6 +154,7 @@ pub struct Channel {
 	netinfo: Option<NetInfo>,
 	certs: Option<Certs>,
 	ip_addr: IpAddr,
+	create_fast_state: Option<CreateFastClientState>,
 }
 
 impl Channel {
@@ -166,13 +172,17 @@ impl Channel {
 			certs: None,
 			in_buf,
 			ip_addr,
+			create_fast_state: None,
 		})
 	}
 
-	pub fn start(&mut self, wbuf: &mut Vec<u8>) -> Result<(), Error> {
+	pub fn get_create_fast_state(&self) -> Option<&CreateFastClientState> {
+		self.create_fast_state.as_ref()
+	}
+
+	pub fn start(&mut self) -> Result<(), Error> {
 		let versions_msg: &[u8] = &[0, 0, ChanCmd::VERSIONS.into(), 0, 2, 0, 4];
 		self.tls_conn.writer().write_all(&versions_msg)?;
-		self.tls_conn.write_tls(wbuf)?;
 		Ok(())
 	}
 
@@ -289,13 +299,22 @@ impl Channel {
 
 	fn send_create_fast(&mut self) -> Result<(), Error> {
 		let mut create_fast = vec![255, 255, 255, 255, ChanCmd::CREATE_FAST.into()];
-		let rand_bytes: [u8; 20] = nioruntime_deps::rand::random();
-		create_fast.append(&mut rand_bytes.to_vec());
+
+		let mut rng = nioruntime_deps::rand::thread_rng();
+		let (state, mut cmsg) = CreateFastClient::client1(&mut rng, &()).unwrap();
+		let (s_kg, smsg) = CreateFastServer::server(&mut rng, &[()], cmsg.clone()).unwrap();
+		let c_kg = CreateFastClient::client2(state.clone(), smsg).unwrap();
+		let s_key = s_kg.expand(100).unwrap();
+		let c_key = c_kg.expand(100).unwrap();
+		assert_eq!(c_key, s_key);
+
+		self.create_fast_state = Some(state);
+		create_fast.append(&mut cmsg);
 		create_fast.resize(CELL_LEN, 0u8);
 
 		debug!("sending create_fast = {:?}", create_fast)?;
 
-		self.writer().write(&create_fast)?;
+		self.tls_conn.writer().write(&create_fast)?;
 
 		Ok(())
 	}
@@ -323,7 +342,7 @@ impl Channel {
 		};
 		let mut netinfo = NetInfo::serialize(netinfo)?;
 		debug!("Sending netinfo to peer: {:?}", netinfo)?;
-		self.writer().write(&mut netinfo)?;
+		self.tls_conn.writer().write(&mut netinfo)?;
 		Ok(())
 	}
 
@@ -633,7 +652,8 @@ mod test {
 		let mut channel = Channel::new(ip.parse()?)?;
 
 		let mut wbuf = vec![];
-		channel.start(&mut wbuf)?;
+		channel.start()?;
+		channel.write_tor(&mut wbuf)?;
 		debug!("wbuf.len={}", wbuf.len())?;
 
 		let mut stream = TcpStream::connect(addr)?;

@@ -775,6 +775,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebdb29d2ea9ed0083cd8cece49bbd968021bd99b0849edb4a9a7ee0fdf6a4e0"
 
 [[package]]
+name = "hkdf"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "791a029f6b9fc27657f6f188ec6e5e43f6911f6f878e0dc5501396e09809d437"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.3",
+]
+
+[[package]]
 name = "idna"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -987,6 +1005,7 @@ dependencies = [
  "bytes 0.5.6",
  "caret",
  "chrono",
+ "cipher",
  "colored",
  "digest 0.10.3",
  "ed25519-dalek",
@@ -994,7 +1013,10 @@ dependencies = [
  "failure",
  "failure_derive",
  "futures",
+ "generic-array 0.14.5",
  "hex-literal",
+ "hkdf",
+ "hmac",
  "kqueue-sys",
  "lazy_static",
  "libc",
@@ -1003,15 +1025,19 @@ dependencies = [
  "num_enum",
  "portpicker",
  "rand 0.8.4",
+ "rand_core 0.6.3",
  "rustls",
  "rustls-pemfile",
  "serde",
  "signature",
+ "subtle",
+ "typenum",
  "webpki-roots",
  "wepoll-sys",
  "winapi 0.2.8",
  "ws2_32-sys",
  "x509-signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -1599,6 +1625,7 @@ dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
  "nioruntime_log",
+ "nioruntime_util",
  "tor-bytes",
  "tor-checkable",
  "tor-llcrypto",

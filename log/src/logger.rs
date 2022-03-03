@@ -318,7 +318,10 @@ impl LogImpl {
 				if self.config.colors {
 					match level {
 						TRACE | DEBUG => {
-							print!("({}) ", DISPLAY_ARRAY[level.try_into().unwrap_or(0)])
+							print!(
+								"({}) ",
+								DISPLAY_ARRAY[level.try_into().unwrap_or(0)].magenta()
+							)
 						}
 						INFO => print!(
 							"({}) ",
