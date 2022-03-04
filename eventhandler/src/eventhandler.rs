@@ -938,7 +938,7 @@ where
 								{
 									let mut write_status = lockw!(c.write_status)?;
 									(*write_status).set_is_closed();
-									(*write_status).write_buffer.clear();
+									(*write_status).write_buffer.truncate(0);
 								}
 								{
 									let mut cur_connections = lockw!(ctx.cur_connections)?;
