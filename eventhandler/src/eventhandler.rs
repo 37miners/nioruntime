@@ -190,7 +190,7 @@ impl ConnectionData {
 			// first try to write in our own thread, check if closed first.
 			let mut write_status = lockw!(self.connection_info.write_status)?;
 
-			if (*write_status).is_closed {
+			if (*write_status).is_closed() {
 				return Err(ErrorKind::ConnectionClosedError(format!(
 					"connection {} already closed",
 					self.get_connection_id()
@@ -198,7 +198,7 @@ impl ConnectionData {
 				.into());
 			}
 
-			if (*write_status).is_pending {
+			if (*write_status).is_pending() {
 				// there are pending writes, we cannot write here.
 				// return that 0 bytes were written and pass on to
 				// main thread loop
@@ -206,20 +206,17 @@ impl ConnectionData {
 				0
 			} else {
 				let wlen = write_bytes(self.connection_info.get_handle(), &data)?;
-				if wlen >= 0 {
-					(*write_status).total_bytes_written += wlen as u128;
-				}
 
 				let start_data = if wlen > 0 { wlen as usize } else { 0 as usize };
 
 				if start_data > 0 && start_data < data.len() {
-					(*write_status).is_pending = true;
+					(*write_status).set_is_pending(true);
 					(*write_status)
 						.write_buffer
 						.append(&mut data[start_data..].to_vec());
 				} else if start_data == 0 && errno().0 == libc::EAGAIN {
 					// blocking so add it to the buffer
-					(*write_status).is_pending = true;
+					(*write_status).set_is_pending(true);
 					(*write_status)
 						.write_buffer
 						.append(&mut data[start_data..].to_vec());
@@ -255,14 +252,14 @@ impl ConnectionData {
 	pub fn close(&self) -> Result<(), Error> {
 		{
 			let mut write_status = lockw!(self.connection_info.write_status)?;
-			if (*write_status).is_closed {
+			if (*write_status).is_closed() {
 				return Err(ErrorKind::ConnectionClosedError(format!(
 					"connection {} already closed",
 					self.get_connection_id()
 				))
 				.into());
 			}
-			(*write_status).close_oncomplete = true;
+			(*write_status).set_close_oncomplete();
 		}
 
 		self.notify_selector_thread()?;
@@ -559,7 +556,7 @@ where
 		connection_id_map.put(
 			&connection_id.to_be_bytes(),
 			&wakeup.wakeup_handle_read.to_be_bytes(),
-		);
+		)?;
 		ctx.input_events.push(Event {
 			handle: wakeup.wakeup_handle_read,
 			etype: EventType::Read,
@@ -928,7 +925,7 @@ where
 			let found = connection_id_map.get(&id.to_be_bytes(), &mut handle_bytes)?;
 			(found, i32::from_be_bytes(handle_bytes))
 		};
-		connection_id_map.remove(&id.to_be_bytes());
+		connection_id_map.remove(&id.to_be_bytes())?;
 
 		match found {
 			true => {
@@ -940,7 +937,7 @@ where
 								ctx.saturating_handles.remove(&handle);
 								{
 									let mut write_status = lockw!(c.write_status)?;
-									(*write_status).is_closed = true;
+									(*write_status).set_is_closed();
 									(*write_status).write_buffer.clear();
 								}
 								{
@@ -1334,13 +1331,12 @@ where
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
 				let connection_id = connection_info.get_connection_id();
 				info!("connection_info={:?}", connection_info)?;
-				let mut len_sum = 0;
 
 				let mut write_status = lockw!(connection_info.write_status)?;
 				loop {
 					if (*write_status).write_buffer.len() == 0 {
-						(*write_status).is_pending = false;
-						if (*write_status).close_oncomplete {
+						(*write_status).set_is_pending(false);
+						if (*write_status).close_oncomplete() {
 							to_remove.push(connection_id);
 						} else {
 							// add a read event so that only reads will trigger
@@ -1351,15 +1347,11 @@ where
 						}
 						break; // we're done
 					}
-					let (wr, len) =
+					let (wr, _len) =
 						Self::write_loop(event.handle, &mut (*write_status).write_buffer)?;
 
 					match wr {
-						WriteResult::Ok => {
-							if len > 0 {
-								len_sum += len as u128;
-							}
-						}
+						WriteResult::Ok => {}
 						WriteResult::Err => {
 							// error occurred. must close conn
 							to_remove.push(connection_id);
@@ -1371,7 +1363,6 @@ where
 						}
 					}
 				}
-				(*write_status).total_bytes_written += len_sum;
 			}
 			EventConnectionInfo::ListenerConnection(_connection_info) => {
 				warn!("tried to write to a listener: {:?}", event)?;
@@ -1900,7 +1891,7 @@ where
 		for pending in &ctx.add_pending {
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					connection_id_map.put(&item.id.to_be_bytes(), &item.handle.to_be_bytes());
+					connection_id_map.put(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
 					ctx.input_events.push(Event {
 						handle: item.handle,
@@ -1909,7 +1900,7 @@ where
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
 					connection_id_map
-						.put(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes());
+						.put(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
 					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
 					info!(
 						"pushing accept handle: {} to tid={}",
@@ -2041,21 +2032,47 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 #[derive(Debug, Clone)]
 pub struct WriteStatus {
 	write_buffer: Vec<u8>,
-	close_oncomplete: bool,
-	is_pending: bool,
-	is_closed: bool,
-	total_bytes_written: u128,
+	flags: u8,
 }
+
+const FLAG_CLOSE_ONCOMPLETE: u8 = 0x1 << 0;
+const FLAG_IS_CLOSED: u8 = 0x1 << 1;
+const FLAG_IS_PENDING: u8 = 0x1 << 2;
 
 impl WriteStatus {
 	fn new() -> Self {
 		Self {
 			write_buffer: vec![],
-			close_oncomplete: false,
-			is_closed: false,
-			is_pending: false,
-			total_bytes_written: 0,
+			flags: 0,
 		}
+	}
+
+	fn set_close_oncomplete(&mut self) {
+		self.flags |= FLAG_CLOSE_ONCOMPLETE;
+	}
+
+	fn close_oncomplete(&self) -> bool {
+		(self.flags & FLAG_CLOSE_ONCOMPLETE) != 0
+	}
+
+	fn set_is_pending(&mut self, value: bool) {
+		if value {
+			self.flags |= FLAG_IS_PENDING;
+		} else {
+			self.flags &= !FLAG_IS_PENDING;
+		}
+	}
+
+	fn is_pending(&self) -> bool {
+		(self.flags & FLAG_IS_PENDING) != 0
+	}
+
+	fn set_is_closed(&mut self) {
+		self.flags |= FLAG_IS_CLOSED;
+	}
+
+	fn is_closed(&self) -> bool {
+		(self.flags & FLAG_IS_CLOSED) != 0
 	}
 }
 
