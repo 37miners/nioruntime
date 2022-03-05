@@ -100,7 +100,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 										readable = format!(
                                                                                         "{}\n\
                                                                                         {}: match reader.read_u8()? {{ 0 => false, _ => true }},",
-                                                                                        readable, field_id 
+                                                                                        readable, field_id
                                                                                 );
 										skip = false;
 									}
