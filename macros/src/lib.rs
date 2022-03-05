@@ -16,11 +16,12 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro::TokenTree::{Group, Ident, Literal, Punct};
 
-#[proc_macro_derive(Ser)]
-pub fn derive_ser(strm: TokenStream) -> TokenStream {
+#[proc_macro_derive(Serializable)]
+pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 	let mut found_struct = false;
 	let mut readable = "".to_string();
 	let mut writeable = "".to_string();
+	let mut group_item_count = 0;
 	for item in strm {
 		match item {
 			Ident(ident) => {
@@ -51,15 +52,29 @@ pub fn derive_ser(strm: TokenStream) -> TokenStream {
 				found_struct = false;
 
 				let mut id: Option<String> = None;
+				let mut skip = false;
 
+				let mut items = vec![];
 				for item in group.stream() {
-					match &item {
+					items.push(item);
+				}
+				group_item_count = items.len();
+				let mut i = 0;
+				loop {
+					if i >= items.len() {
+						break;
+					}
+					let item = &items[i];
+					i += 1;
+					match item {
 						Ident(ident) => {
-							if id.is_none() {
+							if &ident.to_string()[..] == "pub" {
+								continue;
+							}
+							if id.is_none() && !skip {
 								id = Some(ident.to_string());
-							} else {
+							} else if id.is_some() {
 								let field_id = id.unwrap();
-
 								let ident = &ident.to_string()[..];
 								match ident {
 									"u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16"
@@ -74,14 +89,124 @@ pub fn derive_ser(strm: TokenStream) -> TokenStream {
 											{}: reader.read_{}()?,",
 											readable, field_id, ident
 										);
+										skip = false;
 									}
-									_ => {}
+									"bool" => {
+										writeable = format!(
+                                                                                        "{}\n\
+                                                                                        writer.write_u8(match self.{} {{ true => 1, false => 0}})?;",
+                                                                                        writeable, field_id
+                                                                                );
+										readable = format!(
+                                                                                        "{}\n\
+                                                                                        {}: match reader.read_u8()? {{ 0 => false, _ => true }},",
+                                                                                        readable, field_id 
+                                                                                );
+										skip = false;
+									}
+									"Vec" => {
+										writeable = format!(
+											"{}\n\
+											nioruntime_util::ser::Writeable::write(&self.{}, writer)?;",
+											writeable, field_id,
+										);
+										readable = format!(
+											"{}\n\
+											{}: {{\n\
+												let l = reader.read_u64()?;\n\
+												let mut v = vec![];\n\
+												for _ in 0..l {{\n\
+													v.push(Readable::read(reader)?);\n\
+												}}\n\
+												v\n\
+											}},",
+											readable, field_id
+										);
+										skip = true;
+									}
+									"Option" => {
+										writeable = format!(
+                                                                                        "{}\n\
+                                                                                        match &self.{} {{\n\
+												Some(x) => {{\n\
+													writer.write_u8(1)?;\n\
+													nioruntime_util::ser::Writeable::write(&x, writer)?;\n\
+												}},\n\
+												None => writer.write_u8(0)?,\n\
+											}}",
+											writeable, field_id
+                                                                                );
+										readable = format!(
+                                                                                        "{}\n\
+                                                                                        {}: match reader.read_u8()? {{\n\
+												0 => None,\n\
+												_ => Some(Readable::read(reader)?),\n\
+                                                                                        }},",
+                                                                                        readable, field_id
+                                                                                );
+										skip = true;
+									}
+									_ => {
+										writeable = format!(
+											"{}\n\
+											nioruntime_util::ser::Writeable::write(&self.{}, writer)?;",
+											writeable, field_id
+										);
+										readable = format!(
+											"{}\n\
+											{}: Readable::read(reader)?,",
+											readable, field_id
+										);
+										skip = false;
+									}
 								}
 
 								id = None;
+							} else {
+								if &ident.to_string()[..] != "Vec"
+									&& &ident.to_string()[..] != "Option"
+								{
+									skip = false;
+								}
 							}
 						}
-						Group(_group) => {}
+						Group(group) => {
+							let stream = group.stream();
+							let mut items = vec![];
+							for item in stream {
+								items.push(item);
+							}
+							if items.len() == 3 {
+								if items[1].to_string() == ";" {
+									let field_id = id.unwrap();
+									let len: usize = items[2].to_string().parse().unwrap();
+									readable = format!(
+										"{}\n\
+										{}: [",
+										readable, field_id,
+									);
+									for i in 0..len {
+										writeable = format!(
+											"{}\n\
+											nioruntime_util::ser::Writeable::write(&self.{}[{}], writer)?;",
+											writeable, field_id, i
+										);
+										readable = format!(
+											"{}\n\
+											Readable::read(reader)?,",
+											readable
+										);
+									}
+
+									readable = format!(
+										"{}\n\
+										]",
+										readable
+									);
+									id = None;
+								}
+							}
+						}
 						Punct(_punct) => {}
 						Literal(_literal) => {}
 					}
@@ -89,6 +214,19 @@ pub fn derive_ser(strm: TokenStream) -> TokenStream {
 			}
 			_ => {}
 		}
+	}
+
+	if group_item_count == 1 {
+		writeable = format!(
+			"{}\n\
+			nioruntime_util::ser::Writeable::write(&self.0, writer)?;",
+			writeable
+		);
+		readable = format!(
+			"{}\n\
+			0: Readable::read(reader)?,",
+			readable
+		);
 	}
 
 	writeable = format!(
@@ -105,6 +243,5 @@ pub fn derive_ser(strm: TokenStream) -> TokenStream {
 	);
 
 	let ret = format!("{}{}", readable, writeable,);
-
 	ret.parse().unwrap()
 }

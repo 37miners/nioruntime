@@ -22,6 +22,7 @@
 use nioruntime_deps::byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use nioruntime_deps::bytes::Buf;
 use nioruntime_err::{Error, ErrorKind};
+use std::convert::TryInto;
 use std::io::{self, Read, Write};
 use std::marker;
 
@@ -625,6 +626,52 @@ impl_int!(u64, write_u64, read_u64);
 impl_int!(i64, write_i64, read_i64);
 impl_int!(i8, write_i8, read_i8);
 impl_int!(i16, write_i16, read_i16);
+impl_int!(u128, write_u128, read_u128);
+impl_int!(i128, write_i128, read_i128);
+
+impl Readable for bool {
+	fn read<R: Reader>(reader: &mut R) -> Result<bool, Error> {
+		Ok(reader.read_u8()? != 0)
+	}
+}
+
+impl Writeable for bool {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		writer.write_u8(match self {
+			true => 1,
+			false => 0,
+		})?;
+		Ok(())
+	}
+}
+
+impl<T> Readable for Option<T>
+where
+	T: Readable,
+{
+	fn read<R: Reader>(reader: &mut R) -> Result<Option<T>, Error> {
+		match reader.read_u8()? {
+			0 => Ok(None),
+			_ => Ok(Some(T::read(reader)?)),
+		}
+	}
+}
+
+impl<T> Writeable for Option<T>
+where
+	T: Writeable,
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		match self {
+			Some(o) => {
+				writer.write_u8(1)?;
+				Writeable::write(o, writer)?;
+			}
+			None => writer.write_u8(0)?,
+		}
+		Ok(())
+	}
+}
 
 impl<T> Readable for Vec<T>
 where
@@ -632,17 +679,9 @@ where
 {
 	fn read<R: Reader>(reader: &mut R) -> Result<Vec<T>, Error> {
 		let mut buf = Vec::new();
-		loop {
-			let elem = T::read(reader);
-			match elem {
-				Ok(e) => buf.push(e),
-				Err(e) => {
-					// TODO: check this logic
-					if e.kind() == ErrorKind::UnexpectedEof("".to_string()) {
-						break;
-					}
-				}
-			}
+		let len = reader.read_u64()?;
+		for _ in 0..len {
+			buf.push(T::read(reader)?);
 		}
 		Ok(buf)
 	}
@@ -653,6 +692,7 @@ where
 	T: Writeable,
 {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		writer.write_u64(self.len().try_into()?)?;
 		for elmt in self {
 			elmt.write(writer)?;
 		}
