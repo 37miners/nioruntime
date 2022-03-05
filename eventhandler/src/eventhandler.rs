@@ -96,10 +96,59 @@ type SelectorHandle = i32;
 #[cfg(target_os = "windows")]
 type SelectorHandle = u64;
 
+#[cfg(windows)]
+const HANDLE_SIZE: usize = 8;
+#[cfg(unix)]
+const HANDLE_SIZE: usize = 4;
+
+const HANDLE_INFO_SIZE: usize = 17;
+
 #[cfg(unix)]
 type Handle = RawFd;
 #[cfg(windows)]
 type Handle = u64;
+
+const _FLAG_IS_LISTENER: u8 = 0x1 << 0;
+const _FLAG_IS_SATURATING: u8 = 0x1 << 1;
+const _FLAG_IS_TLS_SERVER: u8 = 0x1 << 2;
+const _FLAG_IS_TLS_CLIENT: u8 = 0x1 << 3;
+
+struct HandleInfo {
+	connection_id: u128,
+	flags: u8,
+}
+
+impl HandleInfo {
+	fn new(connection_id: u128, flags: u8) -> Self {
+		Self {
+			connection_id,
+			flags,
+		}
+	}
+
+	fn to_bytes(&self, b: &mut [u8]) -> Result<(), Error> {
+		if b.len() != HANDLE_INFO_SIZE {
+			Err(ErrorKind::OtherError("Wrong length".into()).into())
+		} else {
+			(&mut b[0..16]).clone_from_slice(&u128::to_be_bytes(self.connection_id));
+			b[16] = self.flags;
+			Ok(())
+		}
+	}
+
+	fn _from_bytes(b: &[u8]) -> Result<Self, Error> {
+		if b.len() != HANDLE_INFO_SIZE {
+			Err(ErrorKind::OtherError("Wrong length".into()).into())
+		} else {
+			let connection_id = u128::from_be_bytes(b[0..16].try_into()?);
+			let flags = b[16];
+			Ok(Self {
+				connection_id,
+				flags,
+			})
+		}
+	}
+}
 
 #[derive(Debug)]
 pub struct ConnectionData {
@@ -110,10 +159,13 @@ pub struct ConnectionData {
 
 impl ConnectionData {
 	fn new(
-		connection_info: ReadWriteConnection,
-		guarded_data: Arc<RwLock<GuardedData>>,
-		wakeup: Wakeup,
+		connection_info: &ReadWriteConnection,
+		guarded_data: &Arc<RwLock<GuardedData>>,
+		wakeup: &Wakeup,
 	) -> Self {
+		let connection_info = connection_info.clone();
+		let guarded_data = guarded_data.clone();
+		let wakeup = wakeup.clone();
 		Self {
 			connection_info,
 			guarded_data,
@@ -480,8 +532,8 @@ where
 
 		Ok(ConnectionData::new(
 			connection_info.as_read_write_connection()?,
-			guarded_data,
-			wakeup,
+			&guarded_data,
+			&wakeup,
 		))
 	}
 
@@ -540,23 +592,36 @@ where
 		let mut connection_id_map = StaticHash::new(
 			3 * self.config.max_handle_numeric_value / self.config.threads,
 			16,
-			#[cfg(windows)]
-			8,
-			#[cfg(unix)]
-			4,
-			0.5,
+			HANDLE_SIZE,
+			0.85,
+		)?;
+		let mut handle_hash = StaticHash::new(
+			3 * self.config.max_handle_numeric_value / self.config.threads,
+			HANDLE_SIZE,
+			HANDLE_INFO_SIZE.try_into()?,
+			0.85,
 		)?;
 		let mut connection_handle_map = HashMap::new();
 
 		let config = self.config.clone();
+
+		// add the wakeup handle to all hashtables
 		let connection_info =
 			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None);
 		let connection_id = connection_info.get_connection_id();
 		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
+		let handle_info = HandleInfo::new(connection_id, 0);
+		let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
+		handle_info.to_bytes(&mut handle_info_bytes)?;
+		handle_hash.put(
+			&wakeup.wakeup_handle_read.to_be_bytes(),
+			&mut handle_info_bytes,
+		)?;
 		connection_id_map.put(
 			&connection_id.to_be_bytes(),
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 		)?;
+
 		ctx.input_events.push(Event {
 			handle: wakeup.wakeup_handle_read,
 			etype: EventType::Read,
@@ -565,6 +630,7 @@ where
 		let ctx = Arc::new(RwLock::new(ctx));
 		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
 		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
+		let handle_hash = Arc::new(RwLock::new(handle_hash));
 		let stopped = self.stopped.clone();
 
 		std::thread::spawn(move || -> Result<(), Error> {
@@ -573,6 +639,7 @@ where
 				let ctx = ctx.clone();
 				let connection_id_map = connection_id_map.clone();
 				let connection_handle_map = connection_handle_map.clone();
+				let handle_hash = handle_hash.clone();
 				let callbacks = callbacks.clone();
 				let callbacks_clone = callbacks.clone();
 				let wakeup = wakeup.clone();
@@ -582,6 +649,7 @@ where
 					let mut ctx = &mut *lockwp!(ctx);
 					let mut connection_id_map = &mut *lockwp!(connection_id_map);
 					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
+					let mut handle_hash = &mut *lockwp!(handle_hash);
 					let callbacks = &mut *lockwp!(callbacks);
 
 					let mut stop = false;
@@ -596,6 +664,7 @@ where
 						&callbacks,
 						&mut connection_id_map,
 						&mut connection_handle_map,
+						&mut handle_hash,
 						next,
 					) {
 						Ok(do_stop) => {
@@ -619,6 +688,7 @@ where
 							&callbacks,
 							&mut connection_id_map,
 							&mut connection_handle_map,
+							&mut handle_hash,
 							0,
 						) {
 							Ok(do_stop) => {
@@ -685,6 +755,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 		start: usize,
 	) -> Result<bool, Error> {
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
@@ -695,6 +766,7 @@ where
 				config,
 				connection_id_map,
 				connection_handle_map,
+				handle_hash,
 				wakeup,
 			)?;
 			if stop {
@@ -734,6 +806,7 @@ where
 						callbacks,
 						connection_id_map,
 						connection_handle_map,
+						handle_hash,
 						wakeup,
 					);
 
@@ -759,6 +832,7 @@ where
 					callbacks,
 					connection_id_map,
 					connection_handle_map,
+					handle_hash,
 					wakeup,
 				)?,
 				EventType::Accept => {} // accepts are returned as read.
@@ -778,6 +852,7 @@ where
 				callbacks,
 				connection_id_map,
 				connection_handle_map,
+				handle_hash,
 				wakeup,
 			);
 
@@ -807,6 +882,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event)?;
@@ -822,10 +898,8 @@ where
 					.into())
 				}
 			};
-			let _connection_id = connection_info.get_connection_id();
-			let handle = connection_info.get_handle(ctx.tid);
 
-			debug!("process conn_info: {:?}", connection_info)?;
+			let handle = event.handle;
 
 			match &*connection_info {
 				EventConnectionInfo::ListenerConnection(c) => {
@@ -844,13 +918,13 @@ where
 					None
 				}
 				EventConnectionInfo::ReadWriteConnection(c) => {
-					info!("start loop")?;
+					debug!("start loop")?;
 					let mut len;
 					let mut sat_count = 0;
 					loop {
 						set_errno(Errno(0));
-						len = Self::process_read(c.clone(), ctx, wakeup, callbacks, config)?;
-						info!("len={}, c={:?}", len, c)?;
+						len = Self::process_read(&c, ctx, wakeup, callbacks, config)?;
+						debug!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							ctx.saturating_handles.remove(&c.get_handle());
 							break;
@@ -896,6 +970,7 @@ where
 					callbacks,
 					connection_id_map,
 					connection_handle_map,
+					handle_hash,
 					wakeup,
 				)?;
 			}
@@ -911,24 +986,18 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		#[cfg(windows)]
-		let (found, handle) = {
-			let mut handle_bytes = [0u8; 8];
-			let found = connection_id_map.get(&id.to_be_bytes(), &mut handle_bytes)?;
-			(found, u64::from_be_bytes(handle_bytes))
-		};
-		#[cfg(unix)]
-		let (found, handle) = {
-			let mut handle_bytes = [0u8; 4];
-			let found = connection_id_map.get(&id.to_be_bytes(), &mut handle_bytes)?;
-			(found, i32::from_be_bytes(handle_bytes))
-		};
-		connection_id_map.remove(&id.to_be_bytes())?;
+		let handle_bytes = connection_id_map.remove(&id.to_be_bytes());
 
-		match found {
-			true => {
+		match handle_bytes {
+			Some(handle_bytes) => {
+				handle_hash.remove(handle_bytes);
+				#[cfg(windows)]
+				let handle = u64::from_be_bytes(handle_bytes.try_into()?);
+				#[cfg(unix)]
+				let handle = i32::from_be_bytes(handle_bytes.try_into()?);
 				let connection_info = connection_handle_map.remove(&handle);
 				match connection_info {
 					Some(connection_info) => match connection_info {
@@ -956,9 +1025,9 @@ where
 							match callbacks.on_close.as_ref() {
 								Some(on_close) => {
 									(on_close)(&ConnectionData::new(
-										connection_info.get_read_write_connection_info()?.clone(),
-										ctx.guarded_data.clone(),
-										wakeup.clone(),
+										connection_info.get_read_write_connection_info()?,
+										&ctx.guarded_data,
+										&wakeup,
 									))?;
 								}
 								None => warn!("no on_close callback")?,
@@ -972,7 +1041,7 @@ where
 				let handle_as_usize: usize = handle.try_into()?;
 				ctx.filter_set.set(handle_as_usize, false);
 			}
-			false => {
+			None => {
 				warn!("Tried to close a connection that does not exist: {}", id)?;
 			}
 		}
@@ -1082,9 +1151,9 @@ where
 			match &callbacks.on_accept {
 				Some(on_accept) => {
 					let conn_data = ConnectionData::new(
-						connection_info.get_read_write_connection_info()?.clone(),
-						ctx.guarded_data.clone(),
-						wakeup.clone(),
+						connection_info.get_read_write_connection_info()?,
+						&ctx.guarded_data,
+						&wakeup,
 					);
 					match (on_accept)(&conn_data) {
 						Ok(_) => {}
@@ -1110,7 +1179,7 @@ where
 	}
 
 	fn process_read(
-		connection_info: ReadWriteConnection,
+		connection_info: &ReadWriteConnection,
 		ctx: &mut Context,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
@@ -1194,11 +1263,7 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(
-				connection_info.clone(),
-				ctx.guarded_data.clone(),
-				wakeup.clone(),
-			);
+			let connection_data = &ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
 			connection_data.do_write(&wbuf)?;
 		}
 
@@ -1243,11 +1308,7 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(
-				connection_info.clone(),
-				ctx.guarded_data.clone(),
-				wakeup.clone(),
-			);
+			let connection_data = &ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
 
 			connection_data.do_write(&wbuf)?;
 		}
@@ -1256,7 +1317,7 @@ where
 	}
 
 	fn process_read_result(
-		connection_info: ReadWriteConnection,
+		connection_info: &ReadWriteConnection,
 		len: isize,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
@@ -1272,15 +1333,12 @@ where
 		if wakeup.wakeup_handle_read == connection_info.handle {
 			// wakeup event
 		} else if len > 0 {
-			info!("read {} bytes", len)?;
+			debug!("read {} bytes", len)?;
 			// non-wakeup, so execute on_read callback
 			match &callbacks.on_read {
 				Some(on_read) => {
-					let connection_data = &ConnectionData::new(
-						connection_info,
-						ctx.guarded_data.clone(),
-						wakeup.clone(),
-					);
+					let connection_data =
+						&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
 					match (on_read)(connection_data, &ctx.buffer[0..len.try_into()?]) {
 						Ok(_) => {}
 						Err(e) => {
@@ -1310,6 +1368,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event)?;
@@ -1330,7 +1389,7 @@ where
 		match &mut connection_info {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
 				let connection_id = connection_info.get_connection_id();
-				info!("connection_info={:?}", connection_info)?;
+				debug!("connection_info={:?}", connection_info)?;
 
 				let mut write_status = lockw!(connection_info.write_status)?;
 				loop {
@@ -1376,6 +1435,7 @@ where
 				callbacks,
 				connection_id_map,
 				connection_handle_map,
+				handle_hash,
 				wakeup,
 			)?;
 		}
@@ -1775,20 +1835,12 @@ where
 		timespec { tv_sec, tv_nsec }
 	}
 
-	#[cfg(any(target_os = "macos", dragonfly, freebsd, netbsd, openbsd))]
-	fn _remove_handle(
-		_selector: SelectorHandle,
-		_connection_handle: Handle,
-		_filter_set: &mut BitVec,
-	) -> Result<(), Error> {
-		Ok(())
-	}
-
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 		wakeup: &Wakeup,
 	) -> Result<bool, Error> {
 		let stop = {
@@ -1808,10 +1860,10 @@ where
 				ctx.add_pending, ctx.tid
 			)?;
 
-			Self::process_pending(ctx, connection_id_map, connection_handle_map)?;
+			Self::process_pending(ctx, connection_id_map, connection_handle_map, handle_hash)?;
 			ctx.add_pending.clear();
 
-			Self::process_nwrites(ctx, connection_id_map, connection_handle_map)?;
+			Self::process_nwrites(ctx, connection_id_map, connection_handle_map, handle_hash)?;
 			ctx.nwrites.clear();
 		}
 
@@ -1837,44 +1889,36 @@ where
 		ctx: &mut Context,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		_handle_hash: &mut StaticHash,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
-			#[cfg(windows)]
-			let (found, handle) = {
-				let mut handle_bytes = [0u8; 8];
-				let found =
-					connection_id_map.get(&connection_id.to_be_bytes(), &mut handle_bytes)?;
-				(found, u64::from_be_bytes(handle_bytes))
-			};
-			#[cfg(unix)]
-			let (found, handle) = {
-				let mut handle_bytes = [0u8; 4];
-				let found =
-					connection_id_map.get(&connection_id.to_be_bytes(), &mut handle_bytes)?;
-				(found, i32::from_be_bytes(handle_bytes))
-			};
-
-			match found {
-				true => match connection_handle_map.get_mut(&handle) {
-					Some(conn_info) => match conn_info {
-						EventConnectionInfo::ReadWriteConnection(item) => {
-							info!("pushing wbuf to item = {:?}", item)?;
-							ctx.input_events.push(Event {
-								handle: item.handle,
-								etype: EventType::Write,
-							});
+			match connection_id_map.get(&connection_id.to_be_bytes()) {
+				Some(handle) => {
+					#[cfg(windows)]
+					let handle = u64::from_be_bytes(handle.try_into()?);
+					#[cfg(unix)]
+					let handle = i32::from_be_bytes(handle.try_into()?);
+					match connection_handle_map.get_mut(&handle) {
+						Some(conn_info) => match conn_info {
+							EventConnectionInfo::ReadWriteConnection(item) => {
+								debug!("pushing wbuf to item = {:?}", item)?;
+								ctx.input_events.push(Event {
+									handle: item.handle,
+									etype: EventType::Write,
+								});
+							}
+							EventConnectionInfo::ListenerConnection(item) => {
+								warn!("Got a write request on listener: {:?}", item)?;
+							}
+						},
+						None => {
+							warn!("Handle not found for connection_id!")?;
 						}
-						EventConnectionInfo::ListenerConnection(item) => {
-							warn!("Got a write request on listener: {:?}", item)?;
-						}
-					},
-					None => {
-						warn!("Handle not found for connection_id!")?;
 					}
-				},
-				false => {
-					trace!("Attempt to write on closed connection: {:?}", connection_id)?;
+				}
+				None => {
+					debug!("Attempt to write on closed connection: {:?}", connection_id)?;
 				} // connection already disconnected
 			}
 		}
@@ -1886,6 +1930,7 @@ where
 		ctx: &mut Context,
 		connection_id_map: &mut StaticHash,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {
@@ -1893,6 +1938,12 @@ where
 				EventConnectionInfo::ReadWriteConnection(item) => {
 					connection_id_map.put(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
+
+					let handle_info = HandleInfo::new(item.id, 0);
+					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
+					handle_info.to_bytes(&mut handle_info_bytes)?;
+					handle_hash.put(&item.handle.to_be_bytes(), &handle_info_bytes)?;
+
 					ctx.input_events.push(Event {
 						handle: item.handle,
 						etype: EventType::Read,
@@ -1902,10 +1953,17 @@ where
 					connection_id_map
 						.put(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
 					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
-					info!(
+
+					let handle_info = HandleInfo::new(item.id, 0);
+					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
+					handle_info.to_bytes(&mut handle_info_bytes)?;
+					handle_hash.put(&item.handles[ctx.tid].to_be_bytes(), &handle_info_bytes)?;
+
+					debug!(
 						"pushing accept handle: {} to tid={}",
 						item.handles[ctx.tid], ctx.tid
 					)?;
+
 					ctx.input_events.push(Event {
 						handle: item.handles[ctx.tid],
 						etype: EventType::Accept,
@@ -2148,9 +2206,9 @@ enum EventConnectionInfo {
 }
 
 impl EventConnectionInfo {
-	fn as_read_write_connection(&self) -> Result<ReadWriteConnection, Error> {
+	fn as_read_write_connection(&self) -> Result<&ReadWriteConnection, Error> {
 		match self {
-			EventConnectionInfo::ReadWriteConnection(r) => Ok(r.clone()),
+			EventConnectionInfo::ReadWriteConnection(r) => Ok(&r),
 			_ => {
 				Err(ErrorKind::InvalidType("this is not a ReadWriteConnection".to_string()).into())
 			}

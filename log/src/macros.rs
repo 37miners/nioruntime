@@ -62,13 +62,13 @@ lazy_static! {
 /// ```
 macro_rules! default_log_name {
 	() => {{
-		match nioruntime_util::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
+		match nioruntime_log::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
 			Ok(default_log_name) => (*default_log_name).clone(),
 			Err(_e) => "default".to_string(),
 		}
 	}};
 	($name:expr) => {{
-		match nioruntime_util::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
+		match nioruntime_log::lockw!(nioruntime_log::DEFAULT_LOG_NAME) {
 			Ok(mut default_log_name) => {
 				*default_log_name = $name.to_string();
 			}
@@ -853,7 +853,7 @@ macro_rules! log_multi {
                 match LOG_LEVEL <= $level {
                         true => {
 				let res: Result<(), nioruntime_err::Error>;
-				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+				match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 					Ok(mut log_map) => {
 						let mut log = log_map.get_mut($a);
 						match log {
@@ -887,7 +887,7 @@ macro_rules! log_multi {
 		match LOG_LEVEL <= $level {
                         true => {
 				let res: Result<(), nioruntime_err::Error>;
-				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+				match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 					Ok(mut log_map) => {
 						let mut log = log_map.get_mut($a);
 						match log {
@@ -1044,7 +1044,7 @@ macro_rules! get_config_option {
 		nioruntime_log::get_config_option!("default", $get_type)
 	}};
 	($log:expr,$get_type:expr) => {{
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => {
 				let log = log_map.get_mut($log);
 				match log {
@@ -1121,7 +1121,7 @@ macro_rules! set_config_option {
 		nioruntime_log::set_config_option!("default", $set_type, $value)
 	}};
 	($log:expr,$set_type:expr,$value:expr) => {{
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => {
 				let log = log_map.get_mut($log);
 				match log {
@@ -1168,7 +1168,7 @@ macro_rules! log_multi_no_ts {
                 match LOG_LEVEL <= $level {
                         true => {
 				let res: Result<(), nioruntime_err::Error>;
-				match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+				match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 					Ok(mut log_map) => {
 						let mut log = log_map.get_mut($a);
 						match log {
@@ -1201,7 +1201,7 @@ macro_rules! log_multi_no_ts {
 	($level:expr, $a:expr,$b:expr,$($c:tt)*)=> {{
 		match LOG_LEVEL <= $level {
 			true => {
-				let res: Result<(), nioruntime_err::Error>; match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+				let res: Result<(), nioruntime_err::Error>; match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 					Ok(mut log_map) => {
 						let mut log = log_map.get_mut($a);
 						match log {
@@ -1347,7 +1347,7 @@ macro_rules! get_config {
 	}};
 	($a:expr) => {{
 		let res: Result<LogConfig, nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => match log_map.get_mut($a) {
 				Some(log) => {
 					res = log.get_config();
@@ -1401,7 +1401,7 @@ macro_rules! get_config {
 macro_rules! log_config_multi {
 	($a:expr, $b:expr) => {{
 		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => match log_map.get_mut($a) {
 				Some(log) => res = log.init($b),
 				None => {
@@ -1484,7 +1484,7 @@ macro_rules! rotate {
 	($log:expr) => {{
 		//let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
 		let res: Result<(), nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => match log_map.get_mut($log) {
 				Some(log) => {
 					res = log.rotate();
@@ -1547,7 +1547,7 @@ macro_rules! rotation_status {
 	}};
 	($log:expr) => {{
 		let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
-		match nioruntime_util::lockw!(nioruntime_log::STATIC_LOG) {
+		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => match log_map.get_mut($log) {
 				Some(log) => {
 					res = log.rotation_status();
@@ -1724,4 +1724,100 @@ mod tests {
 
 		tear_down_test_dir(TEST_DIR).unwrap();
 	}
+}
+
+/// A macro that is used to lock a rwlock in write mode and return the appropriate error if the lock is poisoned.
+/// This code was used in many places, and this macro simplifies it.
+#[macro_export]
+macro_rules! lockw {
+	($a:expr) => {{
+		let do_try_lock = if cfg!(debug_assertions) { true } else { false };
+		let mut is_locked = false;
+		let id: u128 = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos(); // use time in nanos as random enough number here
+
+		if do_try_lock {
+			match $a.try_write() {
+				Ok(_) => {}
+				Err(_) => {
+					is_locked = true;
+					let bt = nioruntime_deps::backtrace::Backtrace::new();
+					let time = std::time::SystemTime::now()
+						.duration_since(std::time::UNIX_EPOCH)
+						.unwrap()
+						.as_millis();
+					let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
+						.write()
+						.map_err(|e| {
+							let error: nioruntime_err::Error =
+								nioruntime_err::ErrorKind::PoisonError(format!(
+									"Poison Error: {}",
+									e.to_string()
+								))
+								.into();
+							error
+						})
+						.unwrap();
+					lock_monitor.insert(id, nioruntime_deps::LockInfo { id, bt, time });
+					match lock_monitor.get(&0) {
+						Some(_) => {}
+						None => {
+							let bt = nioruntime_deps::backtrace::Backtrace::new();
+							lock_monitor.insert(0, nioruntime_deps::LockInfo { id, bt, time });
+							std::thread::spawn(move || loop {
+								std::thread::sleep(std::time::Duration::from_millis(10000));
+								let lock_monitor = match nioruntime_deps::LOCK_MONITOR.read() {
+									Ok(lock_monitor) => lock_monitor,
+									Err(e) => {
+										println!("Warning error obtaining read lock: {}", e);
+										continue;
+									}
+								};
+								for (k, v) in &*lock_monitor {
+									if *k != 0 {
+										let time_now = std::time::SystemTime::now()
+											.duration_since(std::time::UNIX_EPOCH)
+											.unwrap_or(std::time::Duration::from_millis(0))
+											.as_millis();
+										let e = time_now - v.time;
+										if e > 1000 {
+											println!(
+												"potential deadlock detected. k={:?},e={},v={:?}",
+												k, e, v,
+											);
+										}
+									}
+								}
+							});
+						}
+					};
+				}
+			}
+		}
+		let res = $a.write().map_err(|e| {
+			let error: nioruntime_err::Error =
+				nioruntime_err::ErrorKind::PoisonError(format!("Poison Error: {}", e.to_string()))
+					.into();
+			error
+		});
+
+		if is_locked {
+			let mut lock_monitor = nioruntime_deps::LOCK_MONITOR
+				.write()
+				.map_err(|e| {
+					let error: nioruntime_err::Error = nioruntime_err::ErrorKind::PoisonError(
+						format!("Poison Error: {}", e.to_string()),
+					)
+					.into();
+					error
+				})
+				.unwrap();
+
+			(*lock_monitor).remove(&id);
+		}
+
+		res
+	}};
 }

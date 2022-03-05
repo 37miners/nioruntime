@@ -26,16 +26,16 @@ const DELETED: u8 = 2;
 #[derive(Debug, Clone)]
 pub struct StaticHashStats {
 	/// Max elements that have ever been in this table at one given time
-	pub max_elements: u64,
+	pub max_elements: usize,
 	/// Current number of elements in the table
-	pub cur_elements: u64,
+	pub cur_elements: usize,
 	/// Total of times the 'get' function is called
-	pub access_count: u64,
+	pub access_count: usize,
 	/// Total of node visits on a get (collision results in at least two node visits)
 	/// Note that if errors are returned the get is not counted.
-	pub total_node_reads: u64,
+	pub total_node_reads: usize,
 	/// Worst case visits
-	pub worst_case_visits: u64,
+	pub worst_case_visits: usize,
 }
 
 impl StaticHashStats {
@@ -49,7 +49,7 @@ impl StaticHashStats {
 
 /// Iterator
 pub struct StaticHashIterator {
-	pos: u64,
+	pos: usize,
 	hashtable: StaticHash,
 }
 
@@ -95,9 +95,9 @@ impl StaticHashIterator {
 pub struct StaticHash {
 	data: Vec<u8>,
 	/// Max entries in this table
-	pub max_entries: u64,
-	key_len: u8,
-	entry_len: u8,
+	pub max_entries: usize,
+	key_len: usize,
+	entry_len: usize,
 	/// Maximum load factor allowed
 	max_load_factor: f64,
 	/// Basic statistics for this static hash
@@ -113,8 +113,8 @@ impl StaticHash {
 	/// Create a new instance of StaticHash
 	pub fn new(
 		max_entries: usize,
-		key_len: u8,
-		entry_len: u8,
+		key_len: usize,
+		entry_len: usize,
 		max_load_factor: f64,
 	) -> Result<StaticHash, Error> {
 		if max_load_factor >= 1 as f64 || max_load_factor <= 0 as f64 {
@@ -140,17 +140,14 @@ impl StaticHash {
 	}
 
 	/// Return the current size of this static_hash
-	pub fn size(&self) -> u64 {
+	pub fn size(&self) -> usize {
 		self.stats.cur_elements
 	}
 
 	/// Get this key
-	pub fn get(&mut self, key: &[u8], value: &mut [u8]) -> Result<bool, Error> {
+	pub fn get(&mut self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.key_len as usize {
-			return Err(ErrorKind::BadKeyLen(key.len(), self.key_len).into());
-		}
-		if value.len() != self.entry_len as usize {
-			return Err(ErrorKind::BadValueLen(value.len(), self.entry_len).into());
+			return None;
 		}
 		let hash = self.get_hash(key);
 		let mut count = 0;
@@ -158,16 +155,11 @@ impl StaticHash {
 			let entry = (hash + count) % self.max_entries;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == EMPTY {
-				return Ok(false);
+				return None;
 			} else if ohb == OCCUPIED && self.cmp_key(key, entry) {
-				let offset =
-					(1 + self.key_len + self.entry_len) as u64 * entry + 1 + self.key_len as u64;
-				copy(
-					&self.data.as_slice()
-						[offset as usize..offset as usize + self.entry_len as usize],
-					value,
-				);
-				return Ok(true);
+				let offset = (1 + self.key_len + self.entry_len) * entry + 1 + self.key_len;
+
+				return Some(&self.data.as_slice()[offset..(offset + self.entry_len)]);
 			}
 
 			count += 1;
@@ -220,9 +212,9 @@ impl StaticHash {
 	}
 
 	/// Remove the speicifed key
-	pub fn remove(&mut self, key: &[u8]) -> Result<bool, Error> {
+	pub fn remove(&mut self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.key_len as usize {
-			return Err(ErrorKind::BadKeyLen(key.len(), self.key_len).into());
+			return None;
 		}
 		let hash = self.get_hash(key);
 		let mut count = 0;
@@ -234,12 +226,15 @@ impl StaticHash {
 					// this is us, flag entry as deleted.
 					self.set_overhead_byte(entry, DELETED);
 					self.stats.cur_elements -= 1;
-					return Ok(true);
+					let start: usize =
+						((1 + self.key_len + self.entry_len) * entry) + 1 + self.key_len;
+					let end: usize = start + self.entry_len;
+					return Some(&self.data[start..end]);
 				}
 			// otherwise, this is not us, we continue
 			} else if ohb == EMPTY {
 				// we didn't find this entry.
-				return Ok(false);
+				return None;
 			} // otherwise, it's another deleted entry, we need to continue
 			count += 1;
 			if count > self.stats.worst_case_visits {
@@ -253,61 +248,62 @@ impl StaticHash {
 		self.stats.reset();
 	}
 
-	fn get_overhead_byte(&mut self, entry: u64) -> u8 {
+	fn get_overhead_byte(&mut self, entry: usize) -> u8 {
 		self.stats.total_node_reads += 1;
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry;
-		self.data[offset as usize]
+		let offset = (1 + self.key_len + self.entry_len) * entry;
+		self.data[offset]
 	}
 
-	fn set_overhead_byte(&mut self, entry: u64, value: u8) {
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry;
-		self.data[offset as usize] = value;
+	fn set_overhead_byte(&mut self, entry: usize, value: u8) {
+		let offset = (1 + self.key_len + self.entry_len) * entry;
+		self.data[offset] = value;
 	}
 
-	fn get_hash(&mut self, key: &[u8]) -> u64 {
+	fn get_hash(&mut self, key: &[u8]) -> usize {
 		self.stats.access_count += 1;
 		let mut hasher = DefaultHasher::new();
 		Key { data: key.to_vec() }.hash(&mut hasher);
-		hasher.finish() % self.max_entries
+
+		// u32 is good enough. Nothing less than 32 bit platforms right?
+		let u32_max: u64 = u32::MAX.into();
+		let hasher_usize: usize = (hasher.finish() % u32_max).try_into().unwrap();
+		hasher_usize % self.max_entries
 	}
 
-	fn copy_key(&mut self, key: &mut [u8], entry: u64) -> Result<(), Error> {
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry + 1 as u64;
-		copy(
-			&self.data.as_slice()[(offset as usize)..((offset + self.key_len as u64) as usize)],
-			key,
-		);
+	fn copy_key(&mut self, key: &mut [u8], entry: usize) -> Result<(), Error> {
+		let offset = ((1 + self.key_len + self.entry_len) * entry) + 1;
+		copy(&self.data.as_slice()[offset..(offset + self.key_len)], key);
 		Ok(())
 	}
 
-	fn copy_value(&mut self, value: &mut [u8], entry: u64) -> Result<(), Error> {
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry + (1 + self.key_len) as u64;
+	fn copy_value(&mut self, value: &mut [u8], entry: usize) -> Result<(), Error> {
+		let offset = (1 + self.key_len + self.entry_len) * entry + (1 + self.key_len);
 		copy(
-			&self.data.as_slice()[(offset as usize)..((offset + self.entry_len as u64) as usize)],
+			&self.data.as_slice()[offset..(offset + self.entry_len)],
 			value,
 		);
 		Ok(())
 	}
 
-	fn cmp_key(&mut self, key: &[u8], entry: u64) -> bool {
+	fn cmp_key(&mut self, key: &[u8], entry: usize) -> bool {
 		let len = key.len();
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry + 1 as u64;
+		let offset = (1 + self.key_len + self.entry_len) * entry + 1;
 		for i in 0..len {
-			if self.data[(offset + i as u64) as usize] != key[i] {
+			if self.data[offset + i] != key[i] {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	fn set_value(&mut self, entry: u64, value: &[u8]) {
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry + 1 + self.key_len as u64;
-		copy(value, &mut self.data.as_mut_slice()[(offset as usize)..]);
+	fn set_value(&mut self, entry: usize, value: &[u8]) {
+		let offset = (1 + self.key_len + self.entry_len) * entry + 1 + self.key_len;
+		copy(value, &mut self.data.as_mut_slice()[offset..]);
 	}
 
-	fn set_key(&mut self, entry: u64, key: &[u8]) {
-		let offset = (1 + self.key_len + self.entry_len) as u64 * entry + 1 as u64;
-		copy(key, &mut self.data.as_mut_slice()[(offset as usize)..]);
+	fn set_key(&mut self, entry: usize, key: &[u8]) {
+		let offset = (1 + self.key_len + self.entry_len) * entry + 1;
+		copy(key, &mut self.data.as_mut_slice()[offset..]);
 	}
 }
 
@@ -329,17 +325,13 @@ mod test {
 		assert_eq!(res1.is_err(), false);
 		assert_eq!(res2.is_err(), false);
 
-		let mut value_read1 = [0, 0, 0, 0, 0, 0, 0, 0];
-		let mut value_read2 = [0, 0, 0, 0, 0, 0, 0, 0];
+		let get1 = hashtable.get(&key1);
+		assert!(get1.is_some());
+		assert_eq!(value1, get1.unwrap());
 
-		let get1 = hashtable.get(&key1, &mut value_read1).unwrap();
-		let get2 = hashtable.get(&key2, &mut value_read2).unwrap();
-
-		assert_eq!(get1, true);
-		assert_eq!(get2, true);
-
-		assert_eq!(value1, value_read1);
-		assert_eq!(value2, value_read2);
+		let get2 = hashtable.get(&key2);
+		assert!(get2.is_some());
+		assert_eq!(value2, get2.unwrap());
 
 		// test wrong sizes
 		let badkey = [1, 2, 3];
@@ -363,13 +355,11 @@ mod test {
 		assert_eq!(res1.is_err(), false);
 		assert_eq!(res2.is_err(), false);
 
-		let mut value_read = [0, 0, 0];
-		let res = hashtable.get(&key1, &mut value_read);
-		assert_eq!(res.is_err(), false);
+		let res = hashtable.get(&key1);
+		assert_eq!(res.is_some(), true);
 
 		let res = res.unwrap();
-		assert_eq!(res, true);
-		assert_eq!(value_read, [5, 5, 5]);
+		assert_eq!(res, [5, 5, 5]);
 	}
 
 	#[test]
@@ -392,28 +382,32 @@ mod test {
 		// remove several entries
 
 		let res = hashtable.remove(&kvec[45]);
-		assert_eq!(res.is_err(), false);
-		assert_eq!(res.unwrap(), true);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), vvec[45]);
+		assert_eq!(hashtable.remove(&kvec[45]), None);
 		kvec.remove(45);
 		vvec.remove(45);
 
-		let res = hashtable.remove(&kvec[13]);
-		assert_eq!(res.is_err(), false);
-		assert_eq!(res.unwrap(), true);
-		kvec.remove(13);
-		vvec.remove(13);
-
 		let res = hashtable.remove(&kvec[37]);
-		assert_eq!(res.is_err(), false);
-		assert_eq!(res.unwrap(), true);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), vvec[37]);
+		assert_eq!(hashtable.remove(&kvec[37]), None);
 		kvec.remove(37);
 		vvec.remove(37);
 
+		let res = hashtable.remove(&kvec[13]);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), vvec[13]);
+		assert_eq!(hashtable.remove(&kvec[13]), None);
+		kvec.remove(13);
+		vvec.remove(13);
+
 		for i in 0..75997 {
-			let mut vread = [0 as u8; 32];
-			let res = hashtable.get(&kvec[i], &mut vread);
-			assert_eq!(res.is_err(), false);
-			vreadvec.insert(i, vread);
+			//let mut vread = [0 as u8; 32];
+			let res = hashtable.get(&kvec[i]);
+			assert_eq!(res.is_some(), true);
+			let vread = res.unwrap();
+			vreadvec.insert(i, vread.try_into().unwrap());
 		}
 		assert_eq!(vreadvec, vvec);
 	}
@@ -443,7 +437,7 @@ mod test {
 		assert_eq!(ret.is_ok(), true);
 
 		let res = hashtable.remove(&k2);
-		assert_eq!(res.unwrap(), true);
+		assert_eq!(res.unwrap(), v2);
 		assert_eq!(hashtable.stats.cur_elements, 3);
 		assert_eq!(hashtable.stats.max_elements, 4);
 	}
@@ -474,8 +468,8 @@ mod test {
 		assert_eq!(res.is_ok(), false);
 
 		let res = hashtable.remove(&k1);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v1);
 
 		let res = hashtable.put(&k2, &v2);
 		assert_eq!(res.is_ok(), true);
@@ -516,10 +510,9 @@ mod test {
 
 		let res = hashtable.put(&k5, &v5);
 		assert_eq!(res.is_ok(), true);
-
 		let res = hashtable.remove(&k2);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v2);
 
 		let mut input = Vec::new();
 		input.insert(0, k1);

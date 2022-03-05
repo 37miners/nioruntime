@@ -1,0 +1,18 @@
+[package]
+name = "nioruntime_tests"
+version = "0.0.3-beta1"
+authors = ["37 Miners, LLC"]
+description = "integration tests for nioruntime"
+license = "Apache-2.0"
+repository = "https://github.com/37miners/nioruntime"
+keywords = [ "crypto", "nioruntime", "mimblewimble" ]
+exclude = ["**/*.nio"]
+edition = "2018"
+
+[dependencies]
+
+nioruntime_deps   = { path = "../deps"  }
+nioruntime_err    = { path = "../error" }
+nioruntime_log    = { path = "../log"   }
+nioruntime_util   = { path = "../util"  }
+nioruntime_macros = { path = "../macros" }

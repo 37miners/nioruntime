@@ -13,20 +13,22 @@ edition = "2018"
 
 [workspace]
 members = [
-	"http", "eventhandler", "util", "error", "deps", "log", "rust-tor",
-	"tor-llcrypto", "tor-checkable", "tor-bytes"
+	"http", "eventhandler", "util", "error", "deps", "log",
+	"tor-llcrypto", "tor-checkable", "tor-bytes", "macros", "tests",
 ]
 exclude = ["etc/perf"]
 
 [dependencies]
 
-nioruntime_deps = { path = "./deps"         }
-nioruntime_log  = { path = "./log"          }
-nioruntime_http = { path = "./http"         }
-nioruntime_util = { path = "./util"         }
-nioruntime_evh  = { path = "./eventhandler" }
-nioruntime_tor  = { path = "./tor"          }
-nioruntime_err  = { path = "./error"        }
+nioruntime_deps   = { path = "./deps"         }
+nioruntime_log    = { path = "./log"          }
+nioruntime_http   = { path = "./http"         }
+nioruntime_util   = { path = "./util"         }
+nioruntime_evh    = { path = "./eventhandler" }
+nioruntime_tor    = { path = "./tor"          }
+nioruntime_err    = { path = "./error"        }
+nioruntime_macros = { path = "./macros"       }
+nioruntime_tests  = { path = "./tests"        }
 
 ws2_32-sys = "0.2.1"
 errno = "0.2.7"

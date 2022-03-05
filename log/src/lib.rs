@@ -194,5 +194,3 @@ pub use crate::macros::{DEFAULT_LOG_NAME, STATIC_LOG};
 pub use nioruntime_deps;
 #[doc(hidden)]
 pub use nioruntime_err;
-#[doc(hidden)]
-pub use nioruntime_util;

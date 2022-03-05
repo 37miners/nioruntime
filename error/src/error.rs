@@ -167,10 +167,10 @@ pub enum ErrorKind {
 	HexError(String),
 	/// Bad key len
 	#[fail(display = "Keylen not correct {} != {}", _0, _1)]
-	BadKeyLen(usize, u8),
+	BadKeyLen(usize, usize),
 	/// Bad value len
 	#[fail(display = "Valuelen not correct {} != {}", _0, _1)]
-	BadValueLen(usize, u8),
+	BadValueLen(usize, usize),
 	/// Other error
 	#[fail(display = "Other error {}", _0)]
 	OtherError(String),
@@ -180,6 +180,15 @@ pub enum ErrorKind {
 	/// Invalid MaxLoadCapacity
 	#[fail(display = "Invalid Max Load Capacity")]
 	InvalidMaxLoadCapacity,
+	/// Too large write for serialization
+	#[fail(display = "TooLargeWrite: {}", _0)]
+	TooLargeWriteErr(String),
+	/// Too large read for serialization
+	#[fail(display = "TooLargeRead: {}", _0)]
+	TooLargeReadErr(String),
+	/// UnexpectedEof error
+	#[fail(display = "UnexpectedEOF: {}", _0)]
+	UnexpectedEof(String),
 }
 
 impl Display for Error {
