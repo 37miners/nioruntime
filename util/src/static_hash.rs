@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::ser::{deserialize, serialize, Serializable};
 use nioruntime_deps::byte_tools::copy;
 use nioruntime_err::{Error, ErrorKind};
+use nioruntime_log::*;
 use std::collections::hash_map::DefaultHasher;
 use std::convert::TryInto;
 use std::hash::{Hash, Hasher};
@@ -21,6 +23,8 @@ use std::hash::{Hash, Hasher};
 const EMPTY: u8 = 0;
 const OCCUPIED: u8 = 1;
 const DELETED: u8 = 2;
+
+debug!();
 
 /// Basic statistics for this static hash
 #[derive(Debug, Clone)]
@@ -144,8 +148,26 @@ impl StaticHash {
 		self.stats.cur_elements
 	}
 
+	pub fn get<K: Serializable, V: Serializable>(&mut self, key: &K) -> Option<V> {
+		let mut key_buf = vec![];
+		serialize(&mut key_buf, key).ok()?;
+		match self.get_raw(&key_buf) {
+			Some(mut o) => {
+				let res: Result<V, Error> = deserialize(&mut o);
+				match res {
+					Ok(res) => Some(res),
+					Err(e) => {
+						warn!("deserialization error: {}", e).ok();
+						None
+					}
+				}
+			}
+			None => None,
+		}
+	}
+
 	/// Get this key
-	pub fn get(&mut self, key: &[u8]) -> Option<&[u8]> {
+	pub fn get_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.key_len as usize {
 			return None;
 		}
@@ -161,7 +183,6 @@ impl StaticHash {
 
 				return Some(&self.data.as_slice()[offset..(offset + self.entry_len)]);
 			}
-
 			count += 1;
 			if count > self.stats.worst_case_visits {
 				self.stats.worst_case_visits = count;
@@ -169,8 +190,21 @@ impl StaticHash {
 		}
 	}
 
+	pub fn put<K: Serializable, V: Serializable>(
+		&mut self,
+		key: &K,
+		value: &V,
+	) -> Result<(), Error> {
+		let mut key_buf = vec![];
+		let mut value_buf = vec![];
+		serialize(&mut key_buf, key)?;
+		serialize(&mut value_buf, value)?;
+		self.put_raw(&key_buf, &value_buf)?;
+		Ok(())
+	}
+
 	/// Put this value for specified key
-	pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+	pub fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
 		if key.len() != self.key_len as usize {
 			return Err(ErrorKind::BadKeyLen(key.len(), self.key_len).into());
 		}
@@ -211,8 +245,26 @@ impl StaticHash {
 		Ok(())
 	}
 
+	pub fn remove<K: Serializable, V: Serializable>(&mut self, key: &K) -> Option<V> {
+		let mut key_buf = vec![];
+		serialize(&mut key_buf, key).ok()?;
+		match self.remove_raw(&key_buf) {
+			Some(mut o) => {
+				let res: Result<V, Error> = deserialize(&mut o);
+				match res {
+					Ok(res) => Some(res),
+					Err(e) => {
+						warn!("deserialization error: {}", e).ok();
+						None
+					}
+				}
+			}
+			None => None,
+		}
+	}
+
 	/// Remove the speicifed key
-	pub fn remove(&mut self, key: &[u8]) -> Option<&[u8]> {
+	pub fn remove_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.key_len as usize {
 			return None;
 		}
@@ -310,6 +362,7 @@ impl StaticHash {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::ser::{Reader, Writer};
 	use nioruntime_deps::rand::{thread_rng, Rng};
 
 	#[test]
@@ -320,26 +373,26 @@ mod test {
 
 		let value1 = [1, 1, 1, 1, 1, 1, 1, 1];
 		let value2 = [2, 2, 2, 2, 2, 2, 2, 2];
-		let res1 = hashtable.put(&key1, &value1);
-		let res2 = hashtable.put(&key2, &value2);
+		let res1 = hashtable.put_raw(&key1, &value1);
+		let res2 = hashtable.put_raw(&key2, &value2);
 		assert_eq!(res1.is_err(), false);
 		assert_eq!(res2.is_err(), false);
 
-		let get1 = hashtable.get(&key1);
+		let get1 = hashtable.get_raw(&key1);
 		assert!(get1.is_some());
 		assert_eq!(value1, get1.unwrap());
 
-		let get2 = hashtable.get(&key2);
+		let get2 = hashtable.get_raw(&key2);
 		assert!(get2.is_some());
 		assert_eq!(value2, get2.unwrap());
 
 		// test wrong sizes
 		let badkey = [1, 2, 3];
-		let bad_put = hashtable.put(&badkey, &value1);
+		let bad_put = hashtable.put_raw(&badkey, &value1);
 		assert_eq!(bad_put.is_err(), true);
 
 		let badvalue = [4, 5, 6];
-		let bad_put = hashtable.put(&key1, &badvalue);
+		let bad_put = hashtable.put_raw(&key1, &badvalue);
 		assert_eq!(bad_put.is_err(), true);
 
 		// overwrite value
@@ -350,12 +403,12 @@ mod test {
 		let value1 = [4, 4, 4];
 		let value2 = [5, 5, 5];
 
-		let res1 = hashtable.put(&key1, &value1);
-		let res2 = hashtable.put(&key1, &value2);
+		let res1 = hashtable.put_raw(&key1, &value1);
+		let res2 = hashtable.put_raw(&key1, &value2);
 		assert_eq!(res1.is_err(), false);
 		assert_eq!(res2.is_err(), false);
 
-		let res = hashtable.get(&key1);
+		let res = hashtable.get_raw(&key1);
 		assert_eq!(res.is_some(), true);
 
 		let res = res.unwrap();
@@ -373,7 +426,7 @@ mod test {
 		for i in 0..76000 {
 			let k1: [u8; 16] = rng.gen();
 			let v1: [u8; 32] = rng.gen();
-			let ret = hashtable.put(&k1, &v1);
+			let ret = hashtable.put_raw(&k1, &v1);
 			assert_eq!(ret.is_err(), false);
 			kvec.insert(i, k1);
 			vvec.insert(i, v1);
@@ -381,30 +434,30 @@ mod test {
 
 		// remove several entries
 
-		let res = hashtable.remove(&kvec[45]);
+		let res = hashtable.remove_raw(&kvec[45]);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), vvec[45]);
-		assert_eq!(hashtable.remove(&kvec[45]), None);
+		assert_eq!(hashtable.remove_raw(&kvec[45]), None);
 		kvec.remove(45);
 		vvec.remove(45);
 
-		let res = hashtable.remove(&kvec[37]);
+		let res = hashtable.remove_raw(&kvec[37]);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), vvec[37]);
-		assert_eq!(hashtable.remove(&kvec[37]), None);
+		assert_eq!(hashtable.remove_raw(&kvec[37]), None);
 		kvec.remove(37);
 		vvec.remove(37);
 
-		let res = hashtable.remove(&kvec[13]);
+		let res = hashtable.remove_raw(&kvec[13]);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), vvec[13]);
-		assert_eq!(hashtable.remove(&kvec[13]), None);
+		assert_eq!(hashtable.remove_raw(&kvec[13]), None);
 		kvec.remove(13);
 		vvec.remove(13);
 
 		for i in 0..75997 {
 			//let mut vread = [0 as u8; 32];
-			let res = hashtable.get(&kvec[i]);
+			let res = hashtable.get_raw(&kvec[i]);
 			assert_eq!(res.is_some(), true);
 			let vread = res.unwrap();
 			vreadvec.insert(i, vread.try_into().unwrap());
@@ -418,25 +471,25 @@ mod test {
 		let mut hashtable = StaticHash::new(100000, 16, 32, 0.9).unwrap();
 		let k1: [u8; 16] = rng.gen();
 		let v1: [u8; 32] = rng.gen();
-		let ret = hashtable.put(&k1, &v1);
+		let ret = hashtable.put_raw(&k1, &v1);
 		assert_eq!(ret.is_ok(), true);
 
 		let k2: [u8; 16] = rng.gen();
 		let v2: [u8; 32] = rng.gen();
-		let ret = hashtable.put(&k2, &v2);
+		let ret = hashtable.put_raw(&k2, &v2);
 		assert_eq!(ret.is_ok(), true);
 
 		let k3: [u8; 16] = rng.gen();
 		let v3: [u8; 32] = rng.gen();
-		let ret = hashtable.put(&k3, &v3);
+		let ret = hashtable.put_raw(&k3, &v3);
 		assert_eq!(ret.is_ok(), true);
 
 		let k4: [u8; 16] = rng.gen();
 		let v4: [u8; 32] = rng.gen();
-		let ret = hashtable.put(&k4, &v4);
+		let ret = hashtable.put_raw(&k4, &v4);
 		assert_eq!(ret.is_ok(), true);
 
-		let res = hashtable.remove(&k2);
+		let res = hashtable.remove_raw(&k2);
 		assert_eq!(res.unwrap(), v2);
 		assert_eq!(hashtable.stats.cur_elements, 3);
 		assert_eq!(hashtable.stats.max_elements, 4);
@@ -451,7 +504,7 @@ mod test {
 		for _ in 0..7 {
 			let k: [u8; 16] = rng.gen();
 			let v: [u8; 32] = rng.gen();
-			let res = hashtable.put(&k, &v);
+			let res = hashtable.put_raw(&k, &v);
 			assert_eq!(res.is_ok(), true);
 		}
 
@@ -461,17 +514,17 @@ mod test {
 		let k2: [u8; 16] = rng.gen();
 		let v2: [u8; 32] = rng.gen();
 
-		let res = hashtable.put(&k1, &v1);
+		let res = hashtable.put_raw(&k1, &v1);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.put_raw(&k2, &v2);
 		assert_eq!(res.is_ok(), false);
 
-		let res = hashtable.remove(&k1);
+		let res = hashtable.remove_raw(&k1);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v1);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.put_raw(&k2, &v2);
 		assert_eq!(res.is_ok(), true);
 	}
 
@@ -496,21 +549,21 @@ mod test {
 		let k5: [u8; 16] = rng.gen();
 		let v5: [u8; 32] = rng.gen();
 
-		let res = hashtable.put(&k1, &v1);
+		let res = hashtable.put_raw(&k1, &v1);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.put_raw(&k2, &v2);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k3, &v3);
+		let res = hashtable.put_raw(&k3, &v3);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k4, &v4);
+		let res = hashtable.put_raw(&k4, &v4);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k5, &v5);
+		let res = hashtable.put_raw(&k5, &v5);
 		assert_eq!(res.is_ok(), true);
-		let res = hashtable.remove(&k2);
+		let res = hashtable.remove_raw(&k2);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v2);
 
@@ -579,5 +632,94 @@ mod test {
 
 		assert_eq!(input, output);
 		assert_eq!(vinput, voutput);
+	}
+
+	#[derive(Debug, PartialEq, Clone)]
+	struct S {
+		flags: u8,
+		data: Vec<u8>,
+	}
+
+	impl Serializable for S {
+		fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
+			let flags = reader.read_u8()?;
+			let data = Serializable::read(reader)?;
+			Ok(Self { flags, data })
+		}
+
+		fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+			writer.write_u8(self.flags)?;
+			Serializable::write(&self.data, writer)?;
+			Ok(())
+		}
+	}
+
+	struct K {
+		x: u128,
+	}
+
+	impl Serializable for K {
+		fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
+			let x = reader.read_u128()?;
+			Ok(Self { x })
+		}
+
+		fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+			writer.write_u128(self.x)?;
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn test_serialize() -> Result<(), Error> {
+		let mut hashtable = StaticHash::new(100, 16, 12, 0.9).unwrap();
+		let v1 = vec![1, 2, 3];
+		let v2 = vec![4, 5, 6];
+		let v3 = vec![7, 8, 9];
+
+		let s1 = S { data: v1, flags: 0 };
+		let s2 = S { data: v2, flags: 1 };
+		let s3 = S { data: v3, flags: 4 };
+
+		let k1 = K { x: 123 };
+		let k2 = K { x: 456 };
+		let k3 = K { x: 789 };
+
+		hashtable.put(&k1, &s1)?;
+		hashtable.put(&k2, &s2)?;
+		hashtable.put(&k3, &s3)?;
+
+		let r1: Option<S> = hashtable.get(&k1);
+		assert_eq!(r1, Some(s1.clone()));
+		let r2: Option<S> = hashtable.get(&k2);
+		assert_eq!(r2, Some(s2.clone()));
+		let r3: Option<S> = hashtable.get(&k3);
+		assert_eq!(r3, Some(s3.clone()));
+
+		let r2: Option<S> = hashtable.remove(&k2);
+		assert_eq!(r2, Some(s2.clone()));
+
+		let r3: Option<S> = hashtable.get(&k3);
+		assert_eq!(r3, Some(s3.clone()));
+
+		let r3: Option<S> = hashtable.remove(&k3);
+		assert_eq!(r3, Some(s3.clone()));
+
+		let r3: Option<S> = hashtable.get(&k3);
+		assert_eq!(r3, None);
+
+		let r1: Option<S> = hashtable.get(&k1);
+		assert_eq!(r1, Some(s1.clone()));
+
+		let r1: Option<S> = hashtable.remove(&k1);
+		assert_eq!(r1, Some(s1.clone()));
+
+		let r1: Option<S> = hashtable.get(&k1);
+		assert_eq!(r1, None);
+
+		let r2: Option<S> = hashtable.remove(&k2);
+		assert_eq!(r2, None);
+
+		Ok(())
 	}
 }

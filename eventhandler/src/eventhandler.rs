@@ -613,11 +613,11 @@ where
 		let handle_info = HandleInfo::new(connection_id, 0);
 		let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 		handle_info.to_bytes(&mut handle_info_bytes)?;
-		handle_hash.put(
+		handle_hash.put_raw(
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 			&mut handle_info_bytes,
 		)?;
-		connection_id_map.put(
+		connection_id_map.put_raw(
 			&connection_id.to_be_bytes(),
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 		)?;
@@ -989,11 +989,11 @@ where
 		handle_hash: &mut StaticHash,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		let handle_bytes = connection_id_map.remove(&id.to_be_bytes());
+		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
 
 		match handle_bytes {
 			Some(handle_bytes) => {
-				handle_hash.remove(handle_bytes);
+				handle_hash.remove_raw(handle_bytes);
 				#[cfg(windows)]
 				let handle = u64::from_be_bytes(handle_bytes.try_into()?);
 				#[cfg(unix)]
@@ -1893,7 +1893,7 @@ where
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
-			match connection_id_map.get(&connection_id.to_be_bytes()) {
+			match connection_id_map.get_raw(&connection_id.to_be_bytes()) {
 				Some(handle) => {
 					#[cfg(windows)]
 					let handle = u64::from_be_bytes(handle.try_into()?);
@@ -1936,13 +1936,14 @@ where
 		for pending in &ctx.add_pending {
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					connection_id_map.put(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
+					connection_id_map
+						.put_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
 
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
-					handle_hash.put(&item.handle.to_be_bytes(), &handle_info_bytes)?;
+					handle_hash.put_raw(&item.handle.to_be_bytes(), &handle_info_bytes)?;
 
 					ctx.input_events.push(Event {
 						handle: item.handle,
@@ -1951,13 +1952,14 @@ where
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
 					connection_id_map
-						.put(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
+						.put_raw(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
 					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
 
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
-					handle_hash.put(&item.handles[ctx.tid].to_be_bytes(), &handle_info_bytes)?;
+					handle_hash
+						.put_raw(&item.handles[ctx.tid].to_be_bytes(), &handle_info_bytes)?;
 
 					debug!(
 						"pushing accept handle: {} to tid={}",
