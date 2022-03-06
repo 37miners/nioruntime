@@ -308,6 +308,11 @@ fn main() -> Result<(), Error> {
 			false => 1_000_000,
 		};
 
+		let port = match args.is_present("port") {
+			true => args.value_of("port").unwrap().parse()?,
+			false => 8092,
+		};
+
 		let evh_config = EventHandlerConfig {
 			threads,
 			max_rwhandles,
@@ -316,7 +321,8 @@ fn main() -> Result<(), Error> {
 
 		let mut evh = EventHandler::new(evh_config.clone())?;
 
-		let (handles, _listeners) = get_handles(evh_config.threads, "127.0.0.1:8092")?;
+		let (handles, _listeners) =
+			get_handles(evh_config.threads, &format!("127.0.0.1:{}", port)[..])?;
 
 		evh.set_on_accept(move |_conn_data| Ok(()))?;
 		evh.set_on_close(move |conn_data| {
@@ -334,6 +340,13 @@ fn main() -> Result<(), Error> {
 		std::thread::park();
 	}
 	if is_client {
+		let http = args.is_present("http");
+
+		let port = match args.is_present("port") {
+			true => args.value_of("port").unwrap().parse()?,
+			false => 8092,
+		};
+
 		let tls = args.is_present("tls");
 
 		let count = match args.is_present("count") {
@@ -405,7 +418,7 @@ fn main() -> Result<(), Error> {
 				let histo = histo.clone();
 				let lat_sum_total_clone = lat_sum_total.clone();
 				jhs.push(std::thread::spawn(move || {
-					match run_thread(count, min, max, histo, tls) {
+					match run_thread(count, min, max, histo, tls, port, http) {
 						Ok(lat_sum) => {
 							let mut lat_sum_total = lockw!(lat_sum_total_clone).unwrap();
 							*lat_sum_total += lat_sum;
@@ -506,14 +519,23 @@ fn run_thread(
 	max: usize,
 	histo: Option<Histo>,
 	tls: bool,
+	port: u16,
+	http: bool,
 ) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
-	let cap = if max > min { max } else { min };
-	rbuf.resize(cap, 0u8);
-	wbuf.resize(cap, 0u8);
-	for i in 0..cap {
-		wbuf[i] = (i % 256) as u8;
+	if http {
+		let request_string =
+			format!("GET / HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",);
+		wbuf = request_string.as_bytes().to_vec();
+		rbuf.resize(1000, 0u8);
+	} else {
+		let cap = if max > min { max } else { min };
+		rbuf.resize(cap, 0u8);
+		wbuf.resize(cap, 0u8);
+		for i in 0..cap {
+			wbuf[i] = (i % 256) as u8;
+		}
 	}
 
 	let (mut stream, mut tls_stream) = match tls {
@@ -527,19 +549,25 @@ fn run_thread(
 				None,
 				Some(
 					connector
-						.connect("example.com", TcpStream::connect("127.0.0.1:8092")?)
+						.connect(
+							"example.com",
+							TcpStream::connect(&format!("127.0.0.1:{}", port)[..])?,
+						)
 						.unwrap(),
 				),
 			)
 		}
-		false => (Some(TcpStream::connect("127.0.0.1:8092")?), None),
+		false => (
+			Some(TcpStream::connect(&format!("127.0.0.1:{}", port)[..])?),
+			None,
+		),
 	};
 	let mut x = 0;
 	let mut lat_sum = 0;
 	loop {
 		let r: usize = rand::random();
 		let r = if max <= min { 0 } else { r % (max - min) };
-		let wlen = r + min;
+		let wlen = if http { wbuf.len() } else { r + min };
 		let mut len_sum = 0;
 
 		let start_time = std::time::SystemTime::now();
@@ -573,6 +601,8 @@ fn run_thread(
 			if len_sum >= wlen {
 				break;
 			}
+
+			assert!(len != 0);
 		}
 		let elapsed = std::time::SystemTime::now().duration_since(start_time)?;
 		let nanos = elapsed.as_nanos();
@@ -589,11 +619,13 @@ fn run_thread(
 			None => {}
 		}
 
-		assert_eq!(len_sum, wlen);
-		for i in 0..len_sum {
-			if rbuf[i] != (i % 256) as u8 {
-				error!("rbuf[{}] was {}. Expected value = {}", i, rbuf[i], i % 256)?;
-				assert!(false);
+		if !http {
+			assert_eq!(len_sum, wlen);
+			for i in 0..len_sum {
+				if rbuf[i] != (i % 256) as u8 {
+					error!("rbuf[{}] was {}. Expected value = {}", i, rbuf[i], i % 256)?;
+					assert!(false);
+				}
 			}
 		}
 

@@ -107,6 +107,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2-rfc"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6d530bdd2d52966a6d03b7a964add7ae1a288d25214066fd4b600f0f796400"
+dependencies = [
+ "arrayvec",
+ "constant_time_eq",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -248,6 +258,12 @@ dependencies = [
  "lazy_static",
  "winapi 0.3.9",
 ]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
 
 [[package]]
 name = "core-foundation"
@@ -764,6 +780,7 @@ dependencies = [
  "backtrace",
  "base64",
  "bitvec",
+ "blake2-rfc",
  "byte-tools",
  "byteorder",
  "bytes",
@@ -794,6 +811,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
+ "serde_derive",
  "signature",
  "subtle",
  "typenum",
@@ -828,7 +846,6 @@ version = "0.0.3-beta1"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
- "nioruntime_util",
 ]
 
 [[package]]
@@ -837,6 +854,9 @@ version = "0.0.3-beta1"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
+ "nioruntime_log",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

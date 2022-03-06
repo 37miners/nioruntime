@@ -27,7 +27,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 			Ident(ident) => {
 				if found_struct {
 					readable = format!(
-						"impl nioruntime_util::ser::Readable for {} {{\n\
+						"impl nioruntime_util::ser::Serializable for {} {{\n\
 						fn read<R: nioruntime_util::ser::Reader>(\n\
 							reader: &mut R\n\
 						) -> Result<Self, Error> {{\n\
@@ -35,12 +35,11 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 						ident
 					);
 					writeable = format!(
-						"impl nioruntime_util::ser::Writeable for {} {{\n\
-						fn write<W: nioruntime_util::ser::Writer>(\n\
+						//"impl nioruntime_util::ser::Writeable for {} {{\n\
+						"fn write<W: nioruntime_util::ser::Writer>(\n\
 							&self,\n\
 							writer: &mut W\n\
 						) -> Result<(), nioruntime_err::Error> {{",
-						ident
 					);
 				} else if ident.to_string() == "struct" {
 					found_struct = true;
@@ -107,7 +106,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 									"Vec" => {
 										writeable = format!(
 											"{}\n\
-											nioruntime_util::ser::Writeable::write(&self.{}, writer)?;",
+											nioruntime_util::ser::Serializable::write(&self.{}, writer)?;",
 											writeable, field_id,
 										);
 										readable = format!(
@@ -116,7 +115,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 												let l = reader.read_u64()?;\n\
 												let mut v = vec![];\n\
 												for _ in 0..l {{\n\
-													v.push(Readable::read(reader)?);\n\
+													v.push(nioruntime_util::ser::Serializable::read(reader)?);\n\
 												}}\n\
 												v\n\
 											}},",
@@ -130,7 +129,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
                                                                                         match &self.{} {{\n\
 												Some(x) => {{\n\
 													writer.write_u8(1)?;\n\
-													nioruntime_util::ser::Writeable::write(&x, writer)?;\n\
+													nioruntime_util::ser::Serializable::write(&x, writer)?;\n\
 												}},\n\
 												None => writer.write_u8(0)?,\n\
 											}}",
@@ -140,7 +139,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
                                                                                         "{}\n\
                                                                                         {}: match reader.read_u8()? {{\n\
 												0 => None,\n\
-												_ => Some(Readable::read(reader)?),\n\
+												_ => Some(nioruntime_util::ser::Serializable::read(reader)?),\n\
                                                                                         }},",
                                                                                         readable, field_id
                                                                                 );
@@ -149,12 +148,12 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 									_ => {
 										writeable = format!(
 											"{}\n\
-											nioruntime_util::ser::Writeable::write(&self.{}, writer)?;",
+											nioruntime_util::ser::Serializable::write(&self.{}, writer)?;",
 											writeable, field_id
 										);
 										readable = format!(
 											"{}\n\
-											{}: Readable::read(reader)?,",
+											{}: nioruntime_util::ser::Serializable::read(reader)?,",
 											readable, field_id
 										);
 										skip = false;
@@ -188,12 +187,12 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 									for i in 0..len {
 										writeable = format!(
 											"{}\n\
-											nioruntime_util::ser::Writeable::write(&self.{}[{}], writer)?;",
+											nioruntime_util::ser::Serializable::write(&self.{}[{}], writer)?;",
 											writeable, field_id, i
 										);
 										readable = format!(
 											"{}\n\
-											Readable::read(reader)?,",
+											nioruntime_util::ser::Serializable::read(reader)?,",
 											readable
 										);
 									}
@@ -219,12 +218,12 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 	if group_item_count == 1 {
 		writeable = format!(
 			"{}\n\
-			nioruntime_util::ser::Writeable::write(&self.0, writer)?;",
+			nioruntime_util::ser::Serializable::write(&self.0, writer)?;",
 			writeable
 		);
 		readable = format!(
 			"{}\n\
-			0: Readable::read(reader)?,",
+			0: nioruntime_util::ser::Serializable::read(reader)?,",
 			readable
 		);
 	}
@@ -238,7 +237,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 
 	readable = format!(
 		"{}\n\
-		}})}} }}",
+		}})}}",
 		readable
 	);
 

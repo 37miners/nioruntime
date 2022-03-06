@@ -19,8 +19,8 @@ mod test {
 
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
-	use nioruntime_macros::*;
-	use nioruntime_util::ser::{serialize, BinReader, Readable};
+	use nioruntime_macros::Serializable;
+	use nioruntime_util::ser::{serialize, BinReader, Serializable};
 	use std::io::Cursor;
 
 	debug!();
@@ -41,11 +41,6 @@ mod test {
 	}
 
 	#[derive(PartialEq, Debug, Serializable)]
-	struct TestSer2 {
-		f1: u8,
-	}
-
-	#[derive(PartialEq, Debug, Serializable)]
 	struct TestSer {
 		f1: u8,
 		f2: u16,
@@ -57,6 +52,11 @@ mod test {
 		f8: i32,
 		f9: i64,
 		f10: i128,
+	}
+
+	#[derive(PartialEq, Debug, Serializable)]
+	struct TestSer2 {
+		f1: u8,
 	}
 
 	#[derive(PartialEq, Debug, Serializable)]

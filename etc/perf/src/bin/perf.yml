@@ -76,3 +76,14 @@ args:
         long: tls_certificates_file
         value_name: tls_certificates_file
         takes_value: true
+    - http:
+        help: test against http
+        short: v
+        long: http
+        takes_value: false
+    - port:
+         help: tcp port to bind/connect to. Default is 8092.
+         short: y
+         long: port
+         takes_value: true
+         value_name: port

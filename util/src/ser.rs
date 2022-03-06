@@ -14,9 +14,9 @@
 
 //! Serialization and deserialization layer specialized for binary encoding.
 //! Ensures consistency and safety. Basically a minimal subset or
-//! rustc_serialize customized for our need.
+//! rustc_serialize.
 //!
-//! To use it simply implement `Writeable` or `Readable` and then use the
+//! To use it simply implement `Serializable` and then use the
 //! `serialize` or `deserialize` functions on them as appropriate.
 
 use nioruntime_deps::byteorder::{BigEndian, ByteOrder, ReadBytesExt};
@@ -26,31 +26,9 @@ use std::convert::TryInto;
 use std::io::{self, Read, Write};
 use std::marker;
 
-/// Signal to a serializable object how much of its data should be serialized
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum SerializationMode {
-	/// Serialize everything sufficiently to fully reconstruct the object
-	Full,
-	/// Serialize the data that defines the object
-	Hash,
-}
-
-impl SerializationMode {
-	/// Hash mode?
-	pub fn is_hash_mode(&self) -> bool {
-		match self {
-			SerializationMode::Hash => true,
-			_ => false,
-		}
-	}
-}
-
 /// Implementations defined how different numbers and binary structures are
 /// written to an underlying stream or container (depending on implementation).
 pub trait Writer {
-	/// The mode this serializer is writing in
-	fn serialization_mode(&self) -> SerializationMode;
-
 	/// Writes a u8 as bytes
 	fn write_u8(&mut self, n: u8) -> Result<(), Error> {
 		self.write_fixed_bytes(&[n])
@@ -176,13 +154,15 @@ pub trait Reader {
 	}
 }
 
+/*
 /// Trait that every type that can be serialized as binary must implement.
 /// Writes directly to a Writer, a utility type thinly wrapping an
 /// underlying Write implementation.
-pub trait Writeable {
-	/// Write the data held by this Writeable to the provided writer
+pub trait Serializable {
+	/// Write the data held by this Serializable to the provided writer
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error>;
 }
+*/
 
 /// Reader that exposes an Iterator interface.
 pub struct IteratingReader<'a, T, R: Reader> {
@@ -208,7 +188,7 @@ impl<'a, T, R: Reader> IteratingReader<'a, T, R> {
 
 impl<'a, T, R> Iterator for IteratingReader<'a, T, R>
 where
-	T: Readable,
+	T: Serializable,
 	R: Reader,
 {
 	type Item = T;
@@ -222,55 +202,38 @@ where
 	}
 }
 
-/// Reads multiple serialized items into a Vec.
-pub fn read_multi<T, R>(reader: &mut R, count: u64) -> Result<Vec<T>, Error>
-where
-	T: Readable,
-	R: Reader,
-{
-	// Very rudimentary check to ensure we do not overflow anything
-	// attempting to read huge amounts of data.
-	// Probably better than checking if count * size overflows a u64 though.
-	if count > 1_000_000 {
-		return Err(ErrorKind::TooLargeReadErr("to large read".to_string()).into());
-	}
-
-	let res: Vec<T> = IteratingReader::new(reader, count).collect();
-	if res.len() as u64 != count {
-		return Err(ErrorKind::CountError(format!("{} != {}", res.len(), count)).into());
-	}
-	Ok(res)
-}
-
-/// Trait that every type that can be deserialized from binary must implement.
-/// Reads directly to a Reader, a utility type thinly wrapping an
-/// underlying Read implementation.
-pub trait Readable
+pub trait Serializable
 where
 	Self: Sized,
 {
-	/// Reads the data necessary to this Readable from the provided reader
+	fn read<R: Reader>(reader: &mut R) -> Result<Self, Error>;
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error>;
+}
+
+/*
+/// Trait that every type that can be deserialized from binary must implement.
+/// Reads directly to a Reader, a utility type thinly wrapping an
+/// underlying Read implementation.
+pub trait Serializable
+where
+	Self: Sized,
+{
+	/// Reads the data necessary to this Serializable from the provided reader
 	fn read<R: Reader>(reader: &mut R) -> Result<Self, Error>;
 }
 
-/// Deserializes a Readable from any std::io::Read implementation.
-pub fn deserialize<T: Readable, R: Read>(source: &mut R) -> Result<T, Error> {
+*/
+
+/// Deserializes a Serializable from any std::io::Read implementation.
+pub fn deserialize<T: Serializable, R: Read>(source: &mut R) -> Result<T, Error> {
 	let mut reader = BinReader::new(source);
 	T::read(&mut reader)
 }
 
-/// Serializes a Writeable into any std::io::Write implementation.
-pub fn serialize<W: Writeable>(sink: &mut dyn Write, thing: &W) -> Result<(), Error> {
+/// Serializes a Serializable into any std::io::Write implementation.
+pub fn serialize<W: Serializable>(sink: &mut dyn Write, thing: &W) -> Result<(), Error> {
 	let mut writer = BinWriter::new(sink);
 	thing.write(&mut writer)
-}
-
-/// Utility function to serialize a writeable directly in memory using a
-/// Vec<u8>.
-pub fn ser_vec<W: Writeable>(thing: &W) -> Result<Vec<u8>, Error> {
-	let mut vec = vec![];
-	serialize(&mut vec, thing)?;
-	Ok(vec)
 }
 
 /// Utility to read from a binary source
@@ -485,7 +448,7 @@ impl<'a, B: Buf> BufReader<'a, B> {
 	}
 
 	/// Convenience function to read from the buffer and deserialize
-	pub fn body<T: Readable>(&mut self) -> Result<T, Error> {
+	pub fn body<T: Serializable>(&mut self) -> Result<T, Error> {
 		T::read(self)
 	}
 }
@@ -587,10 +550,6 @@ impl<'a> BinWriter<'a> {
 }
 
 impl<'a> Writer for BinWriter<'a> {
-	fn serialization_mode(&self) -> SerializationMode {
-		SerializationMode::Full
-	}
-
 	fn write_fixed_bytes<T: AsRef<[u8]>>(&mut self, bytes: T) -> Result<(), Error> {
 		let bytes_as_ref = bytes.as_ref();
 		// not writing more than 100k bytes in a single read
@@ -604,13 +563,10 @@ impl<'a> Writer for BinWriter<'a> {
 
 macro_rules! impl_int {
 	($int:ty, $w_fn:ident, $r_fn:ident) => {
-		impl Writeable for $int {
+		impl Serializable for $int {
 			fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 				writer.$w_fn(*self)
 			}
-		}
-
-		impl Readable for $int {
 			fn read<R: Reader>(reader: &mut R) -> Result<$int, Error> {
 				reader.$r_fn()
 			}
@@ -629,13 +585,11 @@ impl_int!(i16, write_i16, read_i16);
 impl_int!(u128, write_u128, read_u128);
 impl_int!(i128, write_i128, read_i128);
 
-impl Readable for bool {
+impl Serializable for bool {
 	fn read<R: Reader>(reader: &mut R) -> Result<bool, Error> {
 		Ok(reader.read_u8()? != 0)
 	}
-}
 
-impl Writeable for bool {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 		writer.write_u8(match self {
 			true => 1,
@@ -645,9 +599,9 @@ impl Writeable for bool {
 	}
 }
 
-impl<T> Readable for Option<T>
+impl<T> Serializable for Option<T>
 where
-	T: Readable,
+	T: Serializable,
 {
 	fn read<R: Reader>(reader: &mut R) -> Result<Option<T>, Error> {
 		match reader.read_u8()? {
@@ -655,17 +609,11 @@ where
 			_ => Ok(Some(T::read(reader)?)),
 		}
 	}
-}
-
-impl<T> Writeable for Option<T>
-where
-	T: Writeable,
-{
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 		match self {
 			Some(o) => {
 				writer.write_u8(1)?;
-				Writeable::write(o, writer)?;
+				Serializable::write(o, writer)?;
 			}
 			None => writer.write_u8(0)?,
 		}
@@ -673,10 +621,18 @@ where
 	}
 }
 
-impl<T> Readable for Vec<T>
+impl<T> Serializable for Vec<T>
 where
-	T: Readable,
+	T: Serializable,
 {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		writer.write_u64(self.len().try_into()?)?;
+		for elmt in self {
+			elmt.write(writer)?;
+		}
+		Ok(())
+	}
+
 	fn read<R: Reader>(reader: &mut R) -> Result<Vec<T>, Error> {
 		let mut buf = Vec::new();
 		let len = reader.read_u64()?;
@@ -687,79 +643,62 @@ where
 	}
 }
 
-impl<T> Writeable for Vec<T>
-where
-	T: Writeable,
-{
+impl<'a, A: Serializable> Serializable for &'a A {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		writer.write_u64(self.len().try_into()?)?;
-		for elmt in self {
-			elmt.write(writer)?;
-		}
-		Ok(())
+		Serializable::write(*self, writer)
+	}
+	fn read<R: Reader>(_reader: &mut R) -> Result<&'a A, Error> {
+		unimplemented!()
 	}
 }
 
-impl<'a, A: Writeable> Writeable for &'a A {
+impl<A: Serializable, B: Serializable> Serializable for (A, B) {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Writeable::write(*self, writer)
+		Serializable::write(&self.0, writer)?;
+		Serializable::write(&self.1, writer)
 	}
-}
-
-impl<A: Writeable, B: Writeable> Writeable for (A, B) {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Writeable::write(&self.0, writer)?;
-		Writeable::write(&self.1, writer)
-	}
-}
-
-impl<A: Readable, B: Readable> Readable for (A, B) {
 	fn read<R: Reader>(reader: &mut R) -> Result<(A, B), Error> {
-		Ok((Readable::read(reader)?, Readable::read(reader)?))
+		Ok((Serializable::read(reader)?, Serializable::read(reader)?))
 	}
 }
 
-impl<A: Writeable, B: Writeable, C: Writeable> Writeable for (A, B, C) {
+impl<A: Serializable, B: Serializable, C: Serializable> Serializable for (A, B, C) {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Writeable::write(&self.0, writer)?;
-		Writeable::write(&self.1, writer)?;
-		Writeable::write(&self.2, writer)
+		Serializable::write(&self.0, writer)?;
+		Serializable::write(&self.1, writer)?;
+		Serializable::write(&self.2, writer)
 	}
-}
-
-impl<A: Writeable, B: Writeable, C: Writeable, D: Writeable> Writeable for (A, B, C, D) {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Writeable::write(&self.0, writer)?;
-		Writeable::write(&self.1, writer)?;
-		Writeable::write(&self.2, writer)?;
-		Writeable::write(&self.3, writer)
-	}
-}
-
-impl<A: Readable, B: Readable, C: Readable> Readable for (A, B, C) {
 	fn read<R: Reader>(reader: &mut R) -> Result<(A, B, C), Error> {
 		Ok((
-			Readable::read(reader)?,
-			Readable::read(reader)?,
-			Readable::read(reader)?,
+			Serializable::read(reader)?,
+			Serializable::read(reader)?,
+			Serializable::read(reader)?,
 		))
 	}
 }
 
-impl<A: Readable, B: Readable, C: Readable, D: Readable> Readable for (A, B, C, D) {
+impl<A: Serializable, B: Serializable, C: Serializable, D: Serializable> Serializable
+	for (A, B, C, D)
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		Serializable::write(&self.0, writer)?;
+		Serializable::write(&self.1, writer)?;
+		Serializable::write(&self.2, writer)?;
+		Serializable::write(&self.3, writer)
+	}
 	fn read<R: Reader>(reader: &mut R) -> Result<(A, B, C, D), Error> {
 		Ok((
-			Readable::read(reader)?,
-			Readable::read(reader)?,
-			Readable::read(reader)?,
-			Readable::read(reader)?,
+			Serializable::read(reader)?,
+			Serializable::read(reader)?,
+			Serializable::read(reader)?,
+			Serializable::read(reader)?,
 		))
 	}
 }
 
 #[cfg(test)]
 mod test {
-	use crate::ser::{serialize, BinReader, Readable, Reader, Writeable, Writer};
+	use crate::ser::{serialize, BinReader, Reader, Serializable, Writer};
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
 	use std::io::Cursor;
@@ -772,15 +711,13 @@ mod test {
 		f2: u16,
 	}
 
-	impl Writeable for TestSer {
+	impl Serializable for TestSer {
 		fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 			writer.write_u8(self.f1)?;
 			writer.write_u16(self.f2)?;
 			Ok(())
 		}
-	}
 
-	impl Readable for TestSer {
 		fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
 			let f1 = reader.read_u8()?;
 			let f2 = reader.read_u16()?;
