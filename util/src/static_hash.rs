@@ -113,6 +113,13 @@ struct Key {
 	data: Vec<u8>,
 }
 
+impl Drop for StaticHash {
+	fn drop(&mut self) {
+		// explicitly drain to free memory
+		self.data.drain(..);
+	}
+}
+
 impl StaticHash {
 	/// Create a new instance of StaticHash
 	pub fn new(
