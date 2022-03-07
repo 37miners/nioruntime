@@ -26,7 +26,7 @@ const DELETED: u8 = 2;
 
 debug!();
 
-/// Basic statistics for this static hash
+/// Statistics for this static hash
 #[derive(Debug, Clone)]
 pub struct StaticHashStats {
 	/// Max elements that have ever been in this table at one given time
@@ -44,7 +44,7 @@ pub struct StaticHashStats {
 
 impl StaticHashStats {
 	fn reset(&mut self) {
-		// can't reset other fields.
+		self.max_elements = self.cur_elements;
 		self.access_count = 0;
 		self.total_node_reads = 0;
 		self.worst_case_visits = 0;
@@ -52,43 +52,68 @@ impl StaticHashStats {
 }
 
 /// Iterator
-pub struct StaticHashIterator {
+pub struct StaticHashIterator<'a> {
 	pos: usize,
-	hashtable: StaticHash,
+	reverse: bool,
+	static_hash: &'a StaticHash,
 }
 
-impl StaticHashIterator {
+impl<'a> StaticHashIterator<'a> {
 	/// Create a new StaticHashIterator
-	pub fn new(hashtable: StaticHash) -> Result<StaticHashIterator, Error> {
-		Ok(StaticHashIterator { pos: 0, hashtable })
+	pub fn new(static_hash: &StaticHash) -> Result<StaticHashIterator, Error> {
+		Ok(StaticHashIterator {
+			pos: static_hash.first,
+			static_hash,
+			reverse: false,
+		})
 	}
 
-	/// Get the next element in the iterator
-	pub fn next(&mut self, key: &mut [u8], value: &mut [u8]) -> Result<bool, Error> {
-		loop {
-			if self.pos >= self.hashtable.max_entries {
-				break;
-			}
-			let overhead_byte = self.hashtable.get_overhead_byte(self.pos);
-			if overhead_byte == OCCUPIED {
-				let res = self.hashtable.copy_key(key, self.pos);
-				if res.is_ok() {
-					let res = self.hashtable.copy_value(value, self.pos);
-					if res.is_ok() {
-						self.pos += 1;
-						return Ok(true);
-					} else {
-						return Err(ErrorKind::OtherError("error copying value".to_string()).into());
-					}
-				} else {
-					return Err(ErrorKind::OtherError("error copying key".to_string()).into());
-				}
-			}
+	pub fn reverse(static_hash: &StaticHash) -> Result<StaticHashIterator, Error> {
+		Ok(StaticHashIterator {
+			pos: static_hash.last,
+			static_hash,
+			reverse: true,
+		})
+	}
 
-			self.pos += 1;
+	pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>, Error> {
+		if self.pos == usize::MAX {
+			Ok(None)
+		} else {
+			let offset = if self.reverse {
+				self.static_hash.get_iterator_prev_offset(self.pos)
+			} else {
+				self.static_hash.get_iterator_next_offset(self.pos)
+			};
+			let k_offset = self.static_hash.get_key_offset(self.pos);
+			let v_offset = self.static_hash.get_value_offset(self.pos);
+			self.pos = usize::from_be_bytes(self.static_hash.data[offset..offset + 8].try_into()?);
+			Ok(Some((
+				&self.static_hash.data[k_offset..k_offset + self.static_hash.config.key_len],
+				&self.static_hash.data[v_offset..v_offset + self.static_hash.config.entry_len],
+			)))
 		}
+	}
+}
 
-		Ok(false)
+#[derive(Clone)]
+pub struct StaticHashConfig {
+	pub max_entries: usize,
+	pub key_len: usize,
+	pub entry_len: usize,
+	pub max_load_factor: f64,
+	pub iterator: bool,
+}
+
+impl Default for StaticHashConfig {
+	fn default() -> Self {
+		Self {
+			max_entries: 1_000_000,
+			key_len: 8,
+			entry_len: 8,
+			max_load_factor: 0.9999999,
+			iterator: true,
+		}
 	}
 }
 
@@ -98,14 +123,10 @@ impl StaticHashIterator {
 #[derive(Clone)]
 pub struct StaticHash {
 	data: Vec<u8>,
-	/// Max entries in this table
-	pub max_entries: usize,
-	key_len: usize,
-	entry_len: usize,
-	/// Maximum load factor allowed
-	max_load_factor: f64,
-	/// Basic statistics for this static hash
-	pub stats: StaticHashStats,
+	config: StaticHashConfig,
+	stats: StaticHashStats,
+	first: usize,
+	last: usize,
 }
 
 #[derive(Hash)]
@@ -122,24 +143,23 @@ impl Drop for StaticHash {
 
 impl StaticHash {
 	/// Create a new instance of StaticHash
-	pub fn new(
-		max_entries: usize,
-		key_len: usize,
-		entry_len: usize,
-		max_load_factor: f64,
-	) -> Result<StaticHash, Error> {
-		if max_load_factor >= 1 as f64 || max_load_factor <= 0 as f64 {
+	pub fn new(config: StaticHashConfig) -> Result<StaticHash, Error> {
+		if config.max_load_factor >= 1 as f64 || config.max_load_factor <= 0 as f64 {
 			return Err(ErrorKind::InvalidMaxLoadCapacity.into());
 		}
 		let mut data = Vec::new();
-		data.resize(max_entries * (1 + key_len + entry_len) as usize, 0);
-		let max_entries = max_entries.try_into().unwrap_or(0);
+
+		let iterator_size = if config.iterator { 16 } else { 0 };
+
+		data.resize(
+			config.max_entries * (1 + config.key_len + config.entry_len + iterator_size) as usize,
+			0u8,
+		);
 		Ok(StaticHash {
 			data,
-			max_entries,
-			key_len,
-			entry_len,
-			max_load_factor,
+			config,
+			first: usize::MAX,
+			last: usize::MAX,
 			stats: StaticHashStats {
 				max_elements: 0,
 				cur_elements: 0,
@@ -175,20 +195,20 @@ impl StaticHash {
 
 	/// Get this key
 	pub fn get_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
-		if key.len() != self.key_len as usize {
+		if key.len() != self.config.key_len as usize {
 			return None;
 		}
 		let hash = self.get_hash(key);
 		let mut count = 0;
 		loop {
-			let entry = (hash + count) % self.max_entries;
+			let entry = (hash + count) % self.config.max_entries;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == EMPTY {
 				return None;
 			} else if ohb == OCCUPIED && self.cmp_key(key, entry) {
-				let offset = (1 + self.key_len + self.entry_len) * entry + 1 + self.key_len;
+				let offset = self.get_value_offset(entry);
 
-				return Some(&self.data.as_slice()[offset..(offset + self.entry_len)]);
+				return Some(&self.data.as_slice()[offset..(offset + self.config.entry_len)]);
 			}
 			count += 1;
 			if count > self.stats.worst_case_visits {
@@ -212,25 +232,30 @@ impl StaticHash {
 
 	/// Put this value for specified key
 	pub fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
-		if key.len() != self.key_len as usize {
-			return Err(ErrorKind::BadKeyLen(key.len(), self.key_len).into());
+		if key.len() != self.config.key_len as usize {
+			return Err(ErrorKind::BadKeyLen(key.len(), self.config.key_len).into());
 		}
-		if value.len() != self.entry_len as usize {
-			return Err(ErrorKind::BadValueLen(value.len(), self.entry_len).into());
+		if value.len() != self.config.entry_len as usize {
+			return Err(ErrorKind::BadValueLen(value.len(), self.config.entry_len).into());
 		}
-		if (self.stats.cur_elements + 1) as f64 / self.max_entries as f64 > self.max_load_factor {
+		if (self.stats.cur_elements + 1) as f64 / self.config.max_entries as f64
+			> self.config.max_load_factor
+		{
 			return Err(ErrorKind::MaxLoadCapacityExceeded.into());
 		}
 		let hash = self.get_hash(key);
 		let mut count = 0;
 		loop {
-			let entry = (hash + count) % self.max_entries;
+			let entry = (hash + count) % self.config.max_entries;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == EMPTY || ohb == DELETED {
 				// empty spot
 				self.set_overhead_byte(entry, OCCUPIED);
 				self.set_key(entry, key);
 				self.set_value(entry, value);
+				if self.config.iterator {
+					self.put_iterator(entry)?;
+				}
 				self.stats.cur_elements += 1;
 				if self.stats.cur_elements > self.stats.max_elements {
 					self.stats.max_elements = self.stats.cur_elements;
@@ -249,6 +274,61 @@ impl StaticHash {
 				self.stats.worst_case_visits = count;
 			}
 		}
+		Ok(())
+	}
+
+	fn put_iterator(&mut self, entry: usize) -> Result<(), Error> {
+		if self.last == usize::MAX {
+			self.last = entry;
+		}
+
+		// set next entry to the current first
+		let offset = self.get_iterator_next_offset(entry);
+		let ebytes = self.first.to_be_bytes();
+		self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+		// set the prev pointer to usize::MAX (end of chain)
+		let offset = self.get_iterator_prev_offset(entry);
+		let ebytes = usize::MAX.to_be_bytes();
+		self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+		// update the prev pointer of the current first to point to
+		// the new entry
+		if self.first != usize::MAX {
+			let offset = self.get_iterator_prev_offset(self.first);
+			let ebytes = entry.to_be_bytes();
+			self.data[offset..offset + 8].clone_from_slice(&ebytes);
+		}
+
+		// set first to this new entry
+		self.first = entry;
+
+		Ok(())
+	}
+
+	fn remove_iterator(&mut self, entry: usize) -> Result<(), Error> {
+		let offset = self.get_iterator_next_offset(entry);
+		let next = usize::from_be_bytes(self.data[offset..offset + 8].try_into()?);
+
+		let offset = self.get_iterator_prev_offset(entry);
+		let prev = usize::from_be_bytes(self.data[offset..offset + 8].try_into()?);
+
+		if prev == usize::MAX {
+			self.first = next;
+		} else {
+			let offset = self.get_iterator_next_offset(prev);
+			let ebytes = next.to_be_bytes();
+			self.data[offset..offset + 8].clone_from_slice(&ebytes);
+		}
+
+		if next == usize::MAX {
+			self.last = prev;
+		} else {
+			let offset = self.get_iterator_prev_offset(next);
+			let ebytes = prev.to_be_bytes();
+			self.data[offset..offset + 8].clone_from_slice(&ebytes);
+		}
+
 		Ok(())
 	}
 
@@ -272,23 +352,26 @@ impl StaticHash {
 
 	/// Remove the speicifed key
 	pub fn remove_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
-		if key.len() != self.key_len as usize {
+		if key.len() != self.config.key_len as usize {
 			return None;
 		}
 		let hash = self.get_hash(key);
 		let mut count = 0;
 		loop {
-			let entry = (hash + count) % self.max_entries;
+			let entry = (hash + count) % self.config.max_entries;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == OCCUPIED {
 				if self.cmp_key(key, entry) {
 					// this is us, flag entry as deleted.
 					self.set_overhead_byte(entry, DELETED);
+
+					if self.config.iterator {
+						self.remove_iterator(entry).ok()?;
+					}
+
 					self.stats.cur_elements -= 1;
-					let start: usize =
-						((1 + self.key_len + self.entry_len) * entry) + 1 + self.key_len;
-					let end: usize = start + self.entry_len;
-					return Some(&self.data[start..end]);
+					let offset = self.get_value_offset(entry);
+					return Some(&self.data[offset..offset + self.config.entry_len]);
 				}
 			// otherwise, this is not us, we continue
 			} else if ohb == EMPTY {
@@ -309,12 +392,12 @@ impl StaticHash {
 
 	fn get_overhead_byte(&mut self, entry: usize) -> u8 {
 		self.stats.total_node_reads += 1;
-		let offset = (1 + self.key_len + self.entry_len) * entry;
+		let offset = self.get_overhead_offset(entry);
 		self.data[offset]
 	}
 
 	fn set_overhead_byte(&mut self, entry: usize, value: u8) {
-		let offset = (1 + self.key_len + self.entry_len) * entry;
+		let offset = self.get_overhead_offset(entry);
 		self.data[offset] = value;
 	}
 
@@ -326,27 +409,12 @@ impl StaticHash {
 		// u32 is good enough. Nothing less than 32 bit platforms right?
 		let u32_max: u64 = u32::MAX.into();
 		let hasher_usize: usize = (hasher.finish() % u32_max).try_into().unwrap();
-		hasher_usize % self.max_entries
-	}
-
-	fn copy_key(&mut self, key: &mut [u8], entry: usize) -> Result<(), Error> {
-		let offset = ((1 + self.key_len + self.entry_len) * entry) + 1;
-		copy(&self.data.as_slice()[offset..(offset + self.key_len)], key);
-		Ok(())
-	}
-
-	fn copy_value(&mut self, value: &mut [u8], entry: usize) -> Result<(), Error> {
-		let offset = (1 + self.key_len + self.entry_len) * entry + (1 + self.key_len);
-		copy(
-			&self.data.as_slice()[offset..(offset + self.entry_len)],
-			value,
-		);
-		Ok(())
+		hasher_usize % self.config.max_entries
 	}
 
 	fn cmp_key(&mut self, key: &[u8], entry: usize) -> bool {
 		let len = key.len();
-		let offset = (1 + self.key_len + self.entry_len) * entry + 1;
+		let offset = self.get_key_offset(entry);
 		for i in 0..len {
 			if self.data[offset + i] != key[i] {
 				return false;
@@ -356,13 +424,40 @@ impl StaticHash {
 	}
 
 	fn set_value(&mut self, entry: usize, value: &[u8]) {
-		let offset = (1 + self.key_len + self.entry_len) * entry + 1 + self.key_len;
+		let offset = self.get_value_offset(entry);
 		copy(value, &mut self.data.as_mut_slice()[offset..]);
 	}
 
 	fn set_key(&mut self, entry: usize, key: &[u8]) {
-		let offset = (1 + self.key_len + self.entry_len) * entry + 1;
+		let offset = self.get_key_offset(entry);
 		copy(key, &mut self.data.as_mut_slice()[offset..]);
+	}
+
+	fn get_key_offset(&self, entry: usize) -> usize {
+		self.get_offset(entry) + 1 + if self.config.iterator { 16 } else { 0 }
+	}
+
+	fn get_value_offset(&self, entry: usize) -> usize {
+		self.get_offset(entry) + 1 + if self.config.iterator { 16 } else { 0 } + self.config.key_len
+	}
+
+	fn get_iterator_next_offset(&self, entry: usize) -> usize {
+		self.get_offset(entry) + 1
+	}
+
+	fn get_iterator_prev_offset(&self, entry: usize) -> usize {
+		self.get_offset(entry) + 9
+	}
+
+	fn get_overhead_offset(&self, entry: usize) -> usize {
+		self.get_offset(entry)
+	}
+
+	fn get_offset(&self, entry: usize) -> usize {
+		(1 + self.config.key_len
+			+ self.config.entry_len
+			+ if self.config.iterator { 16 } else { 0 })
+			* entry
 	}
 }
 
@@ -373,8 +468,15 @@ mod test {
 	use nioruntime_deps::rand::{thread_rng, Rng};
 
 	#[test]
-	fn test_static_hash() {
-		let mut hashtable = StaticHash::new(10, 8, 8, 0.9).unwrap();
+	fn test_static_hash1() {
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 10,
+			key_len: 8,
+			entry_len: 8,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 		let key1 = [1, 2, 3, 4, 5, 6, 7, 8];
 		let key2 = [8, 7, 6, 5, 4, 3, 2, 1];
 
@@ -404,7 +506,14 @@ mod test {
 
 		// overwrite value
 
-		let mut hashtable = StaticHash::new(30, 3, 3, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 30,
+			key_len: 3,
+			entry_len: 3,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 
 		let key1 = [3, 3, 3];
 		let value1 = [4, 4, 4];
@@ -424,7 +533,14 @@ mod test {
 
 	#[test]
 	fn test_static_hash_advanced() {
-		let mut hashtable = StaticHash::new(100000, 16, 32, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 100000,
+			key_len: 16,
+			entry_len: 32,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 		let mut rng = thread_rng();
 		let mut kvec: Vec<[u8; 16]> = Vec::new();
 		let mut vvec: Vec<[u8; 32]> = Vec::new();
@@ -475,7 +591,14 @@ mod test {
 	#[test]
 	fn test_static_hash_stats() {
 		let mut rng = thread_rng();
-		let mut hashtable = StaticHash::new(100000, 16, 32, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 100000,
+			key_len: 16,
+			entry_len: 32,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 		let k1: [u8; 16] = rng.gen();
 		let v1: [u8; 32] = rng.gen();
 		let ret = hashtable.put_raw(&k1, &v1);
@@ -506,7 +629,14 @@ mod test {
 	fn test_static_hash_load_factor() {
 		let mut rng = thread_rng();
 
-		let mut hashtable = StaticHash::new(9, 16, 32, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 9,
+			key_len: 16,
+			entry_len: 32,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 
 		for _ in 0..7 {
 			let k: [u8; 16] = rng.gen();
@@ -539,7 +669,14 @@ mod test {
 	fn test_static_hash_iterator() {
 		let mut rng = thread_rng();
 
-		let mut hashtable = StaticHash::new(9, 16, 32, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 9,
+			key_len: 16,
+			entry_len: 32,
+			max_load_factor: 0.9,
+			iterator: true,
+		})
+		.unwrap();
 
 		let k1: [u8; 16] = rng.gen();
 		let v1: [u8; 32] = rng.gen();
@@ -574,71 +711,134 @@ mod test {
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v2);
 
-		let mut input = Vec::new();
-		input.insert(0, k1);
-		input.insert(1, k3);
-		input.insert(2, k4);
-		input.insert(3, k5);
-		input.sort();
-		let mut vinput = Vec::new();
-		vinput.insert(0, v1);
-		vinput.insert(1, v3);
-		vinput.insert(2, v4);
-		vinput.insert(3, v5);
-		vinput.sort();
-
-		let iterator = StaticHashIterator::new(hashtable);
+		let iterator = StaticHashIterator::new(&hashtable);
 		assert_eq!(iterator.is_err(), false);
 		let mut iterator = iterator.unwrap();
 
-		let mut k1: [u8; 16] = rng.gen();
-		let mut k2: [u8; 16] = rng.gen();
-		let mut k3: [u8; 16] = rng.gen();
-		let mut k4: [u8; 16] = rng.gen();
-		let mut k5: [u8; 16] = rng.gen();
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k5);
+		assert_eq!(v_out, v5);
 
-		let mut v1: [u8; 32] = rng.gen();
-		let mut v2: [u8; 32] = rng.gen();
-		let mut v3: [u8; 32] = rng.gen();
-		let mut v4: [u8; 32] = rng.gen();
-		let mut v5: [u8; 32] = rng.gen();
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k4);
+		assert_eq!(v_out, v4);
 
-		let res = iterator.next(&mut k1, &mut v1);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k3);
+		assert_eq!(v_out, v3);
 
-		let res = iterator.next(&mut k2, &mut v2);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k1);
+		assert_eq!(v_out, v1);
 
-		let res = iterator.next(&mut k3, &mut v3);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
 
-		let res = iterator.next(&mut k4, &mut v4);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), true);
+		// try reverse a iterator
+		let iterator = StaticHashIterator::reverse(&hashtable);
+		assert_eq!(iterator.is_err(), false);
+		let mut iterator = iterator.unwrap();
 
-		let res = iterator.next(&mut k5, &mut v5);
-		assert_eq!(res.is_ok(), true);
-		assert_eq!(res.unwrap(), false);
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k1);
+		assert_eq!(v_out, v1);
 
-		let mut output = Vec::new();
-		output.insert(0, k1);
-		output.insert(0, k2);
-		output.insert(0, k3);
-		output.insert(0, k4);
-		output.sort();
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k3);
+		assert_eq!(v_out, v3);
 
-		let mut voutput = Vec::new();
-		voutput.insert(0, v1);
-		voutput.insert(0, v2);
-		voutput.insert(0, v3);
-		voutput.insert(0, v4);
-		voutput.sort();
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k4);
+		assert_eq!(v_out, v4);
 
-		assert_eq!(input, output);
-		assert_eq!(vinput, voutput);
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k5);
+		assert_eq!(v_out, v5);
+
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
+
+		let res = hashtable.remove_raw(&k1);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v1);
+
+		let iterator = StaticHashIterator::new(&hashtable);
+		assert_eq!(iterator.is_err(), false);
+		let mut iterator = iterator.unwrap();
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k5);
+		assert_eq!(v_out, v5);
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k4);
+		assert_eq!(v_out, v4);
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k3);
+		assert_eq!(v_out, v3);
+
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
+
+		let res = hashtable.remove_raw(&k5);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v5);
+
+		let iterator = StaticHashIterator::new(&hashtable);
+		assert_eq!(iterator.is_err(), false);
+		let mut iterator = iterator.unwrap();
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k4);
+		assert_eq!(v_out, v4);
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k3);
+		assert_eq!(v_out, v3);
+
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
+
+		let res = hashtable.remove_raw(&k3);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v3);
+
+		let iterator = StaticHashIterator::new(&hashtable);
+		assert_eq!(iterator.is_err(), false);
+		let mut iterator = iterator.unwrap();
+
+		let next = iterator.next();
+		let (k_out, v_out) = next.unwrap().unwrap();
+		assert_eq!(k_out, k4);
+		assert_eq!(v_out, v4);
+
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
+
+		let res = hashtable.remove_raw(&k4);
+		assert_eq!(res.is_some(), true);
+		assert_eq!(res.unwrap(), v4);
+
+		let iterator = StaticHashIterator::new(&hashtable);
+		assert_eq!(iterator.is_err(), false);
+		let mut iterator = iterator.unwrap();
+
+		let next = iterator.next();
+		assert!(next.unwrap().is_none());
 	}
 
 	#[derive(Debug, PartialEq, Clone)]
@@ -679,7 +879,14 @@ mod test {
 
 	#[test]
 	fn test_serialize() -> Result<(), Error> {
-		let mut hashtable = StaticHash::new(100, 16, 12, 0.9).unwrap();
+		let mut hashtable = StaticHash::new(StaticHashConfig {
+			max_entries: 100,
+			key_len: 16,
+			entry_len: 12,
+			max_load_factor: 0.9,
+			..Default::default()
+		})
+		.unwrap();
 		let v1 = vec![1, 2, 3];
 		let v2 = vec![4, 5, 6];
 		let v3 = vec![7, 8, 9];

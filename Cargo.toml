@@ -16,7 +16,7 @@ members = [
 	"http", "eventhandler", "util", "error", "deps", "log",
 	"tor-llcrypto", "tor-checkable", "tor-bytes", "macros", "tests",
 ]
-exclude = ["etc/perf"]
+exclude = ["etc"]
 
 [dependencies]
 

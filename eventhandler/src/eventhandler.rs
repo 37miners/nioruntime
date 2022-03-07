@@ -20,7 +20,7 @@ use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::static_hash::StaticHash;
+use nioruntime_util::static_hash::{StaticHash, StaticHashConfig};
 use nioruntime_util::{lockr, lockw, lockwp};
 use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
@@ -589,18 +589,20 @@ where
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(HashSet::new()));
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
-		let mut connection_id_map = StaticHash::new(
-			3 * self.config.max_handle_numeric_value / self.config.threads,
-			16,
-			HANDLE_SIZE,
-			0.85,
-		)?;
-		let mut handle_hash = StaticHash::new(
-			3 * self.config.max_handle_numeric_value / self.config.threads,
-			HANDLE_SIZE,
-			HANDLE_INFO_SIZE.try_into()?,
-			0.85,
-		)?;
+		let mut connection_id_map = StaticHash::new(StaticHashConfig {
+			max_entries: self.config.max_handle_numeric_value,
+			key_len: 16,
+			entry_len: HANDLE_SIZE,
+			max_load_factor: 0.99,
+			iterator: false,
+		})?;
+		let mut handle_hash = StaticHash::new(StaticHashConfig {
+			max_entries: 3 * self.config.max_handle_numeric_value,
+			key_len: HANDLE_SIZE,
+			entry_len: HANDLE_INFO_SIZE.try_into()?,
+			max_load_factor: 0.99,
+			iterator: false,
+		})?;
 		let mut connection_handle_map = HashMap::new();
 
 		let config = self.config.clone();
