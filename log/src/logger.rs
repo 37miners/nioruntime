@@ -257,6 +257,7 @@ impl LogImpl {
 			let mut logged_from_file = "unknown".to_string();
 			nioruntime_deps::backtrace::trace(|frame| {
 				nioruntime_deps::backtrace::resolve_frame(frame, |symbol| {
+					#[cfg(debug_assertions)]
 					if let Some(filename) = symbol.filename() {
 						let filename = filename.display().to_string();
 						let lineno = match symbol.lineno() {
@@ -268,6 +269,25 @@ impl LogImpl {
 						}
 						if filename.find("/log/src/logger.rs").is_none() && found_logger {
 							logged_from_file = format!("{}:{}", filename, lineno);
+							found_frame = true;
+						}
+					}
+					#[cfg(not(debug_assertions))]
+					if let Some(name) = symbol.name() {
+						let name = name.to_string();
+						if name.find("nioruntime_log::logger::do_log").is_some() {
+							found_logger = true;
+						}
+						if name.find("nioruntime_log::logger::do_log").is_none() && found_logger {
+							let pos = name.rfind(':');
+							let name = match pos {
+								Some(pos) => match pos > 1 {
+									true => &name[0..pos - 1],
+									false => &name[0..pos],
+								},
+								None => &name[..],
+							};
+							logged_from_file = format!("{}", name);
 							found_frame = true;
 						}
 					}
