@@ -755,9 +755,9 @@ where
 		events: &mut HashSet<Event>,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 		start: usize,
 	) -> Result<bool, Error> {
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
@@ -882,9 +882,9 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event)?;
@@ -986,9 +986,9 @@ where
 		id: u128,
 		ctx: &mut Context,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
@@ -1368,9 +1368,9 @@ where
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event)?;
@@ -1840,9 +1840,9 @@ where
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 	) -> Result<bool, Error> {
 		let stop = {
@@ -1889,9 +1889,9 @@ where
 
 	fn process_nwrites(
 		ctx: &mut Context,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		_handle_hash: &mut StaticHash,
+		_handle_hash: &mut StaticHash<(), ()>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
@@ -1930,9 +1930,9 @@ where
 
 	fn process_pending(
 		ctx: &mut Context,
-		connection_id_map: &mut StaticHash,
+		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		handle_hash: &mut StaticHash,
+		handle_hash: &mut StaticHash<(), ()>,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {

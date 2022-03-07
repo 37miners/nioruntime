@@ -199,7 +199,7 @@ pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 
 									readable = format!(
 										"{}\n\
-										]",
+										],",
 										readable
 									);
 									id = None;

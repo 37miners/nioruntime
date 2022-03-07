@@ -23,6 +23,7 @@ use nioruntime_deps::byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use nioruntime_deps::bytes::Buf;
 use nioruntime_err::{Error, ErrorKind};
 use std::convert::TryInto;
+use std::fmt::Debug;
 use std::io::{self, Read, Write};
 use std::marker;
 
@@ -154,16 +155,6 @@ pub trait Reader {
 	}
 }
 
-/*
-/// Trait that every type that can be serialized as binary must implement.
-/// Writes directly to a Writer, a utility type thinly wrapping an
-/// underlying Write implementation.
-pub trait Serializable {
-	/// Write the data held by this Serializable to the provided writer
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error>;
-}
-*/
-
 /// Reader that exposes an Iterator interface.
 pub struct IteratingReader<'a, T, R: Reader> {
 	count: u64,
@@ -204,25 +195,11 @@ where
 
 pub trait Serializable
 where
-	Self: Sized,
+	Self: Sized + Debug,
 {
 	fn read<R: Reader>(reader: &mut R) -> Result<Self, Error>;
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error>;
 }
-
-/*
-/// Trait that every type that can be deserialized from binary must implement.
-/// Reads directly to a Reader, a utility type thinly wrapping an
-/// underlying Read implementation.
-pub trait Serializable
-where
-	Self: Sized,
-{
-	/// Reads the data necessary to this Serializable from the provided reader
-	fn read<R: Reader>(reader: &mut R) -> Result<Self, Error>;
-}
-
-*/
 
 /// Deserializes a Serializable from any std::io::Read implementation.
 pub fn deserialize<T: Serializable, R: Read>(source: &mut R) -> Result<T, Error> {
@@ -561,6 +538,59 @@ impl<'a> Writer for BinWriter<'a> {
 	}
 }
 
+macro_rules! impl_array {
+	($count:expr) => {
+		impl<S: Serializable> Serializable for [S; $count] {
+			fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+				for item in self {
+					Serializable::write(item, writer)?;
+				}
+				Ok(())
+			}
+			fn read<R: Reader>(reader: &mut R) -> Result<[S; $count], Error> {
+				let mut ret = vec![];
+				for _ in 0..$count {
+					ret.push(Serializable::read(reader)?);
+				}
+				Ok(ret.try_into().unwrap())
+			}
+		}
+	};
+}
+
+impl_array!(1);
+impl_array!(2);
+impl_array!(3);
+impl_array!(4);
+impl_array!(5);
+impl_array!(6);
+impl_array!(7);
+impl_array!(8);
+impl_array!(9);
+impl_array!(10);
+impl_array!(11);
+impl_array!(12);
+impl_array!(13);
+impl_array!(14);
+impl_array!(15);
+impl_array!(16);
+impl_array!(17);
+impl_array!(18);
+impl_array!(19);
+impl_array!(20);
+impl_array!(21);
+impl_array!(22);
+impl_array!(23);
+impl_array!(24);
+impl_array!(25);
+impl_array!(26);
+impl_array!(27);
+impl_array!(28);
+impl_array!(29);
+impl_array!(30);
+impl_array!(31);
+impl_array!(32);
+
 macro_rules! impl_int {
 	($int:ty, $w_fn:ident, $r_fn:ident) => {
 		impl Serializable for $int {
@@ -584,6 +614,16 @@ impl_int!(i8, write_i8, read_i8);
 impl_int!(i16, write_i16, read_i16);
 impl_int!(u128, write_u128, read_u128);
 impl_int!(i128, write_i128, read_i128);
+
+impl Serializable for () {
+	fn read<R: Reader>(_reader: &mut R) -> Result<(), Error> {
+		Ok(())
+	}
+
+	fn write<W: Writer>(&self, _writer: &mut W) -> Result<(), Error> {
+		Ok(())
+	}
+}
 
 impl Serializable for bool {
 	fn read<R: Reader>(reader: &mut R) -> Result<bool, Error> {

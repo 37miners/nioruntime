@@ -33,16 +33,17 @@ const VALUE_LEN: usize = 8;
 
 struct MonAllocator;
 
-static mut MEM_USED: usize = 0;
+static mut MEM_ALLOCATED: usize = 0;
+static mut MEM_DEALLOCATED: usize = 0;
 
 unsafe impl GlobalAlloc for MonAllocator {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		MEM_USED += layout.size();
+		MEM_ALLOCATED += layout.size();
 		System.alloc(layout)
 	}
 
 	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-		MEM_USED -= layout.size();
+		MEM_DEALLOCATED += layout.size();
 		System.dealloc(ptr, layout)
 	}
 }
@@ -76,6 +77,7 @@ fn main() -> Result<(), Error> {
 		true => args.value_of("itt").unwrap().parse()?,
 		false => 1,
 	};
+	let park = args.is_present("park");
 
 	let iterator = args.is_present("with_iterator");
 
@@ -85,12 +87,11 @@ fn main() -> Result<(), Error> {
 	}
 
 	info!("Starting tests")?;
-	let mem_used_pre = unsafe { MEM_USED };
 	if do_static {
 		for _ in 0..itt {
 			let now = Instant::now();
 			{
-				let mut static_hash = StaticHash::new(StaticHashConfig {
+				let mut static_hash: StaticHash<(), ()> = StaticHash::new(StaticHashConfig {
 					max_entries: static_hash_size,
 					key_len: KEY_LEN,
 					entry_len: VALUE_LEN,
@@ -107,16 +108,19 @@ fn main() -> Result<(), Error> {
 					}
 				}
 
-				info!(
-					"Memory used (pre_drop) = {}mb",
-					(unsafe { MEM_USED } - mem_used_pre) as f64 / 1_000_000 as f64
-				)?;
+				info!("Memory used (pre_drop) = {}mb", mem_used())?;
+
+				info!("Memory Allocated (pre_drop) = {}mb", mem_alloc())?;
+
+				info!("Memory De-allocated (pre_drop) = {}mb", mem_dealloc())?;
 			}
 
-			info!(
-				"Memory used (post drop) = {}mb",
-				(unsafe { MEM_USED } - mem_used_pre) as f64 / 1_000_000 as f64
-			)?;
+			info!("Memory used (post_drop) = {}mb", mem_used())?;
+
+			info!("Memory Allocated (post_drop) = {}mb", mem_alloc())?;
+
+			info!("Memory De-allocated (post_drop) = {}mb", mem_dealloc())?;
+
 			info!(
 				"(StaticHash) Elapsed time = {:.2}ms",
 				now.elapsed().as_nanos() as f64 / 1_000_000 as f64
@@ -145,16 +149,19 @@ fn main() -> Result<(), Error> {
 					}
 				}
 
-				info!(
-					"Memory used (pre_drop) = {}mb",
-					(unsafe { MEM_USED } - mem_used_pre) as f64 / 1_000_000 as f64
-				)?;
+				info!("Memory used (pre_drop) = {}mb", mem_used())?;
+
+				info!("Memory Allocated (pre_drop = {}mb", mem_alloc())?;
+
+				info!("Memory De-allocated (pre_drop = {}mb", mem_dealloc())?;
 			}
 
-			info!(
-				"Memory used (post drop) = {}mb",
-				(unsafe { MEM_USED } - mem_used_pre) as f64 / 1_000_000 as f64
-			)?;
+			info!("Memory used (post drop) = {}mb", mem_used())?;
+
+			info!("Memory Allocated (post_drop = {}mb", mem_alloc())?;
+
+			info!("Memory De-allocated (post_drop = {}mb", mem_dealloc())?;
+
 			info!(
 				"(HashMap) Elapsed time = {:.2}ms",
 				now.elapsed().as_nanos() as f64 / 1_000_000 as f64
@@ -162,5 +169,21 @@ fn main() -> Result<(), Error> {
 		}
 	}
 
+	if park {
+		std::thread::park();
+	}
+
 	Ok(())
+}
+
+fn mem_used() -> f64 {
+	unsafe { MEM_ALLOCATED }.saturating_sub(unsafe { MEM_DEALLOCATED }) as f64 / 1_000_000 as f64
+}
+
+fn mem_alloc() -> f64 {
+	(unsafe { MEM_ALLOCATED }) as f64 / 1_000_000 as f64
+}
+
+fn mem_dealloc() -> f64 {
+	(unsafe { MEM_DEALLOCATED }) as f64 / 1_000_000 as f64
 }

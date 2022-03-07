@@ -13,3 +13,4 @@
 // limitations under the License.
 
 mod macros;
+mod static_hash;

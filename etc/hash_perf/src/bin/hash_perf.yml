@@ -40,3 +40,8 @@ args:
         short: g
         long: no_gets
         takes_value: false
+    - park:
+        help: park the thread at the end of the test so inspection of the process may be done
+        short: p
+        long: park
+        takes_value: false
