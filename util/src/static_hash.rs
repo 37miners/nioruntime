@@ -51,53 +51,6 @@ impl StaticHashStats {
 	}
 }
 
-/// Iterator
-pub struct StaticHashIterator<'a> {
-	pos: u64,
-	reverse: bool,
-	static_hash: &'a StaticHash,
-}
-
-impl<'a> StaticHashIterator<'a> {
-	/// Create a new StaticHashIterator
-	pub fn new(static_hash: &StaticHash) -> Result<StaticHashIterator, Error> {
-		Ok(StaticHashIterator {
-			pos: static_hash.first,
-			static_hash,
-			reverse: false,
-		})
-	}
-
-	pub fn reverse(static_hash: &StaticHash) -> Result<StaticHashIterator, Error> {
-		Ok(StaticHashIterator {
-			pos: static_hash.last,
-			static_hash,
-			reverse: true,
-		})
-	}
-
-	pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>, Error> {
-		if self.pos == u64::MAX {
-			Ok(None)
-		} else {
-			let offset = if self.reverse {
-				self.static_hash
-					.get_iterator_prev_offset(self.pos.try_into()?)
-			} else {
-				self.static_hash
-					.get_iterator_next_offset(self.pos.try_into()?)
-			};
-			let k_offset = self.static_hash.get_key_offset(self.pos.try_into()?);
-			let v_offset = self.static_hash.get_value_offset(self.pos.try_into()?);
-			self.pos = u64::from_be_bytes(self.static_hash.data[offset..offset + 8].try_into()?);
-			Ok(Some((
-				&self.static_hash.data[k_offset..k_offset + self.static_hash.config.key_len],
-				&self.static_hash.data[v_offset..v_offset + self.static_hash.config.entry_len],
-			)))
-		}
-	}
-}
-
 #[derive(Clone)]
 pub struct StaticHashConfig {
 	pub max_entries: usize,
@@ -129,6 +82,7 @@ pub struct StaticHash {
 	stats: StaticHashStats,
 	first: u64,
 	last: u64,
+	pos: u64,
 }
 
 #[derive(Hash)]
@@ -140,6 +94,26 @@ impl Drop for StaticHash {
 	fn drop(&mut self) {
 		// explicitly drain to free memory
 		self.data.drain(..);
+	}
+}
+
+impl Iterator for &mut StaticHash {
+	type Item = (Vec<u8>, Vec<u8>);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.pos == u64::MAX {
+			self.pos = self.last;
+			None
+		} else {
+			let offset = self.get_iterator_prev_offset(self.pos.try_into().ok()?);
+			let k_offset = self.get_key_offset(self.pos.try_into().ok()?);
+			let v_offset = self.get_value_offset(self.pos.try_into().ok()?);
+			self.pos = u64::from_be_bytes(self.data[offset..offset + 8].try_into().ok()?);
+			Some((
+				self.data[k_offset..k_offset + self.config.key_len].to_vec(),
+				self.data[v_offset..v_offset + self.config.entry_len].to_vec(),
+			))
+		}
 	}
 }
 
@@ -162,6 +136,7 @@ impl StaticHash {
 			config,
 			first: u64::MAX,
 			last: u64::MAX,
+			pos: u64::MAX,
 			stats: StaticHashStats {
 				max_elements: 0,
 				cur_elements: 0,
@@ -282,6 +257,7 @@ impl StaticHash {
 	fn put_iterator(&mut self, entry: usize) -> Result<(), Error> {
 		if self.last == u64::MAX {
 			self.last = entry.try_into()?;
+			self.pos = self.last;
 		}
 
 		// set next entry to the current first
@@ -325,6 +301,7 @@ impl StaticHash {
 
 		if next == u64::MAX {
 			self.last = prev;
+			self.pos = prev;
 		} else {
 			let offset = self.get_iterator_prev_offset(next.try_into()?);
 			let ebytes = prev.to_be_bytes();
@@ -707,138 +684,97 @@ mod test {
 
 		let res = hashtable.put_raw(&k5, &v5);
 		assert_eq!(res.is_ok(), true);
+
+		let mut k_v = vec![];
+		k_v.push((k1, v1));
+		k_v.push((k2, v2));
+		k_v.push((k3, v3));
+		k_v.push((k4, v4));
+		k_v.push((k5, v5));
+
+		let mut counter = 0;
+		for (k, v) in &mut hashtable {
+			assert_eq!(k, k_v[counter].0);
+			assert_eq!(v, k_v[counter].1);
+			counter += 1;
+		}
+		assert_eq!(counter, 5);
+
 		let res = hashtable.remove_raw(&k2);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v2);
 
-		let iterator = StaticHashIterator::new(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
+		let mut k_v = vec![];
+		k_v.push((k1, v1));
+		k_v.push((k3, v3));
+		k_v.push((k4, v4));
+		k_v.push((k5, v5));
 
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k5);
-		assert_eq!(v_out, v5);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k4);
-		assert_eq!(v_out, v4);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k3);
-		assert_eq!(v_out, v3);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k1);
-		assert_eq!(v_out, v1);
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
-
-		// try reverse a iterator
-		let iterator = StaticHashIterator::reverse(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k1);
-		assert_eq!(v_out, v1);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k3);
-		assert_eq!(v_out, v3);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k4);
-		assert_eq!(v_out, v4);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k5);
-		assert_eq!(v_out, v5);
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
+		let mut counter = 0;
+		for (k, v) in &mut hashtable {
+			assert_eq!(k, k_v[counter].0);
+			assert_eq!(v, k_v[counter].1);
+			counter += 1;
+		}
+		assert_eq!(counter, 4);
 
 		let res = hashtable.remove_raw(&k1);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v1);
 
-		let iterator = StaticHashIterator::new(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
+		let mut k_v = vec![];
+		k_v.push((k3, v3));
+		k_v.push((k4, v4));
+		k_v.push((k5, v5));
 
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k5);
-		assert_eq!(v_out, v5);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k4);
-		assert_eq!(v_out, v4);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k3);
-		assert_eq!(v_out, v3);
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
+		let mut counter = 0;
+		for (k, v) in &mut hashtable {
+			assert_eq!(k, k_v[counter].0);
+			assert_eq!(v, k_v[counter].1);
+			counter += 1;
+		}
+		assert_eq!(counter, 3);
 
 		let res = hashtable.remove_raw(&k5);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v5);
 
-		let iterator = StaticHashIterator::new(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
+		let mut k_v = vec![];
+		k_v.push((k3, v3));
+		k_v.push((k4, v4));
 
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k4);
-		assert_eq!(v_out, v4);
-
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k3);
-		assert_eq!(v_out, v3);
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
+		let mut counter = 0;
+		for (k, v) in &mut hashtable {
+			assert_eq!(k, k_v[counter].0);
+			assert_eq!(v, k_v[counter].1);
+			counter += 1;
+		}
+		assert_eq!(counter, 2);
 
 		let res = hashtable.remove_raw(&k3);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v3);
 
-		let iterator = StaticHashIterator::new(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
+		let mut k_v = vec![];
+		k_v.push((k4, v4));
 
-		let next = iterator.next();
-		let (k_out, v_out) = next.unwrap().unwrap();
-		assert_eq!(k_out, k4);
-		assert_eq!(v_out, v4);
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
+		let mut counter = 0;
+		for (k, v) in &mut hashtable {
+			assert_eq!(k, k_v[counter].0);
+			assert_eq!(v, k_v[counter].1);
+			counter += 1;
+		}
+		assert_eq!(counter, 1);
 
 		let res = hashtable.remove_raw(&k4);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v4);
 
-		let iterator = StaticHashIterator::new(&hashtable);
-		assert_eq!(iterator.is_err(), false);
-		let mut iterator = iterator.unwrap();
-
-		let next = iterator.next();
-		assert!(next.unwrap().is_none());
+		let mut counter = 0;
+		for (_k, _v) in &mut hashtable {
+			counter += 1;
+		}
+		assert_eq!(counter, 0);
 	}
 
 	#[derive(Debug, PartialEq, Clone)]

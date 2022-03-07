@@ -85,12 +85,7 @@ fn main() -> Result<(), Error> {
 	}
 
 	info!("Starting tests")?;
-
 	let mem_used_pre = unsafe { MEM_USED };
-	info!(
-		"Before tests. Memory used = {}mb",
-		unsafe { MEM_USED } as f64 / 1_000_000 as f64
-	)?;
 	if do_static {
 		for _ in 0..itt {
 			let now = Instant::now();
