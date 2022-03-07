@@ -1,0 +1,30 @@
+[package]
+name = "hash_perf"
+version = "1.0.0"
+edition = "2018"
+description = "Utility to test nioruntime static_hash"
+license = "Apache-2.0"
+repository = "https://github.com/37miners/nioruntime"
+keywords = [ "socklet", "nioruntime", "rustlet" ]
+readme = "README.md"
+build = "src/build/build.rs"
+
+[[bin]]
+name = "hash_perf"
+path = "src/bin/hash_perf.rs"
+
+[dependencies]
+nioruntime_deps = { path = "../../deps" }
+nioruntime_log = { path = "../../log" }
+nioruntime_evh = { path = "../../eventhandler" }
+nioruntime_util = { path = "../../util" }
+nioruntime_err = { path = "../../error" }
+
+clap = { version = "2.33", features = ["yaml"] }
+rand = "0.6.0"
+num-format = "0.4.0"
+colored = "2.0.0"
+sysinfo = "0.23.5"
+
+[build-dependencies]
+built = { version = "0.4", features = ["git2"]}

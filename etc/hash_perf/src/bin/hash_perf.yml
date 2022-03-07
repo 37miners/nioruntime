@@ -1,0 +1,42 @@
+name: perf
+author: 37 Miners, LLC
+
+args:
+    - do_static:
+        help: Run the test against the StaticHash
+        short: z
+        long: do_static
+        takes_value: false
+    - do_hash:
+        help: Run the test against the HashMap
+        short: m
+        long: do_hash
+        takes_value: false
+    - itt:
+        help: Number of iterations to run
+        short: i
+        long: itt
+        takes_value: true
+        value_name: itt
+    - size:
+        help: Size of the static hash
+        short: s
+        long: size
+        value_name: size
+        takes_value: true
+    - count:
+        help: Number of inserts
+        short: c
+        long: count
+        value_name: count
+        takes_value: true
+    - with_iterator:
+        help: Whether to use the iterator feature of the static hash
+        short: t
+        long: iterator
+        takes_value: false
+    - no_gets:
+        help: do not do gets in the test
+        short: g
+        long: no_gets
+        takes_value: false
