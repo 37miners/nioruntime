@@ -53,7 +53,7 @@ impl StaticHashStats {
 
 /// Iterator
 pub struct StaticHashIterator<'a> {
-	pos: usize,
+	pos: u64,
 	reverse: bool,
 	static_hash: &'a StaticHash,
 }
@@ -77,17 +77,19 @@ impl<'a> StaticHashIterator<'a> {
 	}
 
 	pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>, Error> {
-		if self.pos == usize::MAX {
+		if self.pos == u64::MAX {
 			Ok(None)
 		} else {
 			let offset = if self.reverse {
-				self.static_hash.get_iterator_prev_offset(self.pos)
+				self.static_hash
+					.get_iterator_prev_offset(self.pos.try_into()?)
 			} else {
-				self.static_hash.get_iterator_next_offset(self.pos)
+				self.static_hash
+					.get_iterator_next_offset(self.pos.try_into()?)
 			};
-			let k_offset = self.static_hash.get_key_offset(self.pos);
-			let v_offset = self.static_hash.get_value_offset(self.pos);
-			self.pos = usize::from_be_bytes(self.static_hash.data[offset..offset + 8].try_into()?);
+			let k_offset = self.static_hash.get_key_offset(self.pos.try_into()?);
+			let v_offset = self.static_hash.get_value_offset(self.pos.try_into()?);
+			self.pos = u64::from_be_bytes(self.static_hash.data[offset..offset + 8].try_into()?);
 			Ok(Some((
 				&self.static_hash.data[k_offset..k_offset + self.static_hash.config.key_len],
 				&self.static_hash.data[v_offset..v_offset + self.static_hash.config.entry_len],
@@ -125,8 +127,8 @@ pub struct StaticHash {
 	data: Vec<u8>,
 	config: StaticHashConfig,
 	stats: StaticHashStats,
-	first: usize,
-	last: usize,
+	first: u64,
+	last: u64,
 }
 
 #[derive(Hash)]
@@ -158,8 +160,8 @@ impl StaticHash {
 		Ok(StaticHash {
 			data,
 			config,
-			first: usize::MAX,
-			last: usize::MAX,
+			first: u64::MAX,
+			last: u64::MAX,
 			stats: StaticHashStats {
 				max_elements: 0,
 				cur_elements: 0,
@@ -278,8 +280,8 @@ impl StaticHash {
 	}
 
 	fn put_iterator(&mut self, entry: usize) -> Result<(), Error> {
-		if self.last == usize::MAX {
-			self.last = entry;
+		if self.last == u64::MAX {
+			self.last = entry.try_into()?;
 		}
 
 		// set next entry to the current first
@@ -287,44 +289,44 @@ impl StaticHash {
 		let ebytes = self.first.to_be_bytes();
 		self.data[offset..offset + 8].clone_from_slice(&ebytes);
 
-		// set the prev pointer to usize::MAX (end of chain)
+		// set the prev pointer to u64::MAX (end of chain)
 		let offset = self.get_iterator_prev_offset(entry);
-		let ebytes = usize::MAX.to_be_bytes();
+		let ebytes = u64::MAX.to_be_bytes();
 		self.data[offset..offset + 8].clone_from_slice(&ebytes);
 
 		// update the prev pointer of the current first to point to
 		// the new entry
-		if self.first != usize::MAX {
-			let offset = self.get_iterator_prev_offset(self.first);
+		if self.first != u64::MAX {
+			let offset = self.get_iterator_prev_offset(self.first.try_into()?);
 			let ebytes = entry.to_be_bytes();
 			self.data[offset..offset + 8].clone_from_slice(&ebytes);
 		}
 
 		// set first to this new entry
-		self.first = entry;
+		self.first = entry.try_into()?;
 
 		Ok(())
 	}
 
 	fn remove_iterator(&mut self, entry: usize) -> Result<(), Error> {
 		let offset = self.get_iterator_next_offset(entry);
-		let next = usize::from_be_bytes(self.data[offset..offset + 8].try_into()?);
+		let next = u64::from_be_bytes(self.data[offset..offset + 8].try_into()?);
 
 		let offset = self.get_iterator_prev_offset(entry);
-		let prev = usize::from_be_bytes(self.data[offset..offset + 8].try_into()?);
+		let prev = u64::from_be_bytes(self.data[offset..offset + 8].try_into()?);
 
-		if prev == usize::MAX {
+		if prev == u64::MAX {
 			self.first = next;
 		} else {
-			let offset = self.get_iterator_next_offset(prev);
+			let offset = self.get_iterator_next_offset(prev.try_into()?);
 			let ebytes = next.to_be_bytes();
 			self.data[offset..offset + 8].clone_from_slice(&ebytes);
 		}
 
-		if next == usize::MAX {
+		if next == u64::MAX {
 			self.last = prev;
 		} else {
-			let offset = self.get_iterator_prev_offset(next);
+			let offset = self.get_iterator_prev_offset(next.try_into()?);
 			let ebytes = prev.to_be_bytes();
 			self.data[offset..offset + 8].clone_from_slice(&ebytes);
 		}
@@ -406,9 +408,8 @@ impl StaticHash {
 		let mut hasher = DefaultHasher::new();
 		Key { data: key.to_vec() }.hash(&mut hasher);
 
-		// u32 is good enough. Nothing less than 32 bit platforms right?
-		let u32_max: u64 = u32::MAX.into();
-		let hasher_usize: usize = (hasher.finish() % u32_max).try_into().unwrap();
+		let max: u64 = usize::MAX.try_into().unwrap_or(u64::MAX);
+		let hasher_usize: usize = (hasher.finish() % max).try_into().unwrap();
 		hasher_usize % self.config.max_entries
 	}
 
@@ -579,7 +580,6 @@ mod test {
 		vvec.remove(13);
 
 		for i in 0..75997 {
-			//let mut vread = [0 as u8; 32];
 			let res = hashtable.get_raw(&kvec[i]);
 			assert_eq!(res.is_some(), true);
 			let vread = res.unwrap();
