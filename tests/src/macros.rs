@@ -17,9 +17,9 @@
 #[cfg(test)]
 mod test {
 
+	use nioruntime_derive::Serializable;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
-	use nioruntime_macros::Serializable;
 	use nioruntime_util::ser::{serialize, BinReader, Serializable};
 	use std::io::Cursor;
 

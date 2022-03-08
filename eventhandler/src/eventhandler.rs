@@ -20,8 +20,8 @@ use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::static_hash::{StaticHash, StaticHashConfig};
 use nioruntime_util::{lockr, lockw, lockwp};
+use nioruntime_util::{StaticHash, StaticHashConfig};
 use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
 	ServerConnection,
@@ -615,11 +615,11 @@ where
 		let handle_info = HandleInfo::new(connection_id, 0);
 		let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 		handle_info.to_bytes(&mut handle_info_bytes)?;
-		handle_hash.put_raw(
+		handle_hash.insert_raw(
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 			&mut handle_info_bytes,
 		)?;
-		connection_id_map.put_raw(
+		connection_id_map.insert_raw(
 			&connection_id.to_be_bytes(),
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 		)?;
@@ -1939,13 +1939,13 @@ where
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
 					connection_id_map
-						.put_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
+						.insert_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
 
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
-					handle_hash.put_raw(&item.handle.to_be_bytes(), &handle_info_bytes)?;
+					handle_hash.insert_raw(&item.handle.to_be_bytes(), &handle_info_bytes)?;
 
 					ctx.input_events.push(Event {
 						handle: item.handle,
@@ -1954,14 +1954,14 @@ where
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
 					connection_id_map
-						.put_raw(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
+						.insert_raw(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
 					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
 
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
 					handle_hash
-						.put_raw(&item.handles[ctx.tid].to_be_bytes(), &handle_info_bytes)?;
+						.insert_raw(&item.handles[ctx.tid].to_be_bytes(), &handle_info_bytes)?;
 
 					debug!(
 						"pushing accept handle: {} to tid={}",

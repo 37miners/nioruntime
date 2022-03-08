@@ -16,7 +16,7 @@ use clap::load_yaml;
 use clap::App;
 use nioruntime_err::Error;
 use nioruntime_log::*;
-use nioruntime_util::static_hash::{StaticHash, StaticHashConfig};
+use nioruntime_util::{StaticHash, StaticHashConfig};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -102,7 +102,7 @@ fn main() -> Result<(), Error> {
 				for _ in 0..count {
 					let key: [u8; KEY_LEN] = rand::random();
 					let value: [u8; VALUE_LEN] = rand::random();
-					static_hash.put_raw(&key, &value)?;
+					static_hash.insert_raw(&key, &value)?;
 					if !no_gets {
 						static_hash.get_raw(&key);
 					}

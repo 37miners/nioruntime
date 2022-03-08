@@ -11,8 +11,8 @@ edition = "2018"
 
 [dependencies]
 
-nioruntime_deps   = { path = "../deps"  }
-nioruntime_err    = { path = "../error" }
-nioruntime_log    = { path = "../log"   }
-nioruntime_util   = { path = "../util"  }
-nioruntime_macros = { path = "../macros" }
+nioruntime_deps   = { path = "../deps"   }
+nioruntime_err    = { path = "../error"  }
+nioruntime_log    = { path = "../log"    }
+nioruntime_util   = { path = "../util"   }
+nioruntime_derive = { path = "../derive" }

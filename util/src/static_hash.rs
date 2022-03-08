@@ -31,16 +31,17 @@ debug!();
 /// Statistics for this static hash
 #[derive(Debug, Clone)]
 pub struct StaticHashStats {
-	/// Max elements that have ever been in this table at one given time
+	/// The maximum number of elements that have been in this
+	/// StaticHash since creation or [`StaticHash::reset_stats`] was called.
 	pub max_elements: usize,
-	/// Current number of elements in the table
+	/// The current number of elements in the [`StaticHash`].
 	pub cur_elements: usize,
-	/// Total of times the 'get' function is called
+	/// The number of times the hash function has been called for this
+	/// static_hash.
 	pub access_count: usize,
-	/// Total of node visits on a get (collision results in at least two node visits)
-	/// Note that if errors are returned the get is not counted.
+	/// Total number of entries traversed by the [`StaticHash`].
 	pub total_node_reads: usize,
-	/// Worst case visits
+	/// The most entries traversed by a request in this [`StaticHash`].
 	pub worst_case_visits: usize,
 }
 
@@ -64,11 +65,31 @@ impl StaticHashStats {
 }
 
 #[derive(Clone)]
+/// This is the configuration struct for [`StaticHash`]. See each field for details.
 pub struct StaticHashConfig {
+	/// The maximum number of entries that may be inserted into this [`StaticHash`].
 	pub max_entries: usize,
+	/// The maximum length of a key in this [`StaticHash`]. The total memory used
+	/// is equal to (1 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
+	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to false.
+	/// and (17 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
+	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to true.
+	/// Any inserts with greater than this length will result in an error.
 	pub key_len: usize,
+	/// The maximum length of a value in this [`StaticHash`]. The total memory used
+	/// is equal to (1 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
+	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to false.
+	/// and (17 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
+	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to true.
+	/// Any inserts with greater than this length will result in an error.
 	pub entry_len: usize,
+	/// The maximum load_factor for this [`StaticHash`]. The default value is 0.85.
+	/// It is important to note that this parameter is different than for instance Java's
+	/// HashMap where this value is the size at which the HashMap is resized. In [`StaticHash`]
+	/// resizing does not occur and any inserts after this capacity is reached will result
+	/// in an error.
 	pub max_load_factor: f64,
+	/// Whether or not to create an iterator for this [`StaticHash`]. If this is set to try
 	pub iterator: bool,
 }
 
@@ -78,15 +99,192 @@ impl Default for StaticHashConfig {
 			max_entries: 1_000,
 			key_len: 8,
 			entry_len: 8,
-			max_load_factor: 0.9999999,
+			max_load_factor: 0.85,
 			iterator: true,
 		}
 	}
 }
 
-/// Static hash object. A hashtable with fixed size.
-/// format of the hashtable:
-/// [overhead byte: 0 - empty, 1 - occupied, 2 - deleted][key - key_len bytes][value - entry_len bytes]
+/// Implementation of a static hashtable. This implementation has
+/// several advantages and several drawbacks. It is designed for use in server-side
+/// applications such as a web server, but may be usable elsewhere. The distinguishing
+/// feature of this hashtable is that all memory is preallocated. See heap allocation
+/// below.
+///
+/// # Heap Allocation
+///
+/// Heap allocation is problematic because it is difficult to implement a good
+/// heap allocation algorithm for all use cases. In many cases, the heap allocator
+/// will be fine, but in some cases, in particular when a server-side application
+/// is in use at a very high load, memory fragmentation can cause catestrophic
+/// problems. This discussion on stackoverflow covers many details:
+/// <https://stackoverflow.com/questions/3770457/what-is-memory-fragmentation>.
+/// To avoid these problems, [`StaticHash`] may be used so that all memory is preallocated
+/// at startup and a simple memcopy copies the data into the hashtable from data created
+/// on the stack. It is important to note that in general the performance of this
+/// hashtable is not as good as [`std::collections::HashMap`], but the benefits
+/// of avoiding heap allocation after startup are great and somewhat necessary
+/// for heavily loaded servers. Since hashtables are very fast, the performance of
+/// this hashtable is quite acceptable and in fact in some cases, this hashtable performed
+/// better than [`std::collections::HashMap`].
+///
+/// # Configuration
+///
+/// [`StaticHash`] configuration is a little more complex than [`std::collections::HashMap`],
+/// however, it is not too complex. The key difference is that [`StaticHash`] has a known
+/// capacity and must be pre-configured. In a server application this configuration can be
+/// made in relation to the maximum number of simultaneous connections. The [`StaticHash::new`]
+/// function takes a paramter of [`StaticHashConfig`]. [`StaticHashConfig`] implements the
+/// default trait so sensible defaults can be obtained for most parameters there, but
+/// [`StaticHashConfig::max_entries`], [`StaticHashConfig::key_len`], and
+/// [`StaticHashConfig::entry_len`] will likely be dependant on the use case. For full
+/// details on all config options,see [`StaticHashConfig`].
+///
+/// # Overall memory useage
+///
+/// In addition to avoiding heap allocations, [`StaticHash`] uses significantly less memory
+/// than HashMap. Especially, when the iterator is disabled. For example, here is the output
+/// of a run of the hash_perf utility which is included in the etc directory.
+///
+/// ```text
+///  % ./target/release/hash_perf -c 10000000 -s 11000000 --do_hash --no_gets
+/// [2022-03-07 20:38:26]: (INFO) [hash_perf::main]: Starting tests
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory used (pre_drop) = 553.833143mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory Allocated (pre_drop = 1107.641126mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory De-allocated (pre_drop = 553.808685mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory used (post drop) = 0.184999mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory Allocated (post_drop = 1107.643232mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: Memory De-allocated (post_drop = 1107.458937mb
+/// [2022-03-07 20:38:30]: (INFO) [hash_perf::main]: (HashMap) Elapsed time = 4167.65ms
+/// %
+/// % ./target/release/hash_perf -c 10000000 -s 11000000 --do_static --no_gets
+/// [2022-03-07 20:38:36]: (INFO) [hash_perf::main]: Starting tests
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory used (pre_drop) = 187.184999mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory Allocated (pre_drop) = 267.344636mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory De-allocated (pre_drop) = 80.160341mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory used (post_drop) = 0.184999mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory Allocated (post_drop) = 267.346746mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: Memory De-allocated (post_drop) = 267.162453mb
+/// [2022-03-07 20:38:40]: (INFO) [hash_perf::main]: (StaticHash) Elapsed time = 4136.87ms
+/// ```
+///
+/// In this run, the performance of inserts was actually faster for StaticHash than HashMap.
+/// This may have been due to swapping occuring, but nevetheless the performance for inserts
+/// is fairly good and in some cases faster than [`std::collections::HashMap`]. Importantly,
+/// note that the memory used (pre drop) was 187 mb with [`StaticHash`] and 553 mb with
+/// [`std::collections::HashMap`]. This is a significant difference.
+/// Partly this is due to the fact that the iterator option was disabled for this test.
+/// However, with iterators enabled, this same test results in 363 mb being used by static
+/// hash which is still better. In many cases, iterators are not needed though so the ability
+/// do disable them is useful and saves memory.
+
+/// This is a more typical run:
+/// ```text
+/// % ./target/release/hash_perf -c 1000000 -s 1100000 --do_static                     
+/// [2022-03-07 20:47:27]: (INFO) [hash_perf::main]: Starting tests
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory used (pre_drop) = 18.884673mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory Allocated (pre_drop) = 35.043967mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory De-allocated (pre_drop) = 16.159998mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory used (post_drop) = 0.184673mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory Allocated (post_drop) = 35.046077mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: Memory De-allocated (post_drop) = 34.86211mb
+/// [2022-03-07 20:47:28]: (INFO) [hash_perf::main]: (StaticHash) Elapsed time = 725.90ms
+/// % ./target/release/hash_perf -c 1000000 -s 1100000 --do_hash  
+/// [2022-03-07 20:47:36]: (INFO) [hash_perf::main]: Starting tests
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory used (pre_drop) = 52.613489mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory Allocated (pre_drop = 105.201753mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory De-allocated (pre_drop = 52.588966mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory used (post drop) = 0.184673mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory Allocated (post_drop = 105.203859mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: Memory De-allocated (post_drop = 105.01989mb
+/// [2022-03-07 20:47:37]: (INFO) [hash_perf::main]: (HashMap) Elapsed time = 379.46ms
+/// ```
+///
+/// This run included both gets and inserts and as is shown, the performance of HashMap is two
+/// times better. But keep in mind, since hashtable lookups are fast, the benefit of the
+/// memory savings and the lack of runtime heap allocations, may outweigh the downsides of
+/// the lower performance. It certainly does in the nioruntime eventhandler as no difference
+/// in performance can be seen, however much less (and a predictible amount of) memory is used
+/// with [`StaticHash`].
+///
+/// # Examples
+///
+/// ```
+/// use nioruntime_util::{StaticHash, StaticHashConfig};
+/// use nioruntime_err::Error;
+///
+/// fn test1() -> Result<(), Error> {
+///
+///     let config = StaticHashConfig {
+///         ..Default::default()
+///     };
+///
+///     let mut sh: StaticHash<u128, u128> = StaticHash::new(config)?;
+///     let i: u128 = 1;
+///     let j: u128 = 2;
+///
+///     sh.insert(&i, &j)?;
+///
+///     assert_eq!(sh.get(&i).unwrap(), j);
+///     assert_eq!(sh.remove(&i).unwrap(), j);
+///     assert_eq!(sh.remove(&i), None);
+///
+///     Ok(())
+/// }
+/// ```
+/// Note that by including the nioruntime_derive crate, you can automatically implement
+/// Serializable for many structs using the nioruntime_derive::Serializable macro.
+///
+/// ```
+/// use nioruntime_util::{StaticHash, StaticHashConfig};
+/// use nioruntime_err::Error;
+/// use nioruntime_util::ser::Serializable;
+/// use nioruntime_util::ser::{Writer, Reader};
+///
+/// #[derive(Debug, PartialEq)]
+/// struct Test {
+///     x: u128,
+///     y: u64,
+///     z: [u8; 4],
+/// }
+///
+/// impl Serializable for Test {
+///     fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
+///         let x = reader.read_u128()?;
+///         let y = reader.read_u64()?;
+///         let z = Serializable::read(reader)?;
+///         Ok(
+///             Self { x, y, z }
+///         )
+///     }
+///
+///     fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+///         writer.write_u128(self.x)?;
+///         writer.write_u64(self.y)?;
+///         Serializable::write(&self.z, writer)?;
+///         Ok(())
+///     }
+/// }
+///
+/// fn test2() -> Result<(), Error> {
+///     let config = StaticHashConfig::default();
+///     let test1 = Test {
+///         x: 1,
+///         y: 2,
+///         z: [1,2,3,4],
+///     };
+///
+///     let mut sh: StaticHash<u128, Test> = StaticHash::new(config)?;
+///
+///     sh.insert(&1, &test1)?;
+///
+///     assert_eq!(sh.get(&1).unwrap(), test1);
+///     assert_eq!(sh.remove(&1).unwrap(), test1);
+///     assert_eq!(sh.remove(&1), None);
+///
+///     Ok(())
+/// }
+/// ```
 #[derive(Clone)]
 pub struct StaticHash<K: Serializable, V: Serializable> {
 	data: Vec<u8>,
@@ -142,7 +340,7 @@ impl<K: Serializable, V: Serializable> Iterator for &mut StaticHash<K, V> {
 }
 
 impl<K: Serializable, V: Serializable> StaticHash<K, V> {
-	/// Create a new instance of StaticHash
+	/// Create a new instance of StaticHash configured with the specified [`StaticHashConfig`]
 	pub fn new(config: StaticHashConfig) -> Result<StaticHash<K, V>, Error> {
 		if config.max_load_factor > 1 as f64 || config.max_load_factor <= 0 as f64 {
 			return Err(ErrorKind::InvalidMaxLoadCapacity.into());
@@ -171,11 +369,13 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		Ok(ret)
 	}
 
-	/// Return the current size of this static_hash
+	/// Return the current size in number of elements of this static_hash
 	pub fn size(&self) -> usize {
 		self.stats.cur_elements
 	}
 
+	/// get the value associated with this key. In this function, key must implement the
+	/// [`crate::ser::Serializable`] trait.
 	pub fn get(&mut self, key: &K) -> Option<V> {
 		let mut key_buf = vec![];
 		serialize(&mut key_buf, key).ok()?;
@@ -195,7 +395,8 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		}
 	}
 
-	/// Get this key
+	/// Get the value associated with this key in raw format. In this function, the key is
+	/// pre-serialized by the caller.
 	pub fn get_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.config.key_len as usize {
 			return None;
@@ -227,25 +428,23 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		return None;
 	}
 
-	fn ensure_length(buf: &mut Vec<u8>, len: usize) {
-		for _ in buf.len()..len {
-			buf.push(0);
-		}
-	}
-
-	pub fn put(&mut self, key: &K, value: &V) -> Result<(), Error> {
+	/// Insert a value in the hashtable to be associated with the specified key.
+	/// In this function, both key and value must implement the
+	/// [`crate::ser::Serializable`] trait.
+	pub fn insert(&mut self, key: &K, value: &V) -> Result<(), Error> {
 		let mut key_buf = vec![];
 		let mut value_buf = vec![];
 		serialize(&mut key_buf, key)?;
 		serialize(&mut value_buf, value)?;
 		Self::ensure_length(&mut key_buf, self.config.key_len);
 		Self::ensure_length(&mut value_buf, self.config.entry_len);
-		self.put_raw(&key_buf, &value_buf)?;
+		self.insert_raw(&key_buf, &value_buf)?;
 		Ok(())
 	}
 
-	/// Put this value for specified key
-	pub fn put_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+	/// Insert a value in the hashtable to be associated with the specified key.
+	/// In this function, the key is pre-serialized by the caller.
+	pub fn insert_raw(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
 		if key.len() != self.config.key_len as usize {
 			let actual = key.len();
 			let expect = self.config.key_len;
@@ -296,6 +495,82 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		}
 
 		return Err(ErrorKind::MaxLoadCapacityExceeded.into());
+	}
+
+	/// Remove the value associated with the specified key from the hashtable.
+	/// In this function, the key must implement the
+	/// [`crate::ser::Serializable`] trait. This function returns the
+	/// value that was associated with this key if it exists. If not, None is returned.
+	pub fn remove(&mut self, key: &K) -> Option<V> {
+		let mut key_buf = vec![];
+		serialize(&mut key_buf, key).ok()?;
+		Self::ensure_length(&mut key_buf, self.config.key_len);
+		match self.remove_raw(&key_buf) {
+			Some(mut o) => {
+				let res: Result<V, Error> = deserialize(&mut o);
+				match res {
+					Ok(res) => Some(res),
+					Err(e) => {
+						warn!("deserialization error: {}", e).ok();
+						None
+					}
+				}
+			}
+			None => None,
+		}
+	}
+
+	/// Remove the value associated with the specified key from the hashtable.
+	/// In this function, the key is pre-serialized by the caller.
+	pub fn remove_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
+		if key.len() != self.config.key_len as usize {
+			return None;
+		}
+		let hash = self.get_hash(key);
+
+		for count in 0..self.config.max_entries {
+			let entry = (hash + count) % self.config.max_entries;
+			let ohb = self.get_overhead_byte(entry);
+			if ohb == OCCUPIED {
+				if self.cmp_key(key, entry) {
+					// this is us, flag entry as deleted.
+					self.set_overhead_byte(entry, DELETED);
+
+					if self.config.iterator {
+						self.remove_iterator(entry).ok()?;
+					}
+
+					self.stats.cur_elements -= 1;
+					let offset = self.get_value_offset(entry);
+					return Some(&self.data[offset..offset + self.config.entry_len]);
+				}
+			// otherwise, this is not us, we continue
+			} else if ohb == EMPTY {
+				// we didn't find this entry.
+				return None;
+			} // otherwise, it's another deleted entry, we need to continue
+			if count + 1 > self.stats.worst_case_visits {
+				self.stats.worst_case_visits = count + 1;
+			}
+		}
+
+		None
+	}
+
+	/// Reset the stats fields for this [`StaticHash`].
+	pub fn reset_stats(&mut self) {
+		self.stats.reset();
+	}
+
+	/// Get a reference to the statistics struct associated with this [`StaticHash`].
+	pub fn get_stats(&self) -> &StaticHashStats {
+		&self.stats
+	}
+
+	fn ensure_length(buf: &mut Vec<u8>, len: usize) {
+		for _ in buf.len()..len {
+			buf.push(0);
+		}
 	}
 
 	fn put_iterator(&mut self, entry: usize) -> Result<(), Error> {
@@ -353,66 +628,6 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		}
 
 		Ok(())
-	}
-
-	pub fn remove(&mut self, key: &K) -> Option<V> {
-		let mut key_buf = vec![];
-		serialize(&mut key_buf, key).ok()?;
-		Self::ensure_length(&mut key_buf, self.config.key_len);
-		match self.remove_raw(&key_buf) {
-			Some(mut o) => {
-				let res: Result<V, Error> = deserialize(&mut o);
-				match res {
-					Ok(res) => Some(res),
-					Err(e) => {
-						warn!("deserialization error: {}", e).ok();
-						None
-					}
-				}
-			}
-			None => None,
-		}
-	}
-
-	/// Remove the speicifed key
-	pub fn remove_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
-		if key.len() != self.config.key_len as usize {
-			return None;
-		}
-		let hash = self.get_hash(key);
-
-		for count in 0..self.config.max_entries {
-			let entry = (hash + count) % self.config.max_entries;
-			let ohb = self.get_overhead_byte(entry);
-			if ohb == OCCUPIED {
-				if self.cmp_key(key, entry) {
-					// this is us, flag entry as deleted.
-					self.set_overhead_byte(entry, DELETED);
-
-					if self.config.iterator {
-						self.remove_iterator(entry).ok()?;
-					}
-
-					self.stats.cur_elements -= 1;
-					let offset = self.get_value_offset(entry);
-					return Some(&self.data[offset..offset + self.config.entry_len]);
-				}
-			// otherwise, this is not us, we continue
-			} else if ohb == EMPTY {
-				// we didn't find this entry.
-				return None;
-			} // otherwise, it's another deleted entry, we need to continue
-			if count + 1 > self.stats.worst_case_visits {
-				self.stats.worst_case_visits = count + 1;
-			}
-		}
-
-		None
-	}
-
-	/// Reset the stats fields
-	pub fn reset_stats(&mut self) {
-		self.stats.reset();
 	}
 
 	fn get_overhead_byte(&mut self, entry: usize) -> u8 {
@@ -498,8 +713,8 @@ mod test {
 		let i: u64 = 1;
 		let j: u64 = 2;
 		let k: u64 = 3;
-		assert!(hashtable.put(&i, &j).is_ok());
-		assert!(hashtable.put(&i, &k).is_ok());
+		assert!(hashtable.insert(&i, &j).is_ok());
+		assert!(hashtable.insert(&i, &k).is_ok());
 		assert_eq!(hashtable.size(), 1);
 
 		Ok(())
@@ -523,8 +738,8 @@ mod test {
 		let i: u64 = 1;
 		let j: u64 = 7;
 		let k: u64 = 100;
-		hashtable.put(&i, &value1).unwrap();
-		hashtable.put(&j, &value2).unwrap();
+		hashtable.insert(&i, &value1).unwrap();
+		hashtable.insert(&j, &value2).unwrap();
 
 		assert_eq!(hashtable.get(&i), Some(value1));
 		assert_eq!(hashtable.get(&j), Some(value2));
@@ -539,7 +754,7 @@ mod test {
 		})
 		.unwrap();
 
-		assert!(hashtable.put(&i, &[1 as u8, 2 as u8]).is_err());
+		assert!(hashtable.insert(&i, &[1 as u8, 2 as u8]).is_err());
 
 		// overwrite
 		let mut hashtable = StaticHash::new(StaticHashConfig {
@@ -551,9 +766,9 @@ mod test {
 		})
 		.unwrap();
 
-		hashtable.put(&i, &j).unwrap();
+		hashtable.insert(&i, &j).unwrap();
 		assert_eq!(hashtable.get(&i), Some(j));
-		hashtable.put(&i, &k).unwrap();
+		hashtable.insert(&i, &k).unwrap();
 		assert_eq!(hashtable.get(&i), Some(k));
 	}
 
@@ -575,7 +790,7 @@ mod test {
 		for i in 0..76000 {
 			let k1: [u8; 16] = rng.gen();
 			let v1: [u8; 32] = rng.gen();
-			let ret = hashtable.put(&k1, &v1);
+			let ret = hashtable.insert(&k1, &v1);
 			assert_eq!(ret.is_err(), false);
 			kvec.insert(i, k1);
 			vvec.insert(i, v1);
@@ -623,22 +838,22 @@ mod test {
 		.unwrap();
 		let k1: [u8; 1] = [1];
 		let v1: [u8; 2] = [1, 1];
-		let ret = hashtable.put(&k1, &v1);
+		let ret = hashtable.insert(&k1, &v1);
 		assert_eq!(ret.is_ok(), true);
 
 		let k2: [u8; 1] = [2];
 		let v2: [u8; 2] = [2, 2];
-		let ret = hashtable.put(&k2, &v2);
+		let ret = hashtable.insert(&k2, &v2);
 		assert_eq!(ret.is_ok(), true);
 
 		let k3: [u8; 1] = [3];
 		let v3: [u8; 2] = [3, 3];
-		let ret = hashtable.put(&k3, &v3);
+		let ret = hashtable.insert(&k3, &v3);
 		assert_eq!(ret.is_ok(), true);
 
 		let k4: [u8; 1] = [4];
 		let v4: [u8; 2] = [4, 4];
-		let ret = hashtable.put(&k4, &v4);
+		let ret = hashtable.insert(&k4, &v4);
 		assert_eq!(ret.is_ok(), true);
 
 		let res = hashtable.remove(&k2);
@@ -661,22 +876,22 @@ mod test {
 		.unwrap();
 		let k1: [u8; 1] = [1];
 		let v1: [u8; 2] = [1, 1];
-		let ret = hashtable.put(&k1, &v1);
+		let ret = hashtable.insert(&k1, &v1);
 		assert_eq!(ret.is_ok(), true);
 
 		let k2: [u8; 1] = [2];
 		let v2: [u8; 2] = [2, 2];
-		let ret = hashtable.put(&k2, &v2);
+		let ret = hashtable.insert(&k2, &v2);
 		assert_eq!(ret.is_ok(), true);
 
 		let k3: [u8; 1] = [3];
 		let v3: [u8; 2] = [3, 3];
-		let ret = hashtable.put(&k3, &v3);
+		let ret = hashtable.insert(&k3, &v3);
 		assert_eq!(ret.is_ok(), true);
 
 		let k4: [u8; 1] = [4];
 		let v4: [u8; 2] = [4, 4];
-		let ret = hashtable.put(&k4, &v4);
+		let ret = hashtable.insert(&k4, &v4);
 		assert_eq!(ret.is_ok(), true);
 
 		let res = hashtable.remove(&k2);
@@ -714,7 +929,7 @@ mod test {
 		for _ in 0..7 {
 			let k: [u8; 16] = rng.gen();
 			let v: [u8; 32] = rng.gen();
-			let res = hashtable.put(&k, &v);
+			let res = hashtable.insert(&k, &v);
 			assert_eq!(res.is_ok(), true);
 		}
 
@@ -724,17 +939,17 @@ mod test {
 		let k2: [u8; 16] = rng.gen();
 		let v2: [u8; 32] = rng.gen();
 
-		let res = hashtable.put(&k1, &v1);
+		let res = hashtable.insert(&k1, &v1);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.insert(&k2, &v2);
 		assert_eq!(res.is_ok(), false);
 
 		let res = hashtable.remove(&k1);
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v1);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.insert(&k2, &v2);
 		assert_eq!(res.is_ok(), true);
 	}
 
@@ -766,19 +981,19 @@ mod test {
 		let k5: [u8; 16] = rng.gen();
 		let v5: [u8; 32] = rng.gen();
 
-		let res = hashtable.put(&k1, &v1);
+		let res = hashtable.insert(&k1, &v1);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k2, &v2);
+		let res = hashtable.insert(&k2, &v2);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k3, &v3);
+		let res = hashtable.insert(&k3, &v3);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k4, &v4);
+		let res = hashtable.insert(&k4, &v4);
 		assert_eq!(res.is_ok(), true);
 
-		let res = hashtable.put(&k5, &v5);
+		let res = hashtable.insert(&k5, &v5);
 		assert_eq!(res.is_ok(), true);
 
 		let mut k_v = vec![];
@@ -933,9 +1148,9 @@ mod test {
 		let res: Result<Key, Error> = deserialize(&mut &key_buf[..]);
 		assert_eq!(res.unwrap(), k1);
 
-		hashtable.put(&k1, &s1)?;
-		hashtable.put(&k2, &s2)?;
-		hashtable.put(&k3, &s3)?;
+		hashtable.insert(&k1, &s1)?;
+		hashtable.insert(&k2, &s2)?;
+		hashtable.insert(&k3, &s3)?;
 
 		let r1: Option<S> = hashtable.get(&k1);
 		assert_eq!(r1, Some(s1.clone()));
@@ -1004,23 +1219,23 @@ mod test {
 		};
 
 		let mut sh: StaticHash<VarSize, VarSize> = StaticHash::new(config)?;
-		assert!(sh.put_raw(&[0, 1, 2], &[1, 2]).is_err());
-		assert!(sh.put_raw(&[1, 1], &[1, 2, 3]).is_err());
+		assert!(sh.insert_raw(&[0, 1, 2], &[1, 2]).is_err());
+		assert!(sh.insert_raw(&[1, 1], &[1, 2, 3]).is_err());
 		assert!(sh
-			.put(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
+			.insert(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
 			.is_ok());
 		assert!(sh
-			.put(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
+			.insert(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
 			.is_ok());
 
 		// full but overwrite
 		assert!(sh
-			.put(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
+			.insert(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
 			.is_ok());
 
 		// full new value, can't add
 		assert!(sh
-			.put(&VarSize { a: 0, b: 20 }, &VarSize { a: 0, b: 2 })
+			.insert(&VarSize { a: 0, b: 20 }, &VarSize { a: 0, b: 2 })
 			.is_err());
 
 		// low load factor
@@ -1035,7 +1250,7 @@ mod test {
 
 		let mut sh: StaticHash<VarSize, VarSize> = StaticHash::new(config)?;
 		assert!(sh
-			.put(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
+			.insert(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
 			.is_err());
 
 		// no iterator
@@ -1049,10 +1264,10 @@ mod test {
 
 		let mut sh: StaticHash<VarSize, VarSize> = StaticHash::new(config.clone())?;
 		assert!(sh
-			.put(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
+			.insert(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
 			.is_ok());
 		assert!(sh
-			.put(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
+			.insert(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
 			.is_ok());
 
 		assert!((&mut sh).next().is_none());
@@ -1061,10 +1276,10 @@ mod test {
 		config.iterator = true;
 		let mut sh: StaticHash<VarSize, VarSize> = StaticHash::new(config.clone())?;
 		assert!(sh
-			.put(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
+			.insert(&VarSize { a: 1, b: 2 }, &VarSize { a: 1, b: 2 })
 			.is_ok());
 		assert!(sh
-			.put(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
+			.insert(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
 			.is_ok());
 
 		let mut count = 0;
@@ -1109,13 +1324,13 @@ mod test {
 		let mut sh: StaticHash<DeserError, DeserError> =
 			StaticHash::new(StaticHashConfig::default())?;
 		assert!(sh
-			.put(&DeserError { a: 0, b: 0 }, &DeserError { a: 0, b: 0 })
+			.insert(&DeserError { a: 0, b: 0 }, &DeserError { a: 0, b: 0 })
 			.is_ok());
 		assert!(sh.get(&DeserError { a: 0, b: 0 }).is_none());
 		assert!(sh.remove(&DeserError { a: 0, b: 0 }).is_none());
 		assert!(sh.get_raw(&[]).is_none());
 		assert!(sh
-			.put(&DeserError { a: 1, b: 0 }, &DeserError { a: 1, b: 0 })
+			.insert(&DeserError { a: 1, b: 0 }, &DeserError { a: 1, b: 0 })
 			.is_ok());
 		assert!(sh.get(&DeserError { a: 1, b: 0 }).is_some());
 
@@ -1132,9 +1347,9 @@ mod test {
 			..Default::default()
 		})?;
 
-		sh.put_raw(&[0], &[0])?;
-		sh.put_raw(&[1], &[1])?;
-		sh.put_raw(&[2], &[2])?;
+		sh.insert_raw(&[0], &[0])?;
+		sh.insert_raw(&[1], &[1])?;
+		sh.insert_raw(&[2], &[2])?;
 
 		assert!(sh.get_raw(&[3]).is_none());
 		assert!(sh.remove_raw(&[3]).is_none());
@@ -1148,9 +1363,9 @@ mod test {
 			..Default::default()
 		})?;
 
-		sh.put_raw(&[0], &[0])?;
-		sh.put_raw(&[1], &[1])?;
-		sh.put_raw(&[2], &[2])?;
+		sh.insert_raw(&[0], &[0])?;
+		sh.insert_raw(&[1], &[1])?;
+		sh.insert_raw(&[2], &[2])?;
 
 		assert!(sh.remove_raw(&[3]).is_none());
 		assert!(sh.get_raw(&[3]).is_none());
@@ -1164,10 +1379,10 @@ mod test {
 			..Default::default()
 		})?;
 
-		sh.put_raw(&[0], &[0])?;
-		sh.put_raw(&[1], &[1])?;
-		sh.put_raw(&[2], &[2])?;
-		assert!(sh.put_raw(&[3], &[3]).is_err());
+		sh.insert_raw(&[0], &[0])?;
+		sh.insert_raw(&[1], &[1])?;
+		sh.insert_raw(&[2], &[2])?;
+		assert!(sh.insert_raw(&[3], &[3]).is_err());
 
 		Ok(())
 	}

@@ -14,7 +14,7 @@ edition = "2018"
 [workspace]
 members = [
 	"http", "eventhandler", "util", "error", "deps", "log",
-	"tor-llcrypto", "tor-checkable", "tor-bytes", "macros", "tests",
+	"tor-llcrypto", "tor-checkable", "tor-bytes", "derive", "tests",
 ]
 exclude = ["etc"]
 
@@ -27,7 +27,7 @@ nioruntime_util   = { path = "./util"         }
 nioruntime_evh    = { path = "./eventhandler" }
 nioruntime_tor    = { path = "./tor"          }
 nioruntime_err    = { path = "./error"        }
-nioruntime_macros = { path = "./macros"       }
+nioruntime_derive = { path = "./derive"       }
 nioruntime_tests  = { path = "./tests"        }
 
 [build-dependencies]

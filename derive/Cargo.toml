@@ -1,5 +1,5 @@
 [package]
-name = "nioruntime_macros"
+name = "nioruntime_derive"
 version = "0.0.3-beta1"
 authors = ["37 Miners, LLC"]
 description = "proc-macros nioruntime"

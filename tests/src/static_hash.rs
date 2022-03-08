@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tests for static_hash with macros
+//! Tests for static_hash with derive macros
 
 #[cfg(test)]
 mod test {
 
 	use nioruntime_deps::rand;
+	use nioruntime_derive::Serializable;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
-	use nioruntime_macros::Serializable;
-	use nioruntime_util::static_hash::{StaticHash, StaticHashConfig};
+	use nioruntime_util::{StaticHash, StaticHashConfig};
 
 	debug!();
 
@@ -95,11 +95,11 @@ mod test {
 			count: 5,
 		};
 
-		static_hash.put(&k1, &v1)?;
-		static_hash.put(&k2, &v2)?;
-		static_hash.put(&k3, &v3)?;
-		static_hash.put(&k4, &v4)?;
-		static_hash.put(&k5, &v5)?;
+		static_hash.insert(&k1, &v1)?;
+		static_hash.insert(&k2, &v2)?;
+		static_hash.insert(&k3, &v3)?;
+		static_hash.insert(&k4, &v4)?;
+		static_hash.insert(&k5, &v5)?;
 
 		let v_out: Option<Elem> = static_hash.get(&k1);
 		assert_eq!(v_out, Some(v1));

@@ -997,11 +997,11 @@ version = "0.0.3-beta1"
 dependencies = [
  "built",
  "nioruntime_deps",
+ "nioruntime_derive",
  "nioruntime_err",
  "nioruntime_evh",
  "nioruntime_http",
  "nioruntime_log",
- "nioruntime_macros",
  "nioruntime_tests",
  "nioruntime_tor",
  "nioruntime_util",
@@ -1059,6 +1059,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nioruntime_derive"
+version = "0.0.3-beta1"
+dependencies = [
+ "nioruntime_deps",
+ "nioruntime_err",
+ "nioruntime_log",
+ "nioruntime_util",
+]
+
+[[package]]
 name = "nioruntime_err"
 version = "0.0.3-beta1"
 dependencies = [
@@ -1096,23 +1106,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "nioruntime_macros"
-version = "0.0.3-beta1"
-dependencies = [
- "nioruntime_deps",
- "nioruntime_err",
- "nioruntime_log",
- "nioruntime_util",
-]
-
-[[package]]
 name = "nioruntime_tests"
 version = "0.0.3-beta1"
 dependencies = [
  "nioruntime_deps",
+ "nioruntime_derive",
  "nioruntime_err",
  "nioruntime_log",
- "nioruntime_macros",
  "nioruntime_util",
 ]
 

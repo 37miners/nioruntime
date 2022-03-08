@@ -15,7 +15,7 @@
 mod hex;
 mod macros;
 pub mod ser;
-pub mod static_hash;
+mod static_hash;
 pub mod threadpool;
 
 pub use nioruntime_deps;
@@ -24,3 +24,5 @@ use nioruntime_deps::lazy_static;
 use nioruntime_deps::rand;
 pub use nioruntime_deps::serde::Serialize;
 pub use nioruntime_deps::serde_derive;
+
+pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
