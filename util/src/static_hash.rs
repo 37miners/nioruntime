@@ -859,9 +859,10 @@ mod test {
 		let res = hashtable.remove(&k2);
 		assert_eq!(res.unwrap(), v2);
 
-		assert_eq!(hashtable.stats.cur_elements, 3);
-		assert_eq!(hashtable.stats.max_elements, 4);
-		assert_eq!(hashtable.stats.access_count, 5);
+		let stats = hashtable.get_stats();
+		assert_eq!(stats.cur_elements, 3);
+		assert_eq!(stats.max_elements, 4);
+		assert_eq!(stats.access_count, 5);
 		// this table has one collision
 		assert_eq!(hashtable.stats.total_node_reads, 6);
 		assert_eq!(hashtable.stats.worst_case_visits, 1);
