@@ -106,10 +106,12 @@ impl Default for StaticHashConfig {
 }
 
 /// Implementation of a static hashtable. This implementation has
-/// several advantages and several drawbacks. It is designed for use in server-side
-/// applications such as a web server, but may be usable elsewhere. The distinguishing
-/// feature of this hashtable is that all memory is preallocated. See heap allocation
-/// below.
+/// several advantages and several drawbacks as compared to [`std::collections::HashMap`].
+/// It is designed for use in server-side applications such as a web server, but may be
+/// usable elsewhere. The distinguishing feature of this hashtable is that all memory
+/// is preallocated. See heap allocation below. It is also more memory efficient than
+/// [`std::collections::HashMap`]. It is, however, slower than
+/// [`std::collections::HashMap`] under most circumstances.
 ///
 /// # Heap Allocation
 ///
