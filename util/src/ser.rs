@@ -1,4 +1,4 @@
-// Copyright 2021 The Grin Developers
+// Copyright (c) 2022, 37 Miners, LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.

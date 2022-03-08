@@ -113,4 +113,9 @@ $ ../nioruntime/target/release/nioruntime -c -x 1000 -t 100 -i 10
 
 Without the overhead of HTTP and the Rustlet container, the performance of NIO Runtime is even better as seen by the numbers above.
 
+# Note about copyrights
+
+Please note that many of the files were copyright "The Grin Developers", "The BMW Developers" and a few other things. These have all been replaced with the
+notice at the top of the files saying, "Copyright (c) 2022, 37 Miners, LLC". If any of the copyright holders have an objection to this, please feel free to contact us
+by opening an issue in this repo.
 
