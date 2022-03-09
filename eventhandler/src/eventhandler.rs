@@ -343,10 +343,10 @@ impl Default for EventHandlerConfig {
 		Self {
 			threads: 6,
 			read_buffer_size: 10 * 1024,
-			max_rwhandles: 1_000_000,
+			max_rwhandles: 16_000,
 			// 100 fd overhead for unix, windows skips handles, but should not be used
-			// for high performance so 1 million+ is enough there
-			max_handle_numeric_value: 1_000_100,
+			// for high load
+			max_handle_numeric_value: 16_100,
 		}
 	}
 }

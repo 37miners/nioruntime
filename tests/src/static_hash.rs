@@ -116,7 +116,7 @@ mod test {
 		let v_out: Option<Elem> = static_hash.get(&k5);
 		assert_eq!(v_out, Some(v5));
 
-		for (k, v) in &mut static_hash {
+		for (k, v) in static_hash.iter() {
 			info!("k={:?}, v={:?}", k, v)?;
 		}
 

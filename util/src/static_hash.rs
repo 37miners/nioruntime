@@ -28,6 +28,42 @@ const DELETED: u8 = 2;
 
 debug!();
 
+#[derive(Clone)]
+pub struct Iter<'a, K: Serializable, V: Serializable> {
+	pos: u64,
+	hash: &'a StaticHash<K, V>,
+}
+
+impl<K: Serializable, V: Serializable> Iterator for Iter<'_, K, V> {
+	type Item = (K, V);
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.pos == u64::MAX {
+			self.pos = self.hash.last;
+			None
+		} else {
+			let offset = self
+				.hash
+				.get_iterator_prev_offset(self.pos.try_into().ok()?);
+			let k_offset = self.hash.get_key_offset(self.pos.try_into().ok()?);
+			let v_offset = self.hash.get_value_offset(self.pos.try_into().ok()?);
+			self.pos = u64::from_be_bytes(self.hash.data[offset..offset + 8].try_into().ok()?);
+
+			let vec1 = self.hash.data[k_offset..k_offset + self.hash.config.key_len].to_vec();
+			let vec2 = self.hash.data[v_offset..v_offset + self.hash.config.entry_len].to_vec();
+			let mut cursor1 = Cursor::new(vec1);
+			let mut cursor2 = Cursor::new(vec2);
+			let mut reader1 = BinReader::new(&mut cursor1);
+			let mut reader2 = BinReader::new(&mut cursor2);
+
+			let elem1 = K::read(&mut reader1).unwrap();
+			let elem2 = V::read(&mut reader2).unwrap();
+			let ret = (elem1, elem2);
+			Some(ret)
+		}
+	}
+}
+
 /// Statistics for this static hash
 #[derive(Debug, Clone)]
 pub struct StaticHashStats {
@@ -311,36 +347,6 @@ impl<K: Serializable, V: Serializable> Drop for StaticHash<K, V> {
 	}
 }
 
-impl<K: Serializable, V: Serializable> Iterator for &mut StaticHash<K, V> {
-	type Item = (K, V);
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.pos == u64::MAX {
-			self.pos = self.last;
-			None
-		} else {
-			let offset = self.get_iterator_prev_offset(self.pos.try_into().ok()?);
-			let k_offset = self.get_key_offset(self.pos.try_into().ok()?);
-			let v_offset = self.get_value_offset(self.pos.try_into().ok()?);
-			self.pos = u64::from_be_bytes(self.data[offset..offset + 8].try_into().ok()?);
-
-			let vec1 = self.data[k_offset..k_offset + self.config.key_len].to_vec();
-			let vec2 = self.data[v_offset..v_offset + self.config.entry_len].to_vec();
-
-			let mut cursor1 = Cursor::new(vec1);
-			let mut cursor2 = Cursor::new(vec2);
-			let mut reader1 = BinReader::new(&mut cursor1);
-			let mut reader2 = BinReader::new(&mut cursor2);
-
-			let elem1 = Serializable::read(&mut reader1).ok()?;
-			let elem2 = Serializable::read(&mut reader2).ok()?;
-			let ret = (elem1, elem2);
-
-			Some(ret)
-		}
-	}
-}
-
 impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 	/// Create a new instance of StaticHash configured with the specified [`StaticHashConfig`]
 	pub fn new(config: StaticHashConfig) -> Result<StaticHash<K, V>, Error> {
@@ -372,8 +378,32 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 	}
 
 	/// Return the current size in number of elements of this static_hash
-	pub fn size(&self) -> usize {
+	pub fn len(&self) -> usize {
 		self.stats.cur_elements
+	}
+
+	pub fn iter(&self) -> Iter<'_, K, V> {
+		Iter {
+			pos: self.last,
+			hash: &self,
+		}
+	}
+
+	pub fn clear(&mut self) -> Result<(), Error> {
+		let mut pos = self.last;
+		loop {
+			if pos == u64::MAX {
+				break;
+			}
+			self.set_overhead_byte(pos.try_into()?, DELETED);
+			let offset = self.get_iterator_prev_offset(pos.try_into()?);
+			pos = u64::from_be_bytes(self.data[offset..offset + 8].try_into()?);
+		}
+		self.stats.cur_elements = 0;
+		self.pos = u64::MAX;
+		self.first = u64::MAX;
+		self.last = u64::MAX;
+		Ok(())
 	}
 
 	/// get the value associated with this key. In this function, key must implement the
@@ -425,7 +455,6 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 				self.stats.worst_case_visits = count + 1;
 			}
 		}
-
 		// not found
 		return None;
 	}
@@ -717,7 +746,7 @@ mod test {
 		let k: u64 = 3;
 		assert!(hashtable.insert(&i, &j).is_ok());
 		assert!(hashtable.insert(&i, &k).is_ok());
-		assert_eq!(hashtable.size(), 1);
+		assert_eq!(hashtable.len(), 1);
 
 		Ok(())
 	}
@@ -1007,7 +1036,7 @@ mod test {
 		k_v.push((k5, v5));
 
 		let mut counter = 0;
-		for (k, v) in &mut hashtable {
+		for (k, v) in hashtable.iter() {
 			assert_eq!(k, k_v[counter].0);
 			assert_eq!(v, k_v[counter].1);
 			counter += 1;
@@ -1025,7 +1054,7 @@ mod test {
 		k_v.push((k5, v5));
 
 		let mut counter = 0;
-		for (k, v) in &mut hashtable {
+		for (k, v) in hashtable.iter() {
 			assert_eq!(k, k_v[counter].0);
 			assert_eq!(v, k_v[counter].1);
 			counter += 1;
@@ -1042,7 +1071,7 @@ mod test {
 		k_v.push((k5, v5));
 
 		let mut counter = 0;
-		for (k, v) in &mut hashtable {
+		for (k, v) in hashtable.iter() {
 			assert_eq!(k, k_v[counter].0);
 			assert_eq!(v, k_v[counter].1);
 			counter += 1;
@@ -1058,7 +1087,7 @@ mod test {
 		k_v.push((k4, v4));
 
 		let mut counter = 0;
-		for (k, v) in &mut hashtable {
+		for (k, v) in hashtable.iter() {
 			assert_eq!(k, k_v[counter].0);
 			assert_eq!(v, k_v[counter].1);
 			counter += 1;
@@ -1073,7 +1102,7 @@ mod test {
 		k_v.push((k4, v4));
 
 		let mut counter = 0;
-		for (k, v) in &mut hashtable {
+		for (k, v) in hashtable.iter() {
 			assert_eq!(k, k_v[counter].0);
 			assert_eq!(v, k_v[counter].1);
 			counter += 1;
@@ -1084,7 +1113,7 @@ mod test {
 		assert_eq!(res.is_some(), true);
 		assert_eq!(res.unwrap(), v4);
 
-		assert!((&mut hashtable).next().is_none());
+		assert!((hashtable.iter()).next().is_none());
 	}
 
 	#[derive(Debug, PartialEq, Clone)]
@@ -1273,7 +1302,7 @@ mod test {
 			.insert(&VarSize { a: 0, b: 2 }, &VarSize { a: 0, b: 2 })
 			.is_ok());
 
-		assert!((&mut sh).next().is_none());
+		assert!((sh.iter()).next().is_none());
 
 		// with iterator
 		config.iterator = true;
@@ -1286,7 +1315,7 @@ mod test {
 			.is_ok());
 
 		let mut count = 0;
-		for _ in &mut sh {
+		for _ in sh.iter() {
 			count += 1;
 		}
 		assert_eq!(count, 2);
@@ -1386,6 +1415,28 @@ mod test {
 		sh.insert_raw(&[1], &[1])?;
 		sh.insert_raw(&[2], &[2])?;
 		assert!(sh.insert_raw(&[3], &[3]).is_err());
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_clear() -> Result<(), Error> {
+		let mut sh: StaticHash<(), ()> = StaticHash::new(StaticHashConfig {
+			max_entries: 3,
+			key_len: 1,
+			entry_len: 1,
+			max_load_factor: 1.0,
+			..Default::default()
+		})?;
+
+		sh.insert_raw(&[0], &[0])?;
+		sh.insert_raw(&[1], &[1])?;
+		sh.insert_raw(&[2], &[2])?;
+		assert!(sh.insert_raw(&[3], &[3]).is_err());
+
+		sh.clear()?;
+
+		assert!(sh.insert_raw(&[3], &[3]).is_ok());
 
 		Ok(())
 	}

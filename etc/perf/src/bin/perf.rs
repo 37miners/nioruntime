@@ -26,6 +26,7 @@ use nioruntime_evh::*;
 use nioruntime_log::*;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::mem;
@@ -49,6 +50,30 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::os::windows::prelude::RawSocket;
 
 debug!();
+
+struct MonAllocator;
+
+static mut MEM_ALLOCATED: i128 = 0;
+static mut MEM_DEALLOCATED: i128 = 0;
+static mut ALLOC_COUNT: i128 = 0;
+static mut DEALLOC_COUNT: i128 = 0;
+
+unsafe impl GlobalAlloc for MonAllocator {
+	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+		MEM_ALLOCATED += layout.size() as i128;
+		ALLOC_COUNT += 1;
+		System.alloc(layout)
+	}
+
+	unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+		MEM_DEALLOCATED += layout.size() as i128;
+		DEALLOC_COUNT += 1;
+		System.dealloc(ptr, layout)
+	}
+}
+
+#[global_allocator]
+static GLOBAL: MonAllocator = MonAllocator;
 
 // structure to hold the histogram data
 #[derive(Clone)]
@@ -256,6 +281,28 @@ pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
+fn print_alloc(first_used: i128) -> Result<(), Error> {
+	let alloc = unsafe { MEM_ALLOCATED };
+	let dealloc = unsafe { MEM_DEALLOCATED };
+	let alloc_count = unsafe { ALLOC_COUNT };
+	let dealloc_count = unsafe { DEALLOC_COUNT };
+	let mem_used = alloc - dealloc;
+	let change_from_start = mem_used - first_used;
+
+	info!(
+		"alloc={},dealloc={},alloc_count={},dealloc_count={},mem_used={},delta_from_init={}{:.2}mb",
+		alloc,
+		dealloc,
+		alloc_count,
+		dealloc_count,
+		mem_used,
+		if change_from_start >= 0 { "+" } else { "" },
+		change_from_start as f64 / 1_000_000 as f64,
+	)?;
+
+	Ok(())
+}
+
 fn main() -> Result<(), Error> {
 	let yml = load_yaml!("perf.yml");
 	let args = App::from_yaml(yml)
@@ -337,7 +384,13 @@ fn main() -> Result<(), Error> {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, tls_config)?;
-		std::thread::park();
+
+		std::thread::sleep(std::time::Duration::from_millis(3000));
+		let first = unsafe { MEM_ALLOCATED } - unsafe { MEM_DEALLOCATED };
+		loop {
+			print_alloc(first as i128)?;
+			std::thread::sleep(std::time::Duration::from_millis(3000));
+		}
 	}
 	if is_client {
 		let http = args.is_present("http");
