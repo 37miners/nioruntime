@@ -181,6 +181,14 @@ impl ConnectionData {
 		self.connection_info.get_handle()
 	}
 
+	pub fn get_accept_handle(&self) -> Option<Handle> {
+		self.connection_info.get_accept_handle()
+	}
+
+	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
+		self.connection_info.get_buffer()
+	}
+
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
 		match &self.connection_info.tls_server {
 			Some(tls_conn) => {
@@ -232,7 +240,7 @@ impl ConnectionData {
 		}
 	}
 
-	pub fn do_write(&self, data: &[u8]) -> Result<(), Error> {
+	fn do_write(&self, data: &[u8]) -> Result<(), Error> {
 		let len = data.len();
 		if len == 0 {
 			// nothing to write
@@ -512,9 +520,9 @@ where
 					config,
 					server_name.try_into()?,
 				)?)));
-				EventConnectionInfo::read_write_connection(handle, None, tls_client)
+				EventConnectionInfo::read_write_connection(handle, None, None, tls_client)
 			}
-			None => EventConnectionInfo::read_write_connection(handle, None, None),
+			None => EventConnectionInfo::read_write_connection(handle, None, None, None),
 		};
 
 		// pick a random queue
@@ -609,7 +617,7 @@ where
 
 		// add the wakeup handle to all hashtables
 		let connection_info =
-			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None);
+			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None, None);
 		let connection_id = connection_info.get_connection_id();
 		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
 		let handle_info = HandleInfo::new(connection_id, 0);
@@ -1052,7 +1060,7 @@ where
 	}
 
 	fn process_accept(
-		handle: Handle,
+		accept_handle: Handle,
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		wakeup: &Wakeup,
@@ -1063,7 +1071,7 @@ where
 		let handle = unsafe {
 			set_errno(Errno(0));
 			accept(
-				handle,
+				accept_handle,
 				&mut libc::sockaddr {
 					..std::mem::zeroed()
 				},
@@ -1147,8 +1155,12 @@ where
 				None => None,
 			};
 
-			let connection_info =
-				EventConnectionInfo::read_write_connection(handle, tls_server, None);
+			let connection_info = EventConnectionInfo::read_write_connection(
+				handle,
+				Some(accept_handle),
+				tls_server,
+				None,
+			);
 
 			match &callbacks.on_accept {
 				Some(on_accept) => {
@@ -2142,9 +2154,11 @@ impl WriteStatus {
 pub struct ReadWriteConnection {
 	id: u128,
 	handle: Handle,
+	accept_handle: Option<Handle>,
 	write_status: Arc<RwLock<WriteStatus>>,
 	tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	tls_client: Option<Arc<RwLock<ClientConnection>>>,
+	buffer: Vec<u8>,
 }
 
 impl Debug for ReadWriteConnection {
@@ -2152,6 +2166,7 @@ impl Debug for ReadWriteConnection {
 		f.debug_struct("ListenerConnection")
 			.field("id", &self.id)
 			.field("handle", &self.handle)
+			.field("accept_handle", &self.accept_handle)
 			.field("write_status", &self.write_status)
 			.field("tls_server", &self.tls_server)
 			.field("tls_client", &self.tls_client)
@@ -2164,15 +2179,18 @@ impl ReadWriteConnection {
 	fn new(
 		id: u128,
 		handle: Handle,
+		accept_handle: Option<Handle>,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 		tls_client: Option<Arc<RwLock<ClientConnection>>>,
 	) -> Self {
 		Self {
 			id,
 			handle,
+			accept_handle,
 			write_status: Arc::new(RwLock::new(WriteStatus::new())),
 			tls_server,
 			tls_client,
+			buffer: vec![],
 		}
 	}
 
@@ -2182,6 +2200,14 @@ impl ReadWriteConnection {
 
 	fn get_handle(&self) -> Handle {
 		self.handle
+	}
+
+	fn get_accept_handle(&self) -> Option<Handle> {
+		self.accept_handle
+	}
+
+	fn get_buffer(&mut self) -> &mut Vec<u8> {
+		&mut self.buffer
 	}
 }
 
@@ -2221,12 +2247,14 @@ impl EventConnectionInfo {
 
 	fn read_write_connection(
 		handle: Handle,
+		accept_handle: Option<Handle>,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 		tls_client: Option<Arc<RwLock<ClientConnection>>>,
 	) -> EventConnectionInfo {
 		EventConnectionInfo::ReadWriteConnection(ReadWriteConnection::new(
 			rand::random(),
 			handle,
+			accept_handle,
 			tls_server,
 			tls_client,
 		))

@@ -1093,7 +1093,6 @@ dependencies = [
  "nioruntime_err",
  "nioruntime_evh",
  "nioruntime_log",
- "nioruntime_tor",
  "nioruntime_util",
 ]
 

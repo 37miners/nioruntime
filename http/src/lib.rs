@@ -1,5 +1,3 @@
-/*
-
 // Copyright (c) 2022, 37 Miners, LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,15 +13,3 @@
 // limitations under the License.
 
 mod http;
-mod websocket;
-
-pub use crate::http::{
-	ConnData, HttpConfig, HttpMethod, HttpServer, HttpVersion, State, WriteHandle, WsHandler,
-};
-
-pub use crate::websocket::{
-	build_messages, process_websocket_data, send_websocket_message, WebSocketMessage,
-	WebSocketMessageType,
-};
-
-*/
