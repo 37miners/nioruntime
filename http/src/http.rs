@@ -17,7 +17,7 @@ use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 };
 use nioruntime_err::Error;
-use nioruntime_evh::ConnectionData;
+use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EventHandlerConfig};
 use nioruntime_log::*;
 use std::mem;
@@ -71,7 +71,7 @@ impl HttpServer {
 			..EventHandlerConfig::default()
 		})?;
 
-		evh.set_on_read(move |conn_data, buf| Self::process_on_read(conn_data, buf))?;
+		evh.set_on_read(move |conn_data, buf, ctx| Self::process_on_read(conn_data, buf, ctx))?;
 
 		evh.set_on_accept(move |conn_data| Self::process_on_accept(conn_data))?;
 
@@ -109,13 +109,21 @@ impl HttpServer {
 		Ok(())
 	}
 
-	fn process_on_read(conn_data: &ConnectionData, buf: &[u8]) -> Result<(), Error> {
+	fn process_on_read(
+		conn_data: &ConnectionData,
+		buf: &[u8],
+		ctx: &mut ConnectionContext,
+	) -> Result<(), Error> {
 		debug!(
 			"on_read[{}] = '{:?}', acc_handle={:?}",
 			conn_data.get_connection_id(),
 			buf,
 			conn_data.get_accept_handle()
 		)?;
+
+		let mut buffer = ctx.get_buffer();
+		buffer.push(1);
+		debug!("buflen={}", buffer.len());
 
 		Ok(())
 	}
@@ -187,7 +195,7 @@ mod test {
 
 		http.start()?;
 
-		//std::thread::park();
+		std::thread::park();
 
 		Ok(())
 	}

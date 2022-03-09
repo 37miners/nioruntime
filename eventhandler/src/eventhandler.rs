@@ -113,6 +113,27 @@ const _FLAG_IS_SATURATING: u8 = 0x1 << 1;
 const _FLAG_IS_TLS_SERVER: u8 = 0x1 << 2;
 const _FLAG_IS_TLS_CLIENT: u8 = 0x1 << 3;
 
+#[derive(Debug)]
+pub struct ConnectionContext {
+	pub buffer: Vec<u8>,
+}
+
+impl ConnectionContext {
+	fn new() -> Self {
+		Self { buffer: vec![] }
+	}
+
+	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
+		&mut self.buffer
+	}
+}
+
+impl Drop for ConnectionContext {
+	fn drop(&mut self) {
+		self.buffer.drain(..);
+	}
+}
+
 struct HandleInfo {
 	connection_id: u128,
 	flags: u8,
@@ -370,7 +391,12 @@ pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic> {
 
 impl<OnRead, OnAccept, OnClose, OnPanic> EventHandler<OnRead, OnAccept, OnClose, OnPanic>
 where
-	OnRead: Fn(&ConnectionData, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnRead: Fn(&ConnectionData, &[u8], &mut ConnectionContext) -> Result<(), Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
 	OnAccept: Fn(&ConnectionData) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 	OnClose: Fn(&ConnectionData) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 	OnPanic: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
@@ -612,6 +638,7 @@ where
 			iterator: false,
 		})?;
 		let mut connection_handle_map = HashMap::new();
+		let context_map = HashMap::new();
 
 		let config = self.config.clone();
 
@@ -641,6 +668,7 @@ where
 		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
 		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
 		let handle_hash = Arc::new(RwLock::new(handle_hash));
+		let context_map = Arc::new(RwLock::new(context_map));
 		let stopped = self.stopped.clone();
 
 		std::thread::spawn(move || -> Result<(), Error> {
@@ -650,6 +678,7 @@ where
 				let connection_id_map = connection_id_map.clone();
 				let connection_handle_map = connection_handle_map.clone();
 				let handle_hash = handle_hash.clone();
+				let context_map = context_map.clone();
 				let callbacks = callbacks.clone();
 				let callbacks_clone = callbacks.clone();
 				let wakeup = wakeup.clone();
@@ -660,6 +689,7 @@ where
 					let mut connection_id_map = &mut *lockwp!(connection_id_map);
 					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
 					let mut handle_hash = &mut *lockwp!(handle_hash);
+					let mut context_map = &mut *lockwp!(context_map);
 					let callbacks = &mut *lockwp!(callbacks);
 
 					let mut stop = false;
@@ -675,6 +705,7 @@ where
 						&mut connection_id_map,
 						&mut connection_handle_map,
 						&mut handle_hash,
+						&mut context_map,
 						next,
 					) {
 						Ok(do_stop) => {
@@ -699,6 +730,7 @@ where
 							&mut connection_id_map,
 							&mut connection_handle_map,
 							&mut handle_hash,
+							&mut context_map,
 							0,
 						) {
 							Ok(do_stop) => {
@@ -766,6 +798,7 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 		start: usize,
 	) -> Result<bool, Error> {
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
@@ -778,6 +811,7 @@ where
 				connection_handle_map,
 				handle_hash,
 				wakeup,
+				context_map,
 			)?;
 			if stop {
 				return Ok(stop);
@@ -817,6 +851,7 @@ where
 						connection_id_map,
 						connection_handle_map,
 						handle_hash,
+						context_map,
 						wakeup,
 					);
 
@@ -843,6 +878,7 @@ where
 					connection_id_map,
 					connection_handle_map,
 					handle_hash,
+					context_map,
 					wakeup,
 				)?,
 				EventType::Accept => {} // accepts are returned as read.
@@ -863,6 +899,7 @@ where
 				connection_id_map,
 				connection_handle_map,
 				handle_hash,
+				context_map,
 				wakeup,
 			);
 
@@ -893,6 +930,7 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event)?;
@@ -933,7 +971,7 @@ where
 					let mut sat_count = 0;
 					loop {
 						set_errno(Errno(0));
-						len = Self::process_read(&c, ctx, wakeup, callbacks, config)?;
+						len = Self::process_read(&c, ctx, wakeup, callbacks, config, context_map)?;
 						debug!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							ctx.saturating_handles.remove(&c.get_handle());
@@ -981,6 +1019,7 @@ where
 					connection_id_map,
 					connection_handle_map,
 					handle_hash,
+					context_map,
 					wakeup,
 				)?;
 			}
@@ -997,9 +1036,11 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
+		context_map.remove(&id);
 
 		match handle_bytes {
 			Some(handle_bytes) => {
@@ -1198,6 +1239,7 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		config: &EventHandlerConfig,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
 		let (len, do_read_now) = match connection_info.tls_server {
@@ -1232,7 +1274,15 @@ where
 		};
 
 		if do_read_now {
-			Self::process_read_result(connection_info, len, wakeup, callbacks, ctx, config)?;
+			Self::process_read_result(
+				connection_info,
+				len,
+				wakeup,
+				callbacks,
+				ctx,
+				config,
+				context_map,
+			)?;
 		}
 
 		Ok(len)
@@ -1337,6 +1387,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<(), Error> {
 		if len >= 0 {
 			debug!("read {:?}", &ctx.buffer[0..len.try_into()?])?;
@@ -1353,11 +1404,20 @@ where
 				Some(on_read) => {
 					let connection_data =
 						&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
-					match (on_read)(connection_data, &ctx.buffer[0..len.try_into()?]) {
-						Ok(_) => {}
-						Err(e) => {
-							warn!("on_read Callback resulted in error: {}", e)?;
-						}
+					let connection_context =
+						context_map.get_mut(&connection_info.get_connection_id());
+					match connection_context {
+						Some(connection_context) => match (on_read)(
+							connection_data,
+							&ctx.buffer[0..len.try_into()?],
+							connection_context,
+						) {
+							Ok(_) => {}
+							Err(e) => {
+								warn!("on_read Callback resulted in error: {}", e)?;
+							}
+						},
+						None => warn!("connection context not found!")?,
 					}
 				}
 				None => {
@@ -1383,6 +1443,7 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event)?;
@@ -1450,6 +1511,7 @@ where
 				connection_id_map,
 				connection_handle_map,
 				handle_hash,
+				context_map,
 				wakeup,
 			)?;
 		}
@@ -1856,6 +1918,7 @@ where
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<bool, Error> {
 		let stop = {
 			let mut guarded_data = lockw!(ctx.guarded_data)?;
@@ -1874,7 +1937,13 @@ where
 				ctx.add_pending, ctx.tid
 			)?;
 
-			Self::process_pending(ctx, connection_id_map, connection_handle_map, handle_hash)?;
+			Self::process_pending(
+				ctx,
+				connection_id_map,
+				connection_handle_map,
+				handle_hash,
+				context_map,
+			)?;
 			ctx.add_pending.clear();
 
 			Self::process_nwrites(ctx, connection_id_map, connection_handle_map, handle_hash)?;
@@ -1945,6 +2014,7 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {
@@ -1953,7 +2023,7 @@ where
 					connection_id_map
 						.insert_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
-
+					context_map.insert(item.id, ConnectionContext::new());
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
