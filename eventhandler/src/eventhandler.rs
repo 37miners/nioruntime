@@ -397,8 +397,18 @@ where
 		+ Clone
 		+ Sync
 		+ Unpin,
-	OnAccept: Fn(&ConnectionData) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnClose: Fn(&ConnectionData) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnAccept: Fn(&ConnectionData, &mut ConnectionContext) -> Result<(), Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
+	OnClose: Fn(&ConnectionData, &mut ConnectionContext) -> Result<(), Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
 	OnPanic: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
 	pub fn new(config: EventHandlerConfig) -> Result<Self, Error> {
@@ -959,6 +969,7 @@ where
 							wakeup,
 							callbacks,
 							&c.tls_server_config,
+							context_map,
 						)? {
 							break;
 						}
@@ -1040,7 +1051,7 @@ where
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
-		context_map.remove(&id);
+		let connection_context = context_map.remove(&id);
 
 		match handle_bytes {
 			Some(handle_bytes) => {
@@ -1074,13 +1085,17 @@ where
 								}
 							}
 							match callbacks.on_close.as_ref() {
-								Some(on_close) => {
-									(on_close)(&ConnectionData::new(
-										connection_info.get_read_write_connection_info()?,
-										&ctx.guarded_data,
-										&wakeup,
-									))?;
-								}
+								Some(on_close) => match connection_context {
+									Some(mut connection_context) => (on_close)(
+										&ConnectionData::new(
+											connection_info.get_read_write_connection_info()?,
+											&ctx.guarded_data,
+											&wakeup,
+										),
+										&mut connection_context,
+									)?,
+									None => error!("no context found for id = {}", id)?,
+								},
 								None => warn!("no on_close callback")?,
 							}
 						}
@@ -1107,6 +1122,7 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 		tls_server_config: &Option<ServerConfig>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<bool, Error> {
 		#[cfg(unix)]
 		let handle = unsafe {
@@ -1203,6 +1219,8 @@ where
 				None,
 			);
 
+			let mut connection_context = ConnectionContext::new();
+
 			match &callbacks.on_accept {
 				Some(on_accept) => {
 					let conn_data = ConnectionData::new(
@@ -1210,7 +1228,7 @@ where
 						&ctx.guarded_data,
 						&wakeup,
 					);
-					match (on_accept)(&conn_data) {
+					match (on_accept)(&conn_data, &mut connection_context) {
 						Ok(_) => {}
 						Err(e) => {
 							warn!("on_accept Callback resulted in error: {}", e)?;
@@ -1220,6 +1238,7 @@ where
 				None => error!("no handler for on_accept!")?,
 			};
 
+			context_map.insert(connection_info.get_connection_id(), connection_context);
 			ctx.accepted_connections.push(connection_info);
 			Ok(true)
 		} else {
@@ -2023,7 +2042,10 @@ where
 					connection_id_map
 						.insert_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
 					connection_handle_map.insert(item.handle, pending.clone());
-					context_map.insert(item.id, ConnectionContext::new());
+					if context_map.get(&item.id).is_none() {
+						// clients will not have a context_map entry yet.
+						context_map.insert(item.id, ConnectionContext::new());
+					}
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
@@ -2672,7 +2694,7 @@ mod tests {
 		let cid_read = Arc::new(RwLock::new(0));
 		let cid_read_clone = cid_read.clone();
 
-		evh.set_on_accept(move |conn_data| {
+		evh.set_on_accept(move |conn_data, _| {
 			{
 				let mut cid = cid_accept.write().unwrap();
 				*cid = conn_data.get_connection_id();
@@ -2683,10 +2705,10 @@ mod tests {
 			}
 			Ok(())
 		})?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			assert_eq!(buf, [1, 2, 3, 4]);
 			{
 				let mut cid_read = cid_read.write().unwrap();
@@ -2765,8 +2787,8 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let stream = TcpStream::connect(addr)?;
@@ -2779,7 +2801,7 @@ mod tests {
 		let client_on_read_count_clone = client_on_read_count.clone();
 		let server_on_read_count_clone = server_on_read_count.clone();
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
 
 			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
@@ -2846,11 +2868,11 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |conn_data| {
+		evh.set_on_accept(move |conn_data, _| {
 			trace!("on accept for {}", conn_data.get_handle())?;
 			Ok(())
 		})?;
-		evh.set_on_close(move |conn_data| {
+		evh.set_on_close(move |conn_data, _| {
 			trace!("on close conn={}", conn_data.get_handle())?;
 			Ok(())
 		})?;
@@ -2867,7 +2889,7 @@ mod tests {
 		let client_on_read_count_clone = client_on_read_count.clone();
 		let server_on_read_count_clone = server_on_read_count.clone();
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			trace!(
 				"callback on {} with buf={:?}",
 				conn_data.connection_info.handle,
@@ -2954,8 +2976,8 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |conn_data| {
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |conn_data, _| {
 			warn!("connection closed: {:?}", conn_data.get_connection_id())?;
 			Ok(())
 		})?;
@@ -2986,7 +3008,7 @@ mod tests {
 		let client_buffer = Arc::new(RwLock::new(cbuf));
 		let server_buffer = Arc::new(RwLock::new(sbuf));
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			let msg = &msg_clone;
 
 			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
@@ -3065,10 +3087,10 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
-		evh.set_on_read(move |_conn_data, _buf| Ok(()))?;
+		evh.set_on_read(move |_conn_data, _buf, _| Ok(()))?;
 		evh.start()?;
 
 		evh.stop()?;
@@ -3125,14 +3147,14 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let resp_len = Arc::new(RwLock::new(0));
 		let resp_len_clone = resp_len.clone();
 
-		evh.set_on_read(move |_conn_data, buf| {
+		evh.set_on_read(move |_conn_data, buf, _| {
 			let mut resp_len = lockw!(resp_len_clone)?;
 			*resp_len += buf.len();
 
@@ -3230,8 +3252,8 @@ mod tests {
 		let on_close_counter_clone = on_close_counter.clone();
 		let on_read_counter_clone = on_read_counter.clone();
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| {
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| {
 			{
 				(*(lockw!(on_close_counter_clone)?)) += 1;
 			}
@@ -3239,7 +3261,7 @@ mod tests {
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			{
 				(*(lockw!(on_read_counter_clone)?)) += 1;
 			}
@@ -3318,8 +3340,8 @@ mod tests {
 		handles.push(listener.as_raw_fd());
 		listeners.push(listener);
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |_conn_data| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _| Ok(()))?;
 
 		let on_panic_counter = Arc::new(RwLock::new(0));
 		let on_panic_counter_clone = on_panic_counter.clone();
@@ -3342,7 +3364,7 @@ mod tests {
 		let error_complete_count = Arc::new(RwLock::new(0));
 		let error_complete_count_clone = error_complete_count.clone();
 
-		evh.set_on_read(move |_conn_data, buf| {
+		evh.set_on_read(move |_conn_data, buf, _| {
 			match buf[0] {
 				// sleep to wait for other requests to queue up
 				0 => {

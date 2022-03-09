@@ -13,3 +13,5 @@
 // limitations under the License.
 
 mod http;
+
+pub use crate::http::{HttpConfig, HttpServer};

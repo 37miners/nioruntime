@@ -72,11 +72,8 @@ impl HttpServer {
 		})?;
 
 		evh.set_on_read(move |conn_data, buf, ctx| Self::process_on_read(conn_data, buf, ctx))?;
-
-		evh.set_on_accept(move |conn_data| Self::process_on_accept(conn_data))?;
-
-		evh.set_on_close(move |conn_data| Self::process_on_close(conn_data))?;
-
+		evh.set_on_accept(move |conn_data, ctx| Self::process_on_accept(conn_data, ctx))?;
+		evh.set_on_close(move |conn_data, ctx| Self::process_on_close(conn_data, ctx))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.start()?;
@@ -121,23 +118,35 @@ impl HttpServer {
 			conn_data.get_accept_handle()
 		)?;
 
-		let mut buffer = ctx.get_buffer();
+		let buffer = ctx.get_buffer();
 		buffer.push(1);
-		debug!("buflen={}", buffer.len());
+		debug!("buflen={}", buffer.len())?;
 
 		Ok(())
 	}
 
-	fn process_on_accept(conn_data: &ConnectionData) -> Result<(), Error> {
+	fn process_on_accept(
+		conn_data: &ConnectionData,
+		ctx: &mut ConnectionContext,
+	) -> Result<(), Error> {
 		debug!(
 			"on accept: {}, handle={}",
 			conn_data.get_connection_id(),
 			conn_data.get_handle()
 		)?;
+
+		let buffer = ctx.get_buffer();
+		buffer.push(1);
+		buffer.push(1);
+		buffer.push(1);
+
 		Ok(())
 	}
 
-	fn process_on_close(conn_data: &ConnectionData) -> Result<(), Error> {
+	fn process_on_close(
+		conn_data: &ConnectionData,
+		_ctx: &mut ConnectionContext,
+	) -> Result<(), Error> {
 		debug!("on close: {}", conn_data.get_connection_id())?;
 		Ok(())
 	}
