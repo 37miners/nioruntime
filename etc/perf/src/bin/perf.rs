@@ -371,14 +371,14 @@ fn main() -> Result<(), Error> {
 		let (handles, _listeners) =
 			get_handles(evh_config.threads, &format!("127.0.0.1:{}", port)[..])?;
 
-		evh.set_on_accept(move |_conn_data| Ok(()))?;
-		evh.set_on_close(move |conn_data| {
+		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |conn_data, _| {
 			trace!("on close for id = {}", conn_data.get_connection_id())?;
 			Ok(())
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		evh.set_on_read(move |conn_data, buf| {
+		evh.set_on_read(move |conn_data, buf, _| {
 			conn_data.write(buf)?;
 			Ok(())
 		})?;
