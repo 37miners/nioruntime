@@ -189,6 +189,21 @@ pub enum ErrorKind {
 	/// UnexpectedEof error
 	#[fail(display = "UnexpectedEOF: {}", _0)]
 	UnexpectedEof(String),
+	/// HttpError
+	#[fail(display = "HttpError: {}", _0)]
+	HttpError(String),
+	/// HttpError 405
+	#[fail(display = "HttpError 405: {}", _0)]
+	HttpError405(String),
+	/// HttpError 400
+	#[fail(display = "HttpError 400: {}", _0)]
+	HttpError400(String),
+	/// HttpError 431
+	#[fail(display = "HttpError 431: {}", _0)]
+	HttpError431(String),
+	/// HttpError 500
+	#[fail(display = "HttpError 500: {}", _0)]
+	HttpError500(String),
 }
 
 impl Display for Error {
