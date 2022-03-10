@@ -12,20 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use nioruntime_deps::dirs;
 use nioruntime_deps::libc;
 use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 };
+use nioruntime_deps::path_clean::{clean, PathClean};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EventHandlerConfig};
 use nioruntime_log::*;
 use std::collections::HashMap;
+use std::fs::metadata;
+use std::fs::File;
+use std::io::Read;
 use std::mem;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use std::os::unix::prelude::RawFd;
@@ -34,7 +40,7 @@ const HTTP10_STRING: &str = "HTTP/1.0";
 const HTTP11_STRING: &str = "HTTP/1.1";
 const HTTP20_STRING: &str = "HTTP/2.0";
 
-warn!();
+trace!();
 
 const CANNED_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
@@ -55,6 +61,26 @@ Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
 Bad request.\r\n";
+
+const HTTP_ERROR_403: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Content-Length: 7\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Connection: close\r\n\
+\r\n\
+Forbidden.\r\n";
+
+const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Content-Length: 7\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Connection: close\r\n\
+\r\n\
+Not found.\r\n";
 
 const HTTP_ERROR_405: &[u8] = b"HTTP/1.1 405 Method not supported\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
@@ -394,6 +420,7 @@ pub struct HttpConfig {
 	pub threads: usize,
 	pub listen_queue_size: usize,
 	pub max_header_size: usize,
+	pub root_dir: String,
 }
 
 impl Default for HttpConfig {
@@ -403,6 +430,7 @@ impl Default for HttpConfig {
 			threads: 8,
 			listen_queue_size: 100,
 			max_header_size: 16 * 1024,
+			root_dir: "~/.niohttpd".to_string(),
 		}
 	}
 }
@@ -465,6 +493,18 @@ impl HttpServer {
 
 	pub fn stop(&self) -> Result<(), Error> {
 		Ok(())
+	}
+
+	fn get_root_dir(config: &HttpConfig) -> Result<String, Error> {
+		let home_dir = match dirs::home_dir() {
+			Some(p) => p,
+			None => PathBuf::new(),
+		}
+		.as_path()
+		.display()
+		.to_string();
+
+		Ok(config.root_dir.replace("~", &home_dir))
 	}
 
 	fn process_on_read(
@@ -549,11 +589,68 @@ impl HttpServer {
 					std::str::from_utf8(&buffer[headers.len()..])?,
 					std::str::from_utf8(buffer)?
 				)?;
-				conn_data.write(CANNED_RESPONSE)?;
+				match Self::send_file(&headers.uri, conn_data, config) {
+					Ok(_) => {}
+					Err(e) => {
+						match e.kind() {
+							ErrorKind::HttpError404(_) => {
+								conn_data.write(HTTP_ERROR_404)?;
+							}
+							ErrorKind::HttpError403(_) => {
+								conn_data.write(HTTP_ERROR_403)?;
+							}
+							_ => {
+								conn_data.write(HTTP_ERROR_500)?;
+								conn_data.close()?;
+							}
+						}
+						debug!("sending file generated error: {}", e)?;
+					}
+				}
 				Ok(headers.len())
 			}
 			None => Ok(0),
 		}
+	}
+
+	fn send_file(
+		path: &String,
+		conn_data: &ConnectionData,
+		config: &HttpConfig,
+	) -> Result<(), Error> {
+		let base = format!("{}/www", Self::get_root_dir(config)?);
+		let path = format!("{}{}", base, path);
+		let mut path = &clean(&path)[..];
+		if !path.starts_with(&base) {
+			return Err(ErrorKind::HttpError403("Forbidden".into()).into());
+		}
+
+		let md = match metadata(path) {
+			Ok(md) => md,
+			Err(e) => {
+				debug!("metadata generated error: {}", e);
+				return Err(ErrorKind::HttpError404("Not found".into()).into());
+			}
+		};
+
+		let path = if md.is_dir() {
+			format!("{}{}", path, "/index.html")
+		} else {
+			path.to_string()
+		};
+
+		debug!("file path = {}", path)?;
+		let mut file = match File::open(path) {
+			Ok(file) => file,
+			Err(e) => {
+				debug!("open generated error: {}", e);
+				return Err(ErrorKind::HttpError404("Not found".into()).into());
+			}
+		};
+		debug!("path was ok, sending file")?;
+		conn_data.send_file(file)?;
+
+		Ok(())
 	}
 
 	fn append_buffer(nbuf: &[u8], buffer: &mut Vec<u8>) -> Result<(), Error> {

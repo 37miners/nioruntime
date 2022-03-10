@@ -31,6 +31,7 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -172,6 +173,12 @@ impl HandleInfo {
 }
 
 #[derive(Debug)]
+struct FileHandler {
+	file: File,
+	response_connection: ConnectionData,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConnectionData {
 	connection_info: ReadWriteConnection,
 	guarded_data: Arc<RwLock<GuardedData>>,
@@ -208,6 +215,33 @@ impl ConnectionData {
 
 	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
 		self.connection_info.get_buffer()
+	}
+
+	pub fn send_file(&self, file: File) -> Result<(), Error> {
+		// first get handle.
+		// next register it for reading. Read until complete and we need some sort of marker that when a read happens, a write should be
+		// done to this conn_data
+		let handle = file.as_raw_fd();
+
+		let connection_info = EventConnectionInfo::read_write_connection(
+			handle,
+			None,
+			None,
+			None,
+			Some(Arc::new(FileHandler {
+				file,
+				response_connection: self.clone(),
+			})),
+		);
+
+		{
+			let mut guarded_data = lockw!(self.guarded_data)?;
+			guarded_data.nhandles.push(connection_info.clone());
+		}
+
+		self.wakeup.wakeup()?;
+
+		Ok(())
 	}
 
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
@@ -556,9 +590,9 @@ where
 					config,
 					server_name.try_into()?,
 				)?)));
-				EventConnectionInfo::read_write_connection(handle, None, None, tls_client)
+				EventConnectionInfo::read_write_connection(handle, None, None, tls_client, None)
 			}
-			None => EventConnectionInfo::read_write_connection(handle, None, None, None),
+			None => EventConnectionInfo::read_write_connection(handle, None, None, None, None),
 		};
 
 		// pick a random queue
@@ -653,8 +687,13 @@ where
 		let config = self.config.clone();
 
 		// add the wakeup handle to all hashtables
-		let connection_info =
-			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None, None);
+		let connection_info = EventConnectionInfo::read_write_connection(
+			wakeup.wakeup_handle_read,
+			None,
+			None,
+			None,
+			None,
+		);
 		let connection_id = connection_info.get_connection_id();
 		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
 		let handle_info = HandleInfo::new(connection_id, 0);
@@ -1071,9 +1110,12 @@ where
 									(*write_status).set_is_closed();
 									(*write_status).write_buffer.truncate(0);
 								}
-								{
-									let mut cur_connections = lockw!(ctx.cur_connections)?;
-									*cur_connections -= 1;
+								match connection_info.file()? {
+									None => {
+										let mut cur_connections = lockw!(ctx.cur_connections)?;
+										*cur_connections -= 1;
+									}
+									Some(fhandler) => {}
 								}
 								#[cfg(unix)]
 								unsafe {
@@ -1216,6 +1258,7 @@ where
 				handle,
 				Some(accept_handle),
 				tls_server,
+				None,
 				None,
 			);
 
@@ -1420,25 +1463,37 @@ where
 			debug!("read {} bytes", len)?;
 			// non-wakeup, so execute on_read callback
 			match &callbacks.on_read {
-				Some(on_read) => {
-					let connection_data =
-						&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
-					let connection_context =
-						context_map.get_mut(&connection_info.get_connection_id());
-					match connection_context {
-						Some(connection_context) => match (on_read)(
-							connection_data,
-							&ctx.buffer[0..len.try_into()?],
-							connection_context,
-						) {
+				Some(on_read) => match connection_info.file() {
+					Some(file) => {
+						match (**file)
+							.response_connection
+							.write(&ctx.buffer[0..len.try_into()?])
+						{
 							Ok(_) => {}
-							Err(e) => {
-								warn!("on_read Callback resulted in error: {}", e)?;
-							}
-						},
-						None => warn!("connection context not found!")?,
+							Err(e) => warn!("file writing generated error: {}", e)?,
+						};
 					}
-				}
+					None => {
+						let connection_data =
+							&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
+
+						let connection_context =
+							context_map.get_mut(&connection_info.get_connection_id());
+						match connection_context {
+							Some(connection_context) => match (on_read)(
+								connection_data,
+								&ctx.buffer[0..len.try_into()?],
+								connection_context,
+							) {
+								Ok(_) => {}
+								Err(e) => {
+									warn!("on_read Callback resulted in error: {}", e)?;
+								}
+							},
+							None => warn!("connection context not found!")?,
+						}
+					}
+				},
 				None => {
 					error!("no on_read callback found!")?;
 				}
@@ -2250,6 +2305,7 @@ pub struct ReadWriteConnection {
 	write_status: Arc<RwLock<WriteStatus>>,
 	tls_server: Option<Arc<RwLock<ServerConnection>>>,
 	tls_client: Option<Arc<RwLock<ClientConnection>>>,
+	file: Option<Arc<FileHandler>>,
 	buffer: Vec<u8>,
 }
 
@@ -2262,6 +2318,7 @@ impl Debug for ReadWriteConnection {
 			.field("write_status", &self.write_status)
 			.field("tls_server", &self.tls_server)
 			.field("tls_client", &self.tls_client)
+			.field("file", &self.file)
 			.finish()?;
 		Ok(())
 	}
@@ -2274,6 +2331,7 @@ impl ReadWriteConnection {
 		accept_handle: Option<Handle>,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 		tls_client: Option<Arc<RwLock<ClientConnection>>>,
+		file: Option<Arc<FileHandler>>,
 	) -> Self {
 		Self {
 			id,
@@ -2282,8 +2340,13 @@ impl ReadWriteConnection {
 			write_status: Arc::new(RwLock::new(WriteStatus::new())),
 			tls_server,
 			tls_client,
+			file,
 			buffer: vec![],
 		}
+	}
+
+	fn file(&self) -> Option<&Arc<FileHandler>> {
+		self.file.as_ref()
 	}
 
 	fn get_connection_id(&self) -> u128 {
@@ -2342,6 +2405,7 @@ impl EventConnectionInfo {
 		accept_handle: Option<Handle>,
 		tls_server: Option<Arc<RwLock<ServerConnection>>>,
 		tls_client: Option<Arc<RwLock<ClientConnection>>>,
+		file: Option<Arc<FileHandler>>,
 	) -> EventConnectionInfo {
 		EventConnectionInfo::ReadWriteConnection(ReadWriteConnection::new(
 			rand::random(),
@@ -2349,6 +2413,7 @@ impl EventConnectionInfo {
 			accept_handle,
 			tls_server,
 			tls_client,
+			file,
 		))
 	}
 
@@ -2380,6 +2445,15 @@ impl EventConnectionInfo {
 	fn get_read_write_connection_info(&self) -> Result<&ReadWriteConnection, Error> {
 		match self {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => Ok(connection_info),
+			EventConnectionInfo::ListenerConnection(_) => {
+				Err(ErrorKind::WrongConnectionType("this is a listener".to_string()).into())
+			}
+		}
+	}
+
+	fn file(&self) -> Result<Option<&Arc<FileHandler>>, Error> {
+		match self {
+			EventConnectionInfo::ReadWriteConnection(connection_info) => Ok(connection_info.file()),
 			EventConnectionInfo::ListenerConnection(_) => {
 				Err(ErrorKind::WrongConnectionType("this is a listener".to_string()).into())
 			}

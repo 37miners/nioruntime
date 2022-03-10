@@ -204,6 +204,12 @@ pub enum ErrorKind {
 	/// HttpError 500
 	#[fail(display = "HttpError 500: {}", _0)]
 	HttpError500(String),
+	/// HttpError 403
+	#[fail(display = "HttpError 403: {}", _0)]
+	HttpError403(String),
+	/// HttpError404
+	#[fail(display = "HttpError 404: {}", _0)]
+	HttpError404(String),
 }
 
 impl Display for Error {
