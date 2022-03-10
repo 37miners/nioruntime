@@ -23,6 +23,7 @@ use colored::Colorize;
 use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
+use nioruntime_http::{HttpConfig, HttpServer};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
@@ -320,7 +321,18 @@ fn main() -> Result<(), Error> {
 	})?;
 
 	if is_server {
-		info!("Starting EventHandler!")?;
+		let http = args.is_present("http");
+
+		let port = match args.is_present("port") {
+			true => args.value_of("port").unwrap().parse()?,
+			false => 8092,
+		};
+
+		if http {
+			info!("Starting HTTP server!")?;
+		} else {
+			info!("Starting EventHandler!")?;
+		}
 
 		if tls && !args.is_present("tls_certificates_file") {
 			return Err(ErrorKind::ApplicationError(
@@ -355,41 +367,53 @@ fn main() -> Result<(), Error> {
 			false => 1_000_000,
 		};
 
-		let port = match args.is_present("port") {
-			true => args.value_of("port").unwrap().parse()?,
-			false => 8092,
-		};
-
 		let evh_config = EventHandlerConfig {
 			threads,
 			max_rwhandles,
 			..EventHandlerConfig::default()
 		};
 
-		let mut evh = EventHandler::new(evh_config.clone())?;
+		if http {
+			let config = HttpConfig {
+				addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+				//eventhandler_config: evh_config,
+				..Default::default()
+			};
 
-		let (handles, _listeners) =
-			get_handles(evh_config.threads, &format!("127.0.0.1:{}", port)[..])?;
+			let mut http = HttpServer::new(config);
+			http.start()?;
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |conn_data, _| {
-			trace!("on close for id = {}", conn_data.get_connection_id())?;
-			Ok(())
-		})?;
-		evh.set_on_panic(move || Ok(()))?;
-
-		evh.set_on_read(move |conn_data, buf, _| {
-			conn_data.write(buf)?;
-			Ok(())
-		})?;
-		evh.start()?;
-		evh.add_listener_handles(handles, tls_config)?;
-
-		std::thread::sleep(std::time::Duration::from_millis(3000));
-		let first = unsafe { MEM_ALLOCATED } - unsafe { MEM_DEALLOCATED };
-		loop {
-			print_alloc(first as i128)?;
 			std::thread::sleep(std::time::Duration::from_millis(3000));
+			let first = unsafe { MEM_ALLOCATED } - unsafe { MEM_DEALLOCATED };
+			loop {
+				print_alloc(first as i128)?;
+				std::thread::sleep(std::time::Duration::from_millis(3000));
+			}
+		} else {
+			let mut evh = EventHandler::new(evh_config.clone())?;
+
+			let (handles, _listeners) =
+				get_handles(evh_config.threads, &format!("127.0.0.1:{}", port)[..])?;
+
+			evh.set_on_accept(move |_conn_data, _| Ok(()))?;
+			evh.set_on_close(move |conn_data, _| {
+				trace!("on close for id = {}", conn_data.get_connection_id())?;
+				Ok(())
+			})?;
+			evh.set_on_panic(move || Ok(()))?;
+
+			evh.set_on_read(move |conn_data, buf, _| {
+				conn_data.write(buf)?;
+				Ok(())
+			})?;
+			evh.start()?;
+			evh.add_listener_handles(handles, tls_config)?;
+			std::thread::sleep(std::time::Duration::from_millis(3000));
+			let first = unsafe { MEM_ALLOCATED } - unsafe { MEM_DEALLOCATED };
+			loop {
+				print_alloc(first as i128)?;
+				std::thread::sleep(std::time::Duration::from_millis(3000));
+			}
 		}
 	}
 	if is_client {

@@ -841,6 +841,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nioruntime_http"
+version = "0.0.3-beta1"
+dependencies = [
+ "nioruntime_deps",
+ "nioruntime_err",
+ "nioruntime_evh",
+ "nioruntime_log",
+ "nioruntime_util",
+]
+
+[[package]]
 name = "nioruntime_log"
 version = "0.0.3-beta1"
 dependencies = [
@@ -1000,6 +1011,7 @@ dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
  "nioruntime_evh",
+ "nioruntime_http",
  "nioruntime_log",
  "nioruntime_util",
  "nix",

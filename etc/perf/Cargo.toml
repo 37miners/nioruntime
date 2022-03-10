@@ -14,11 +14,12 @@ name = "perf"
 path = "src/bin/perf.rs"
 
 [dependencies]
-nioruntime_deps = { path = "../../deps" }
-nioruntime_log = { path = "../../log" }
-nioruntime_evh = { path = "../../eventhandler" }
-nioruntime_util = { path = "../../util" }
-nioruntime_err = { path = "../../error" }
+nioruntime_deps = { path = "../../deps"         }
+nioruntime_log =  { path = "../../log"          }
+nioruntime_evh =  { path = "../../eventhandler" }
+nioruntime_util = { path = "../../util"         }
+nioruntime_err =  { path = "../../error"        }
+nioruntime_http = { path = "../../http"         }
 
 nix = "0.22.0"
 libc = "^0.2.17"

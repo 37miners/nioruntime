@@ -122,22 +122,22 @@ impl HttpHeaders {
 			Some((method, offset)) => (method, offset),
 			None => return Ok(None),
 		};
-		trace!("method={:?},offset={}", method, offset);
+		trace!("method={:?},offset={}", method, offset)?;
 		let (uri, offset) = match Self::parse_uri(&buffer[offset..], config)? {
 			Some((uri, noffset)) => (uri, noffset + offset),
 			None => return Ok(None),
 		};
-		trace!("uri={:?},offset={}", uri, offset);
+		trace!("uri={:?},offset={}", uri, offset)?;
 		let (query, offset) = match Self::parse_query(&buffer[offset..], config)? {
 			Some((query, noffset)) => (query, noffset + offset),
 			None => return Ok(None),
 		};
-		trace!("query={:?}", query);
+		trace!("query={:?}", query)?;
 		let (version, offset) = match Self::parse_version(&buffer[offset..], config)? {
 			Some((version, noffset)) => (version, noffset + offset),
 			None => return Ok(None),
 		};
-		trace!("version={:?}", version);
+		trace!("version={:?}", version)?;
 
 		if offset + 2 >= buffer.len() {
 			return Ok(None);
@@ -197,7 +197,7 @@ impl HttpHeaders {
 
 	fn parse_method(
 		buffer: &[u8],
-		config: &HttpConfig,
+		_config: &HttpConfig,
 	) -> Result<Option<(HttpMethod, usize)>, Error> {
 		if buffer.len() < 4 {
 			Ok(None)
@@ -509,15 +509,15 @@ impl HttpServer {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
-					ErrorKind::HttpError400(e) => {
+					ErrorKind::HttpError400(_) => {
 						conn_data.write(HTTP_ERROR_400)?;
 						conn_data.close()?;
 					}
-					ErrorKind::HttpError405(e) => {
+					ErrorKind::HttpError405(_) => {
 						conn_data.write(HTTP_ERROR_405)?;
 						conn_data.close()?;
 					}
-					ErrorKind::HttpError431(e) => {
+					ErrorKind::HttpError431(_) => {
 						conn_data.write(HTTP_ERROR_431)?;
 						conn_data.close()?;
 					}
@@ -530,7 +530,7 @@ impl HttpServer {
 				return Ok(0);
 			}
 		};
-		debug!("header = {:?}", headers);
+		debug!("header = {:?}", headers)?;
 		match headers {
 			Some(headers) => {
 				debug!(
@@ -552,8 +552,8 @@ impl HttpServer {
 
 	fn process_on_accept(
 		conn_data: &ConnectionData,
-		ctx: &mut ConnectionContext,
-		config: &HttpConfig,
+		_ctx: &mut ConnectionContext,
+		_config: &HttpConfig,
 	) -> Result<(), Error> {
 		debug!(
 			"on accept: {}, handle={}",
@@ -567,7 +567,7 @@ impl HttpServer {
 	fn process_on_close(
 		conn_data: &ConnectionData,
 		_ctx: &mut ConnectionContext,
-		config: &HttpConfig,
+		_config: &HttpConfig,
 	) -> Result<(), Error> {
 		debug!("on close: {}", conn_data.get_connection_id())?;
 		Ok(())
@@ -625,7 +625,7 @@ mod test {
 
 		let mut http = HttpServer::new(config);
 		http.start()?;
-		std::thread::park();
+		//std::thread::park();
 
 		Ok(())
 	}
