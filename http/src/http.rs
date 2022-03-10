@@ -486,14 +486,24 @@ impl HttpServer {
 
 		if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
-			let amt = Self::process_buffer(conn_data, buffer, config)?;
-			buffer.drain(..amt);
+			loop {
+				let amt = Self::process_buffer(conn_data, buffer, config)?;
+				if amt == 0 {
+					break;
+				}
+				buffer.drain(..amt);
+			}
 		} else {
-			// premptively try to process the incoming buffer without appending
-			// in many cases this will work and be faster
-			let amt = Self::process_buffer(conn_data, nbuf, config)?;
-			if amt == 0 {
-				Self::append_buffer(nbuf, buffer)?;
+			let mut offset = 0;
+			loop {
+				// premptively try to process the incoming buffer without appending
+				// in many cases this will work and be faster
+				let amt = Self::process_buffer(conn_data, &nbuf[offset..], config)?;
+				if amt == 0 {
+					Self::append_buffer(&nbuf[offset..], buffer)?;
+					break;
+				}
+				offset += amt;
 			}
 		}
 
@@ -530,12 +540,13 @@ impl HttpServer {
 				return Ok(0);
 			}
 		};
+
 		debug!("header = {:?}", headers)?;
 		match headers {
 			Some(headers) => {
 				debug!(
 					"post drained would be '{:?}' from '{:?}'",
-					std::str::from_utf8(&buffer[headers.len..])?,
+					std::str::from_utf8(&buffer[headers.len()..])?,
 					std::str::from_utf8(buffer)?
 				)?;
 				conn_data.write(CANNED_RESPONSE)?;
@@ -625,7 +636,7 @@ mod test {
 
 		let mut http = HttpServer::new(config);
 		http.start()?;
-		//std::thread::park();
+		std::thread::park();
 
 		Ok(())
 	}
