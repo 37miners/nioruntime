@@ -12,7 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod cache;
-mod http;
+use nioruntime_err::Error;
+use std::collections::HashMap;
 
-pub use crate::http::{HttpConfig, HttpHeaders, HttpServer};
+pub struct HttpCache {
+	map: HashMap<String, Vec<u8>>,
+}
+
+impl HttpCache {
+	pub fn new() -> Self {
+		Self {
+			map: HashMap::new(),
+		}
+	}
+
+	pub fn get_file_chunk(&self, file: &String, chunk_num: u32) -> Result<Option<&Vec<u8>>, Error> {
+		Ok(self.map.get(file))
+	}
+
+	pub fn set_file_chunk(
+		&mut self,
+		file: String,
+		chunk_num: u32,
+		value: Vec<u8>,
+	) -> Result<(), Error> {
+		self.map.insert(file, value);
+		Ok(())
+	}
+}

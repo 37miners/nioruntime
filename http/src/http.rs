@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::cache::HttpCache;
 use nioruntime_deps::dirs;
 use nioruntime_deps::libc;
 use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 };
 use nioruntime_deps::path_clean::{clean, PathClean};
+use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EventHandlerConfig};
 use nioruntime_log::*;
+use nioruntime_util::{lockr, lockw};
 use std::collections::HashMap;
-use std::fs::metadata;
-use std::fs::File;
+use std::convert::TryInto;
+use std::fs::{metadata, File, Metadata};
 use std::io::Read;
 use std::mem;
 use std::net::SocketAddr;
@@ -33,6 +36,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 
 use std::os::unix::prelude::RawFd;
 
@@ -449,9 +453,10 @@ impl HttpServer {
 		let config1 = self.config.clone();
 		let config2 = self.config.clone();
 		let config3 = self.config.clone();
+		let cache = Arc::new(RwLock::new(HttpCache::new()));
 
 		evh.set_on_read(move |conn_data, buf, ctx| {
-			Self::process_on_read(conn_data, buf, ctx, &config1)
+			Self::process_on_read(conn_data, buf, ctx, &config1, &cache)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx| Self::process_on_accept(conn_data, ctx, &config2))?;
 		evh.set_on_close(move |conn_data, ctx| Self::process_on_close(conn_data, ctx, &config3))?;
@@ -500,10 +505,11 @@ impl HttpServer {
 	}
 
 	fn process_on_read(
-		conn_data: &ConnectionData,
+		conn_data: ConnectionData,
 		nbuf: &[u8],
 		ctx: &mut ConnectionContext,
 		config: &HttpConfig,
+		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
 		let buffer = ctx.get_buffer();
 		let buffer_len = buffer.len();
@@ -519,7 +525,7 @@ impl HttpServer {
 		if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
-				let amt = Self::process_buffer(conn_data, buffer, config)?;
+				let amt = Self::process_buffer(conn_data.clone(), buffer, config, cache)?;
 				if amt == 0 {
 					break;
 				}
@@ -530,7 +536,7 @@ impl HttpServer {
 			loop {
 				// premptively try to process the incoming buffer without appending
 				// in many cases this will work and be faster
-				let amt = Self::process_buffer(conn_data, &nbuf[offset..], config)?;
+				let amt = Self::process_buffer(conn_data.clone(), &nbuf[offset..], config, cache)?;
 				if amt == 0 {
 					Self::append_buffer(&nbuf[offset..], buffer)?;
 					break;
@@ -543,9 +549,10 @@ impl HttpServer {
 	}
 
 	fn process_buffer(
-		conn_data: &ConnectionData,
+		conn_data: ConnectionData,
 		buffer: &[u8],
 		config: &HttpConfig,
+		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<usize, Error> {
 		let headers = match HttpHeaders::new(buffer, config) {
 			Ok(headers) => headers,
@@ -576,7 +583,7 @@ impl HttpServer {
 		debug!("header = {:?}", headers)?;
 		match headers {
 			Some(headers) => {
-				match Self::send_file(&headers.uri, conn_data, config) {
+				match Self::send_file(&headers.uri, conn_data.clone(), config, cache) {
 					Ok(_) => {}
 					Err(e) => {
 						match e.kind() {
@@ -602,8 +609,9 @@ impl HttpServer {
 
 	fn send_file(
 		path: &String,
-		conn_data: &ConnectionData,
+		conn_data: ConnectionData,
 		config: &HttpConfig,
+		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
 		let base = format!("{}/www", Self::get_root_dir(config)?);
 		let path = format!("{}{}", base, path);
@@ -635,25 +643,77 @@ impl HttpServer {
 		};
 
 		debug!("file path = {}", path)?;
-		let mut file = match File::open(path) {
-			Ok(file) => file,
-			Err(e) => {
-				debug!("open generated error: {}", e);
-				return Err(ErrorKind::HttpError404("Not found".into()).into());
-			}
-		};
 
-		Self::send_headers(conn_data, config, md.len())?;
-		conn_data.send_file(file, "".to_string())?;
+		Self::process_cache(conn_data, config, path, md, cache)?;
 
 		Ok(())
 	}
 
-	fn send_headers(
-		conn_data: &ConnectionData,
+	fn process_cache(
+		conn_data: ConnectionData,
 		config: &HttpConfig,
-		len: u64,
+		path: String,
+		md: Metadata,
+		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
+		let found = {
+			let cache = lockr!(cache)?;
+			let chunk = cache.get_file_chunk(&path, 0);
+			match chunk {
+				Ok(chunk) => match chunk {
+					Some(chunk) => {
+						Self::send_headers(conn_data.clone(), config, chunk.len().try_into()?)?;
+						conn_data.write(chunk)?;
+						true
+					}
+					None => false,
+				},
+				Err(e) => {
+					error!("process_cache generated error: {}", e);
+					false
+				}
+			}
+		};
+
+		if !found {
+			Self::load_cache(path, conn_data, config.clone(), md, cache.clone())?;
+		}
+		Ok(())
+	}
+
+	fn load_cache(
+		path: String,
+		conn_data: ConnectionData,
+		config: HttpConfig,
+		md: Metadata,
+		cache: Arc<RwLock<HttpCache>>,
+	) -> Result<(), Error> {
+		std::thread::spawn(move || -> Result<(), Error> {
+			let mut in_buf: [u8; 10240] = [0u8; 10240];
+			let mut file = File::open(path.clone())?;
+			Self::send_headers(conn_data.clone(), &config, md.len())?;
+
+			loop {
+				let len = file.read(&mut in_buf)?;
+				let nslice = &in_buf[0..len];
+				if len > 0 {
+					let mut cache = lockw!(cache)?;
+					cache.set_file_chunk(path.clone(), 0, nslice.to_vec())?;
+				}
+				conn_data.write(nslice)?;
+
+				warn!("read {} bytes", len);
+				if len <= 0 {
+					break;
+				}
+			}
+
+			Ok(())
+		});
+		Ok(())
+	}
+
+	fn send_headers(conn_data: ConnectionData, config: &HttpConfig, len: u64) -> Result<(), Error> {
 		let response = HTTP_OK_200_HEADERS
 			.replace("%1%", "nioruntime httpd/0.0.3-beta.1")
 			.replace("%2%", "Wed, 09 Mar 2022 22:03:11 GMT")
