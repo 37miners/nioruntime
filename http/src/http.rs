@@ -42,21 +42,18 @@ const HTTP20_STRING: &str = "HTTP/2.0";
 
 trace!();
 
-const CANNED_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Hello\r\n";
+const HTTP_OK_200_HEADERS: &str = "HTTP/1.1 200 OK\r\n\
+Server: %1%\r\n\
+Date: %2%\r\n\
+Last-Modified: %3%\r\n\
+Connection: %4%\r\n\
+Content-Length: %5%\r\n\
+\r\n";
 
 const HTTP_ERROR_400: &[u8] = b"HTTP/1.1 400 Bad request\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -66,7 +63,6 @@ const HTTP_ERROR_403: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -76,7 +72,6 @@ const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -86,7 +81,6 @@ const HTTP_ERROR_405: &[u8] = b"HTTP/1.1 405 Method not supported\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -96,7 +90,6 @@ const HTTP_ERROR_431: &[u8] = b"HTTP/1.1 431 Request Header Fields Too Large\r\n
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -106,7 +99,6 @@ const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 Internal Server Error\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 7\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -584,11 +576,6 @@ impl HttpServer {
 		debug!("header = {:?}", headers)?;
 		match headers {
 			Some(headers) => {
-				debug!(
-					"post drained would be '{:?}' from '{:?}'",
-					std::str::from_utf8(&buffer[headers.len()..])?,
-					std::str::from_utf8(buffer)?
-				)?;
 				match Self::send_file(&headers.uri, conn_data, config) {
 					Ok(_) => {}
 					Err(e) => {
@@ -604,7 +591,7 @@ impl HttpServer {
 								conn_data.close()?;
 							}
 						}
-						debug!("sending file generated error: {}", e)?;
+						debug!("sending file {} generated error: {}", &headers.uri, e)?;
 					}
 				}
 				Ok(headers.len())
@@ -633,10 +620,18 @@ impl HttpServer {
 			}
 		};
 
-		let path = if md.is_dir() {
-			format!("{}{}", path, "/index.html")
+		let (path, md) = if md.is_dir() {
+			let path = format!("{}{}", path, "/index.html");
+			let md = match metadata(path.clone()) {
+				Ok(md) => md,
+				Err(e) => {
+					debug!("metadata generated error: {}", e);
+					return Err(ErrorKind::HttpError404("Not found".into()).into());
+				}
+			};
+			(path, md)
 		} else {
-			path.to_string()
+			(path.to_string(), md)
 		};
 
 		debug!("file path = {}", path)?;
@@ -647,9 +642,26 @@ impl HttpServer {
 				return Err(ErrorKind::HttpError404("Not found".into()).into());
 			}
 		};
-		debug!("path was ok, sending file")?;
-		conn_data.send_file(file)?;
 
+		Self::send_headers(conn_data, config, md.len())?;
+		conn_data.send_file(file, "".to_string())?;
+
+		Ok(())
+	}
+
+	fn send_headers(
+		conn_data: &ConnectionData,
+		config: &HttpConfig,
+		len: u64,
+	) -> Result<(), Error> {
+		let response = HTTP_OK_200_HEADERS
+			.replace("%1%", "nioruntime httpd/0.0.3-beta.1")
+			.replace("%2%", "Wed, 09 Mar 2022 22:03:11 GMT")
+			.replace("%3%", "Fri, 30 Jul 2021 06:40:15 GMT")
+			.replace("%4%", "Keep-alive")
+			.replace("%5%", &len.to_string());
+
+		conn_data.write(response.as_bytes())?;
 		Ok(())
 	}
 

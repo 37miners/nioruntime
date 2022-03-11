@@ -176,6 +176,7 @@ impl HandleInfo {
 struct FileHandler {
 	file: File,
 	response_connection: ConnectionData,
+	on_complete: String,
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +218,7 @@ impl ConnectionData {
 		self.connection_info.get_buffer()
 	}
 
-	pub fn send_file(&self, file: File) -> Result<(), Error> {
+	pub fn send_file(&self, file: File, on_complete: String) -> Result<(), Error> {
 		// first get handle.
 		// next register it for reading. Read until complete and we need some sort of marker that when a read happens, a write should be
 		// done to this conn_data
@@ -231,6 +232,7 @@ impl ConnectionData {
 			Some(Arc::new(FileHandler {
 				file,
 				response_connection: self.clone(),
+				on_complete,
 			})),
 		);
 
@@ -1115,7 +1117,12 @@ where
 										let mut cur_connections = lockw!(ctx.cur_connections)?;
 										*cur_connections -= 1;
 									}
-									Some(fhandler) => {}
+									Some(fhandler) => {
+										// write the termination text
+										let _ = fhandler
+											.response_connection
+											.write(fhandler.on_complete.as_bytes());
+									}
 								}
 								#[cfg(unix)]
 								unsafe {
@@ -2106,10 +2113,14 @@ where
 					handle_info.to_bytes(&mut handle_info_bytes)?;
 					handle_hash.insert_raw(&item.handle.to_be_bytes(), &handle_info_bytes)?;
 
-					ctx.input_events.push(Event {
-						handle: item.handle,
-						etype: EventType::Read,
-					});
+					if item.file.is_some() {
+						ctx.saturating_handles.insert(item.handle);
+					} else {
+						ctx.input_events.push(Event {
+							handle: item.handle,
+							etype: EventType::Read,
+						});
+					}
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
 					connection_id_map

@@ -12,52 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use nioruntime_err::Error;
+use nioruntime_http::{HttpConfig, HttpServer};
 use nioruntime_log::*;
+use std::net::SocketAddr;
+use std::str::FromStr;
 
 trace!();
 
-fn main() -> Result<(), std::io::Error> {
-	log_config!(LogConfig {
-		show_bt: false,
-		show_stdout: false,
-		file_path: Some("abc".to_string()),
+fn main() -> Result<(), Error> {
+	let config = HttpConfig {
+		addrs: vec![
+			SocketAddr::from_str("127.0.0.1:8080")?,
+			SocketAddr::from_str("0.0.0.0:8081")?,
+		],
 		..Default::default()
-	})
-	.expect("log config");
+	};
 
-	fatal!("fatal").expect("failed to log");
-	fatal_no_ts!("fatal_no_ts").expect("failed to log");
-	fatal_all!("fatal all").expect("failed to log");
-
-	error!("error").expect("failed to log");
-	error_no_ts!("error_no_ts").expect("failed to log");
-	error_all!("error all").expect("failed to log");
-
-	warn!("warn").expect("failed to log");
-	warn_no_ts!("warn_no_ts").expect("failed to log");
-	warn_all!("warn all").expect("failed to log");
-
-	info!("info").expect("failed to log");
-	info_no_ts!("info no ts").expect("failed to log");
-	info_all!("info all").expect("failed to log");
-
-	debug!("debug").expect("failed to log");
-	debug_no_ts!("debug no ts").expect("failed to log");
-	debug_all!("debug all").expect("failed to log");
-
-	trace!("trace").expect("failed to log");
-	trace_no_ts!("trace_no_ts").expect("failed to log");
-	trace_all!("trace all").expect("failed to log");
-
-	let config = get_config!("default");
-	info!("config={:?}", config).expect("config");
-
-	let config_option = get_config_option!(Settings::Stdout);
-	set_config_option!(Settings::Timestamp, true).expect("set");
-	info_all!("stdout={:?}", config_option).expect("info");
-	rotate!().expect("rotate");
-	let rotation_status = rotation_status!();
-	info_all!("rot_status={:?}", rotation_status).expect("info");
-
+	let mut http = HttpServer::new(config);
+	http.start()?;
+	std::thread::park();
 	Ok(())
 }
