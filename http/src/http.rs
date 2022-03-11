@@ -40,7 +40,7 @@ const HTTP10_STRING: &str = "HTTP/1.0";
 const HTTP11_STRING: &str = "HTTP/1.1";
 const HTTP20_STRING: &str = "HTTP/2.0";
 
-trace!();
+warn!();
 
 const HTTP_OK_200_HEADERS: &str = "HTTP/1.1 200 OK\r\n\
 Server: %1%\r\n\

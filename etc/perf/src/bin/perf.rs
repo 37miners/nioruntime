@@ -675,12 +675,29 @@ fn run_thread(
 			};
 			len_sum += len;
 			trace!("len={},len_sum={}", len, len_sum)?;
-			if len_sum >= wlen {
+
+			if http {
+				let mut do_break = false;
+				for i in 3..len_sum {
+					if rbuf[i - 3] == 109
+						&& rbuf[i - 2] == 108 && rbuf[i - 1] == 62
+						&& rbuf[i] == 10
+					{
+						do_break = true;
+						break;
+					}
+				}
+
+				if do_break {
+					break;
+				}
+			} else if len_sum >= wlen {
 				break;
 			}
 
 			assert!(len != 0);
 		}
+
 		let elapsed = std::time::SystemTime::now().duration_since(start_time)?;
 		let nanos = elapsed.as_nanos();
 		let mut micros = nanos as usize / 1000;
