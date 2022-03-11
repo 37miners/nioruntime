@@ -679,12 +679,22 @@ fn run_thread(
 			if http {
 				let mut do_break = false;
 				for i in 3..len_sum {
-					if rbuf[i - 3] == 109
-						&& rbuf[i - 2] == 108 && rbuf[i - 1] == 62
-						&& rbuf[i] == 10
+					if rbuf[i - 3] == '\r' as u8
+						&& rbuf[i - 2] == '\n' as u8
+						&& rbuf[i - 1] == '\r' as u8
+						&& rbuf[i] == '\n' as u8
 					{
-						do_break = true;
-						break;
+						// headers complete. find content-length
+						let str = std::str::from_utf8(&rbuf[0..i])?;
+						let index = str.find("Content-Length: ").unwrap();
+						let str = &str[index + 16..];
+						let end = str.find("\r").unwrap();
+						let mut len: usize = str[0..end].parse()?;
+						len += i + 1;
+						if len_sum >= len {
+							do_break = true;
+							break;
+						}
 					}
 				}
 
