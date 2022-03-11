@@ -602,8 +602,9 @@ fn run_thread(
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	if http {
-		let request_string =
-			format!("GET / HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",);
+		let request_string = format!(
+			"GET /perf.html HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",
+		);
 		wbuf = request_string.as_bytes().to_vec();
 		rbuf.resize(1000, 0u8);
 	} else {

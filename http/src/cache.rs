@@ -26,14 +26,18 @@ impl HttpCache {
 		}
 	}
 
-	pub fn get_file_chunk(&self, file: &String, chunk_num: u32) -> Result<Option<&Vec<u8>>, Error> {
+	pub fn get_file_chunk(
+		&self,
+		file: &String,
+		_chunk_num: u32,
+	) -> Result<Option<&Vec<u8>>, Error> {
 		Ok(self.map.get(file))
 	}
 
 	pub fn set_file_chunk(
 		&mut self,
 		file: String,
-		chunk_num: u32,
+		_chunk_num: u32,
 		value: Vec<u8>,
 	) -> Result<(), Error> {
 		self.map.insert(file, value);

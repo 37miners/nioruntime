@@ -18,7 +18,7 @@ use nioruntime_deps::libc;
 use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 };
-use nioruntime_deps::path_clean::{clean, PathClean};
+use nioruntime_deps::path_clean::clean;
 use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
@@ -45,6 +45,16 @@ const HTTP11_STRING: &str = "HTTP/1.1";
 const HTTP20_STRING: &str = "HTTP/2.0";
 
 warn!();
+
+const _SIMPLE: &[u8] = b"HTTP/1.1 200 Ok\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 7\r\n\
+Connection: keep-alive\r\n\
+\r\n\
+Hello\r\n";
 
 const HTTP_OK_200_HEADERS: &str = "HTTP/1.1 200 OK\r\n\
 Server: %1%\r\n\
@@ -456,7 +466,7 @@ impl HttpServer {
 		let cache = Arc::new(RwLock::new(HttpCache::new()));
 
 		evh.set_on_read(move |conn_data, buf, ctx| {
-			Self::process_on_read(conn_data, buf, ctx, &config1, &cache)
+			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx| Self::process_on_accept(conn_data, ctx, &config2))?;
 		evh.set_on_close(move |conn_data, ctx| Self::process_on_close(conn_data, ctx, &config3))?;
@@ -505,7 +515,7 @@ impl HttpServer {
 	}
 
 	fn process_on_read(
-		conn_data: ConnectionData,
+		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		ctx: &mut ConnectionContext,
 		config: &HttpConfig,
@@ -525,7 +535,7 @@ impl HttpServer {
 		if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
-				let amt = Self::process_buffer(conn_data.clone(), buffer, config, cache)?;
+				let amt = Self::process_buffer(conn_data, buffer, config, cache)?;
 				if amt == 0 {
 					break;
 				}
@@ -536,7 +546,7 @@ impl HttpServer {
 			loop {
 				// premptively try to process the incoming buffer without appending
 				// in many cases this will work and be faster
-				let amt = Self::process_buffer(conn_data.clone(), &nbuf[offset..], config, cache)?;
+				let amt = Self::process_buffer(conn_data, &nbuf[offset..], config, cache)?;
 				if amt == 0 {
 					Self::append_buffer(&nbuf[offset..], buffer)?;
 					break;
@@ -549,7 +559,7 @@ impl HttpServer {
 	}
 
 	fn process_buffer(
-		conn_data: ConnectionData,
+		conn_data: &ConnectionData,
 		buffer: &[u8],
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
@@ -581,9 +591,10 @@ impl HttpServer {
 		};
 
 		debug!("header = {:?}", headers)?;
+
 		match headers {
 			Some(headers) => {
-				match Self::send_file(&headers.uri, conn_data.clone(), config, cache) {
+				match Self::send_file(&headers.uri, conn_data, config, cache) {
 					Ok(_) => {}
 					Err(e) => {
 						match e.kind() {
@@ -609,21 +620,34 @@ impl HttpServer {
 
 	fn send_file(
 		path: &String,
-		conn_data: ConnectionData,
+		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
 		let base = format!("{}/www", Self::get_root_dir(config)?);
 		let path = format!("{}{}", base, path);
-		let mut path = &clean(&path)[..];
+		let path = &clean(&path)[..];
 		if !path.starts_with(&base) {
 			return Err(ErrorKind::HttpError403("Forbidden".into()).into());
 		}
 
+		// try both the exact path and the version with index appended (metadata too expensive)
+		if Self::try_send_cache(conn_data, &config, path.to_string(), &cache)? {
+			return Ok(());
+		} else if Self::try_send_cache(
+			conn_data,
+			config,
+			format!("{}{}", path, "/index.html"),
+			cache,
+		)? {
+			return Ok(());
+		}
+
+		// if neither found, we have to try to read the file
 		let md = match metadata(path) {
 			Ok(md) => md,
 			Err(e) => {
-				debug!("metadata generated error: {}", e);
+				debug!("metadata generated error: {}", e)?;
 				return Err(ErrorKind::HttpError404("Not found".into()).into());
 			}
 		};
@@ -633,7 +657,7 @@ impl HttpServer {
 			let md = match metadata(path.clone()) {
 				Ok(md) => md,
 				Err(e) => {
-					debug!("metadata generated error: {}", e);
+					debug!("metadata generated error: {}", e)?;
 					return Err(ErrorKind::HttpError404("Not found".into()).into());
 				}
 			};
@@ -642,43 +666,41 @@ impl HttpServer {
 			(path.to_string(), md)
 		};
 
-		debug!("file path = {}", path)?;
-
-		Self::process_cache(conn_data, config, path, md, cache)?;
+		Self::load_cache(path, conn_data.clone(), config.clone(), md, cache.clone())?;
 
 		Ok(())
 	}
 
-	fn process_cache(
-		conn_data: ConnectionData,
+	fn try_send_cache(
+		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		path: String,
-		md: Metadata,
 		cache: &Arc<RwLock<HttpCache>>,
-	) -> Result<(), Error> {
+	) -> Result<bool, Error> {
 		let found = {
 			let cache = lockr!(cache)?;
 			let chunk = cache.get_file_chunk(&path, 0);
 			match chunk {
 				Ok(chunk) => match chunk {
 					Some(chunk) => {
-						Self::send_headers(conn_data.clone(), config, chunk.len().try_into()?)?;
-						conn_data.write(chunk)?;
+						Self::send_headers(
+							&conn_data,
+							config,
+							chunk.len().try_into()?,
+							Some(chunk),
+						)?;
 						true
 					}
 					None => false,
 				},
 				Err(e) => {
-					error!("process_cache generated error: {}", e);
+					error!("try_send_cache generated error: {}", e)?;
 					false
 				}
 			}
 		};
 
-		if !found {
-			Self::load_cache(path, conn_data, config.clone(), md, cache.clone())?;
-		}
-		Ok(())
+		Ok(found)
 	}
 
 	fn load_cache(
@@ -691,7 +713,7 @@ impl HttpServer {
 		std::thread::spawn(move || -> Result<(), Error> {
 			let mut in_buf: [u8; 10240] = [0u8; 10240];
 			let mut file = File::open(path.clone())?;
-			Self::send_headers(conn_data.clone(), &config, md.len())?;
+			Self::send_headers(&conn_data, &config, md.len(), None)?;
 
 			loop {
 				let len = file.read(&mut in_buf)?;
@@ -702,7 +724,6 @@ impl HttpServer {
 				}
 				conn_data.write(nslice)?;
 
-				warn!("read {} bytes", len);
 				if len <= 0 {
 					break;
 				}
@@ -713,7 +734,12 @@ impl HttpServer {
 		Ok(())
 	}
 
-	fn send_headers(conn_data: ConnectionData, config: &HttpConfig, len: u64) -> Result<(), Error> {
+	fn send_headers(
+		conn_data: &ConnectionData,
+		_config: &HttpConfig,
+		len: u64,
+		chunk: Option<&[u8]>,
+	) -> Result<(), Error> {
 		let response = HTTP_OK_200_HEADERS
 			.replace("%1%", "nioruntime httpd/0.0.3-beta.1")
 			.replace("%2%", "Wed, 09 Mar 2022 22:03:11 GMT")
@@ -721,7 +747,13 @@ impl HttpServer {
 			.replace("%4%", "Keep-alive")
 			.replace("%5%", &len.to_string());
 
-		conn_data.write(response.as_bytes())?;
+		let mut response = response.as_bytes().to_vec();
+		match chunk {
+			Some(chunk) => response.append(&mut chunk.to_vec()),
+			None => {}
+		}
+
+		conn_data.write(&response)?;
 		Ok(())
 	}
 
