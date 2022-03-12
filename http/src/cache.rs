@@ -20,7 +20,7 @@ pub struct HttpCache {
 }
 
 impl HttpCache {
-	pub fn new() -> Self {
+	pub fn new(_max_entries: u64, _max_chunks: u64) -> Self {
 		Self {
 			map: HashMap::new(),
 		}

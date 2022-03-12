@@ -210,6 +210,8 @@ pub enum ErrorKind {
 	/// HttpError404
 	#[fail(display = "HttpError 404: {}", _0)]
 	HttpError404(String),
+	#[fail(display = "No more chunks available")]
+	NoMoreChunks,
 }
 
 impl Display for Error {

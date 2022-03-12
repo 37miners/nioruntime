@@ -15,6 +15,7 @@
 mod hex;
 mod macros;
 pub mod ser;
+pub mod slabs;
 mod static_hash;
 pub mod threadpool;
 

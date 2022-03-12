@@ -427,6 +427,8 @@ pub struct HttpConfig {
 	pub listen_queue_size: usize,
 	pub max_header_size: usize,
 	pub root_dir: String,
+	pub max_cache_files: u64,
+	pub max_cache_chunks: u64,
 }
 
 impl Default for HttpConfig {
@@ -437,6 +439,8 @@ impl Default for HttpConfig {
 			listen_queue_size: 100,
 			max_header_size: 16 * 1024,
 			root_dir: "~/.niohttpd".to_string(),
+			max_cache_files: 1_000,
+			max_cache_chunks: 10_000,
 		}
 	}
 }
@@ -463,7 +467,10 @@ impl HttpServer {
 		let config1 = self.config.clone();
 		let config2 = self.config.clone();
 		let config3 = self.config.clone();
-		let cache = Arc::new(RwLock::new(HttpCache::new()));
+		let cache = Arc::new(RwLock::new(HttpCache::new(
+			self.config.max_cache_files,
+			self.config.max_cache_chunks,
+		)));
 
 		evh.set_on_read(move |conn_data, buf, ctx| {
 			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache)
@@ -837,7 +844,7 @@ mod test {
 
 		let mut http = HttpServer::new(config);
 		http.start()?;
-		std::thread::park();
+		//std::thread::park();
 
 		Ok(())
 	}
