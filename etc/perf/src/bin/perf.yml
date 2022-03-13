@@ -87,3 +87,14 @@ args:
          long: port
          takes_value: true
          value_name: port
+    - path:
+         help: the http path to request. Default is '/'.
+         short: w
+         long: path
+         takes_value: true
+         value_name: path
+    - show_response:
+         help: show the response of each request in the log (stdin).
+         short: a
+         long: show_response
+         takes_value: false

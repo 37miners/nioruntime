@@ -479,6 +479,14 @@ fn main() -> Result<(), Error> {
 			false => None,
 		};
 
+		let show_response = args.is_present("show_response");
+
+		let path = match args.is_present("path") {
+			true => args.value_of("path").unwrap(),
+			false => "/",
+		}
+		.to_string();
+
 		info!("Starting test client.")?;
 		info_no_ts!("{}", SEPARATOR)?;
 
@@ -494,8 +502,9 @@ fn main() -> Result<(), Error> {
 			for _ in 0..threads {
 				let histo = histo.clone();
 				let lat_sum_total_clone = lat_sum_total.clone();
+				let path = path.clone();
 				jhs.push(std::thread::spawn(move || {
-					match run_thread(count, min, max, histo, tls, port, http) {
+					match run_thread(count, min, max, histo, tls, port, http, show_response, path) {
 						Ok(lat_sum) => {
 							let mut lat_sum_total = lockw!(lat_sum_total_clone).unwrap();
 							*lat_sum_total += lat_sum;
@@ -598,12 +607,15 @@ fn run_thread(
 	tls: bool,
 	port: u16,
 	http: bool,
+	show_response: bool,
+	path: String,
 ) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	if http {
 		let request_string = format!(
-			"GET /perf.html HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",
+			"GET {} HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",
+			path,
 		);
 		wbuf = request_string.as_bytes().to_vec();
 		rbuf.resize(1000, 0u8);
@@ -693,6 +705,9 @@ fn run_thread(
 						let mut len: usize = str[0..end].parse()?;
 						len += i + 1;
 						if len_sum >= len {
+							if show_response {
+								debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+							}
 							do_break = true;
 							break;
 						}

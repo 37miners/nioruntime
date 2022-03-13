@@ -738,17 +738,15 @@ impl HttpServer {
 				if len > 0 {
 					let mut cache = lockw!(cache)?;
 
-					if len_sum == 0 && (*cache).exists(&path)? {
-						break;
+					if len_sum != 0 || !(*cache).exists(&path)? {
+						len_sum += len;
+						(*cache).append_file_chunk(
+							&path,
+							nslice,
+							Some(md_len),
+							len_sum as u64 == md_len,
+						)?;
 					}
-
-					len_sum += len;
-					(*cache).append_file_chunk(
-						&path,
-						nslice,
-						Some(md_len),
-						len_sum as u64 == md_len,
-					)?;
 				}
 				conn_data.write(nslice)?;
 
