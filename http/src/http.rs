@@ -694,13 +694,22 @@ impl HttpServer {
 			let cache = lockr!(cache)?;
 			let mut headers_sent = false;
 			let (iter, len) = cache.iter(&path)?;
+			let mut len_sum = 0;
 			for chunk in iter {
+				let chunk_len = chunk.len();
+				let wlen = if chunk_len + len_sum < len.try_into()? {
+					chunk_len as usize
+				} else {
+					len as usize - len_sum
+				};
 				if !headers_sent {
-					Self::send_headers(&conn_data, config, len, Some(&chunk[..]))?;
+					Self::send_headers(&conn_data, config, len, Some(&chunk[..wlen]))?;
 					headers_sent = true;
 				} else {
-					conn_data.write(&chunk)?;
+					conn_data.write(&chunk[..wlen])?;
 				}
+
+				len_sum += chunk_len;
 			}
 			headers_sent
 		};

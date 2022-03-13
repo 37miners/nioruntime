@@ -20,7 +20,7 @@ use nioruntime_util::{StaticHash, StaticHashConfig};
 use std::convert::TryInto;
 use std::io::Write;
 
-debug!();
+info!();
 
 #[derive(Debug)]
 pub struct Iter<'a> {
@@ -118,7 +118,6 @@ impl HttpCache {
 					),
 					_ => {
 						let len = u64::from_be_bytes(slab.data[8..16].try_into()?);
-						debug!("entry = {}", cur)?;
 						(Iter { cur, cache: self }, len)
 					}
 				}
