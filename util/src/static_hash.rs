@@ -39,7 +39,6 @@ impl<K: Serializable, V: Serializable> Iterator for Iter<'_, K, V> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.pos == u64::MAX {
-			self.pos = self.hash.last;
 			None
 		} else {
 			let offset = self
@@ -64,6 +63,32 @@ impl<K: Serializable, V: Serializable> Iterator for Iter<'_, K, V> {
 	}
 }
 
+#[derive(Clone)]
+pub struct IterRaw<'a, K: Serializable, V: Serializable> {
+	pos: u64,
+	hash: &'a StaticHash<K, V>,
+}
+
+impl<'a, K: Serializable, V: Serializable> Iterator for IterRaw<'a, K, V> {
+	type Item = (&'a [u8], &'a [u8]);
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.pos == u64::MAX {
+			None
+		} else {
+			let offset = self
+				.hash
+				.get_iterator_prev_offset(self.pos.try_into().ok()?);
+			let k_offset = self.hash.get_key_offset(self.pos.try_into().ok()?);
+			let v_offset = self.hash.get_value_offset(self.pos.try_into().ok()?);
+			self.pos = u64::from_be_bytes(self.hash.data[offset..offset + 8].try_into().ok()?);
+
+			let ret1 = &self.hash.data[k_offset..k_offset + self.hash.config.key_len];
+			let ret2 = &self.hash.data[v_offset..v_offset + self.hash.config.entry_len];
+			Some((ret1, ret2))
+		}
+	}
+}
+
 /// Statistics for this static hash
 #[derive(Debug, Clone)]
 pub struct StaticHashStats {
@@ -73,7 +98,7 @@ pub struct StaticHashStats {
 	/// The current number of elements in the [`StaticHash`].
 	pub cur_elements: usize,
 	/// The number of times the hash function has been called for this
-	/// static_hash.
+	/// static_hash for an insert or remove. (Note that get is not counted).
 	pub access_count: usize,
 	/// Total number of entries traversed by the [`StaticHash`].
 	pub total_node_reads: usize,
@@ -100,7 +125,7 @@ impl StaticHashStats {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 /// This is the configuration struct for [`StaticHash`]. See each field for details.
 pub struct StaticHashConfig {
 	/// The maximum number of entries that may be inserted into this [`StaticHash`].
@@ -323,7 +348,7 @@ impl Default for StaticHashConfig {
 ///     Ok(())
 /// }
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StaticHash<K: Serializable, V: Serializable> {
 	data: Vec<u8>,
 	config: StaticHashConfig,
@@ -382,6 +407,13 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		self.stats.cur_elements
 	}
 
+	pub fn iter_raw(&self) -> IterRaw<'_, K, V> {
+		IterRaw {
+			pos: self.last,
+			hash: &self,
+		}
+	}
+
 	pub fn iter(&self) -> Iter<'_, K, V> {
 		Iter {
 			pos: self.last,
@@ -408,7 +440,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 
 	/// get the value associated with this key. In this function, key must implement the
 	/// [`crate::ser::Serializable`] trait.
-	pub fn get(&mut self, key: &K) -> Option<V> {
+	pub fn get(&self, key: &K) -> Option<V> {
 		let mut key_buf = vec![];
 		serialize(&mut key_buf, key).ok()?;
 		Self::ensure_length(&mut key_buf, self.config.key_len);
@@ -429,7 +461,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 
 	/// Get the value associated with this key in raw format. In this function, the key is
 	/// pre-serialized by the caller.
-	pub fn get_raw(&mut self, key: &[u8]) -> Option<&[u8]> {
+	pub fn get_raw(&self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.config.key_len as usize {
 			return None;
 		}
@@ -450,9 +482,6 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 					let ret = &ret[start..end];
 					return Some(ret);
 				}
-			}
-			if count + 1 > self.stats.worst_case_visits {
-				self.stats.worst_case_visits = count + 1;
 			}
 		}
 		// not found
@@ -488,10 +517,12 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 			let error: Error = ErrorKind::BadValueLen(actual, expect).into();
 			return Err(error);
 		}
+		self.stats.access_count += 1;
 		let hash = self.get_hash(key);
 
 		for count in 0..self.config.max_entries {
 			let entry = (hash + count) % self.config.max_entries;
+			self.stats.total_node_reads += 1;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == EMPTY || ohb == DELETED {
 				let cur_elements = (self.stats.cur_elements + 1) as f64;
@@ -557,10 +588,12 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		if key.len() != self.config.key_len as usize {
 			return None;
 		}
+		self.stats.access_count += 1;
 		let hash = self.get_hash(key);
 
 		for count in 0..self.config.max_entries {
 			let entry = (hash + count) % self.config.max_entries;
+			self.stats.total_node_reads += 1;
 			let ohb = self.get_overhead_byte(entry);
 			if ohb == OCCUPIED {
 				if self.cmp_key(key, entry) {
@@ -661,8 +694,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		Ok(())
 	}
 
-	fn get_overhead_byte(&mut self, entry: usize) -> u8 {
-		self.stats.total_node_reads += 1;
+	fn get_overhead_byte(&self, entry: usize) -> u8 {
 		let offset = self.get_overhead_offset(entry);
 		self.data[offset]
 	}
@@ -672,8 +704,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		self.data[offset] = value;
 	}
 
-	fn get_hash(&mut self, key: &[u8]) -> usize {
-		self.stats.access_count += 1;
+	fn get_hash(&self, key: &[u8]) -> usize {
 		let mut hasher = DefaultHasher::new();
 		Key { data: key.to_vec() }.hash(&mut hasher);
 
@@ -682,7 +713,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		hasher_usize % self.config.max_entries
 	}
 
-	fn cmp_key(&mut self, key: &[u8], entry: usize) -> bool {
+	fn cmp_key(&self, key: &[u8], entry: usize) -> bool {
 		let len = key.len();
 		let offset = self.get_key_offset(entry);
 		for i in 0..len {

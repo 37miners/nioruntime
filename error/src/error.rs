@@ -189,6 +189,9 @@ pub enum ErrorKind {
 	/// UnexpectedEof error
 	#[fail(display = "UnexpectedEOF: {}", _0)]
 	UnexpectedEof(String),
+	/// IllegalArgument
+	#[fail(display = "IllegalArgument: {}", _0)]
+	IllegalArgument(String),
 	/// HttpError
 	#[fail(display = "HttpError: {}", _0)]
 	HttpError(String),
@@ -210,8 +213,8 @@ pub enum ErrorKind {
 	/// HttpError404
 	#[fail(display = "HttpError 404: {}", _0)]
 	HttpError404(String),
-	#[fail(display = "No more chunks available")]
-	NoMoreChunks,
+	#[fail(display = "No more slabs available")]
+	NoMoreSlabs,
 }
 
 impl Display for Error {

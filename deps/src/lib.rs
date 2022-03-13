@@ -64,6 +64,7 @@ pub use rustls;
 pub use rustls_pemfile;
 pub use serde;
 pub use serde_derive;
+pub use sha2;
 pub use signature;
 pub use subtle;
 pub use typenum;

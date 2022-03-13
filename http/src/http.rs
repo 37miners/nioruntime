@@ -427,8 +427,10 @@ pub struct HttpConfig {
 	pub listen_queue_size: usize,
 	pub max_header_size: usize,
 	pub root_dir: String,
-	pub max_cache_files: u64,
+	pub max_cache_files: usize,
 	pub max_cache_chunks: u64,
+	pub cache_chunk_size: u64,
+	pub max_load_factor: f64,
 }
 
 impl Default for HttpConfig {
@@ -441,6 +443,8 @@ impl Default for HttpConfig {
 			root_dir: "~/.niohttpd".to_string(),
 			max_cache_files: 1_000,
 			max_cache_chunks: 10_000,
+			cache_chunk_size: 1024,
+			max_load_factor: 0.9,
 		}
 	}
 }
@@ -470,7 +474,9 @@ impl HttpServer {
 		let cache = Arc::new(RwLock::new(HttpCache::new(
 			self.config.max_cache_files,
 			self.config.max_cache_chunks,
-		)));
+			self.config.cache_chunk_size,
+			self.config.max_load_factor,
+		)?));
 
 		evh.set_on_read(move |conn_data, buf, ctx| {
 			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache)
@@ -686,25 +692,17 @@ impl HttpServer {
 	) -> Result<bool, Error> {
 		let found = {
 			let cache = lockr!(cache)?;
-			let chunk = cache.get_file_chunk(&path, 0);
-			match chunk {
-				Ok(chunk) => match chunk {
-					Some(chunk) => {
-						Self::send_headers(
-							&conn_data,
-							config,
-							chunk.len().try_into()?,
-							Some(chunk),
-						)?;
-						true
-					}
-					None => false,
-				},
-				Err(e) => {
-					error!("try_send_cache generated error: {}", e)?;
-					false
+			let mut headers_sent = false;
+			let (iter, len) = cache.iter(&path)?;
+			for chunk in iter {
+				if !headers_sent {
+					Self::send_headers(&conn_data, config, len, Some(&chunk[..]))?;
+					headers_sent = true;
+				} else {
+					conn_data.write(&chunk)?;
 				}
 			}
+			headers_sent
 		};
 
 		Ok(found)
@@ -718,16 +716,30 @@ impl HttpServer {
 		cache: Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
 		std::thread::spawn(move || -> Result<(), Error> {
-			let mut in_buf: [u8; 10240] = [0u8; 10240];
+			let md_len = md.len();
+			let mut in_buf = vec![];
+			in_buf.resize(config.cache_chunk_size.try_into()?, 0u8);
 			let mut file = File::open(path.clone())?;
 			Self::send_headers(&conn_data, &config, md.len(), None)?;
 
+			let mut len_sum = 0;
 			loop {
 				let len = file.read(&mut in_buf)?;
 				let nslice = &in_buf[0..len];
 				if len > 0 {
 					let mut cache = lockw!(cache)?;
-					cache.set_file_chunk(path.clone(), 0, nslice.to_vec())?;
+
+					if len_sum == 0 && (*cache).exists(&path)? {
+						break;
+					}
+
+					len_sum += len;
+					(*cache).append_file_chunk(
+						&path,
+						nslice,
+						Some(md_len),
+						len_sum as u64 == md_len,
+					)?;
 				}
 				conn_data.write(nslice)?;
 
