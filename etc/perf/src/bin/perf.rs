@@ -402,7 +402,7 @@ fn main() -> Result<(), Error> {
 			})?;
 			evh.set_on_panic(move || Ok(()))?;
 
-			evh.set_on_read(move |conn_data, buf, _| {
+			evh.set_on_read(move |conn_data, buf, _, _| {
 				conn_data.write(buf)?;
 				Ok(())
 			})?;
@@ -699,17 +699,26 @@ fn run_thread(
 					{
 						// headers complete. find content-length
 						let str = std::str::from_utf8(&rbuf[0..i])?;
-						let index = str.find("Content-Length: ").unwrap();
-						let str = &str[index + 16..];
-						let end = str.find("\r").unwrap();
-						let mut len: usize = str[0..end].parse()?;
-						len += i + 1;
-						if len_sum >= len {
-							if show_response {
-								debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+						let index = str.find("Content-Length: ");
+						match index {
+							Some(index) => {
+								let str = &str[index + 16..];
+								let end = str.find("\r").unwrap();
+								let mut len: usize = str[0..end].parse()?;
+								len += i + 1;
+								if len_sum >= len {
+									if show_response {
+										debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+									}
+									do_break = true;
+									break;
+								}
 							}
-							do_break = true;
-							break;
+							None => {
+								if show_response {
+									debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+								}
+							}
 						}
 					}
 				}

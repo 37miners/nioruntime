@@ -100,9 +100,9 @@ impl HttpCache {
 		}
 	}
 
-	pub fn iter(&self, file: &String) -> Result<(Iter, u64), Error> {
+	pub fn iter(&self, file: &[u8]) -> Result<(Iter, u64), Error> {
 		let mut hasher = Sha256::new();
-		hasher.update(file.as_bytes());
+		hasher.update(file);
 		let key: [u8; 32] = hasher.finalize()[..].try_into()?;
 		Ok(match self.map.get_raw(&key) {
 			Some(entry) => {
@@ -134,7 +134,7 @@ impl HttpCache {
 
 	pub fn append_file_chunk(
 		&mut self,
-		file: &String,
+		file: &[u8],
 		value: &[u8],
 		len: Option<u64>,
 		complete: bool,
@@ -152,7 +152,7 @@ impl HttpCache {
 		}
 
 		let mut hasher = Sha256::new();
-		hasher.write(file.as_bytes())?;
+		hasher.write(file)?;
 		let key: [u8; 32] = hasher.finalize()[..].try_into()?;
 		if self.cur_slabs >= self.max_slabs || self.cur_entries >= self.max_entries {
 			self.free_oldest()?;
@@ -216,9 +216,9 @@ impl HttpCache {
 		Ok(())
 	}
 
-	pub fn exists(&self, file: &String) -> Result<bool, Error> {
+	pub fn exists(&self, file: &[u8]) -> Result<bool, Error> {
 		let mut hasher = Sha256::new();
-		hasher.update(file.as_bytes());
+		hasher.update(file);
 		let key: [u8; 32] = hasher.finalize()[..].try_into()?;
 		Ok(self.map.get_raw(&key).is_some())
 	}
@@ -276,8 +276,8 @@ mod test {
 	fn test_cache() -> Result<(), Error> {
 		debug!("calling new")?;
 		let mut cache = HttpCache::new(30, 5, 16, 0.99)?;
-		let file1 = "/abc.html".to_string();
-		let file2 = "/a/def.html".to_string();
+		let file1 = "/abc.html".as_bytes();
+		let file2 = "/a/def.html".as_bytes();
 
 		debug!("calling append")?;
 		cache.append_file_chunk(
@@ -327,9 +327,9 @@ mod test {
 	fn test_cache_remove_file_slabs() -> Result<(), Error> {
 		let mut cache = HttpCache::new(30, 3, 16, 0.99)?;
 
-		let file1 = "/abc.html".to_string();
-		let file2 = "/def.html".to_string();
-		let file3 = "/ghi.html".to_string();
+		let file1 = "/abc.html".as_bytes();
+		let file2 = "/def.html".as_bytes();
+		let file3 = "/ghi.html".as_bytes();
 
 		cache.append_file_chunk(
 			&file1,
@@ -412,9 +412,9 @@ mod test {
 	#[test]
 	fn test_cache_remove_file_hash() -> Result<(), Error> {
 		let mut cache = HttpCache::new(3, 10, 16, 0.99)?;
-		let file1 = "/abc.html".to_string();
-		let file2 = "/def.html".to_string();
-		let file3 = "/ghi.html".to_string();
+		let file1 = "/abc.html".as_bytes();
+		let file2 = "/def.html".as_bytes();
+		let file3 = "/ghi.html".as_bytes();
 
 		cache.append_file_chunk(&file1, &[200], Some(1), true)?;
 
@@ -448,7 +448,7 @@ mod test {
 	fn test_partial() -> Result<(), Error> {
 		let mut cache = HttpCache::new(3, 3, 16, 0.99)?;
 
-		let file1 = "/abc.html".to_string();
+		let file1 = "/abc.html".as_bytes();
 
 		cache.append_file_chunk(&file1, &[10], Some(1), true)?;
 
@@ -463,7 +463,7 @@ mod test {
 	#[test]
 	fn test_incomplete() -> Result<(), Error> {
 		let mut cache = HttpCache::new(10, 10, 16, 0.99)?;
-		let file1 = "/abc.html".to_string();
+		let file1 = "/abc.html".as_bytes();
 		cache.append_file_chunk(
 			&file1,
 			&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],

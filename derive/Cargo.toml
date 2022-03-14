@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime_derive"
-version = "0.0.3-beta1"
+version = "0.0.3-beta2"
 authors = ["37 Miners, LLC"]
 description = "proc-macros nioruntime"
 license = "Apache-2.0"

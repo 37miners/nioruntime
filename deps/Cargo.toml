@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime_deps"
-version = "0.0.3-beta1"
+version = "0.0.3-beta2"
 authors = ["37 Miners, LLC"]
 description = "dependencies for nioruntime"
 license = "Apache-2.0"

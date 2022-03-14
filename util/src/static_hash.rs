@@ -402,6 +402,11 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		Ok(ret)
 	}
 
+	/// Return the [`StaticHashConfig`] associated with this [`StaticHash`].
+	pub fn config(&self) -> &StaticHashConfig {
+		&self.config
+	}
+
 	/// Return the current size in number of elements of this static_hash
 	pub fn len(&self) -> usize {
 		self.stats.cur_elements
