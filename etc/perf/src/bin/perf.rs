@@ -290,7 +290,7 @@ fn print_alloc(first_used: i128) -> Result<(), Error> {
 	let mem_used = alloc - dealloc;
 	let change_from_start = mem_used - first_used;
 
-	info!(
+	trace!(
 		"alloc={},dealloc={},alloc_count={},dealloc_count={},mem_used={},delta_from_init={}{:.2}mb",
 		alloc,
 		dealloc,
@@ -376,7 +376,7 @@ fn main() -> Result<(), Error> {
 		if http {
 			let config = HttpConfig {
 				addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-				//eventhandler_config: evh_config,
+				threads,
 				..Default::default()
 			};
 

@@ -26,6 +26,7 @@ use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
 	ServerConnection,
 };
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
@@ -112,22 +113,6 @@ const _FLAG_IS_LISTENER: u8 = 0x1 << 0;
 const _FLAG_IS_SATURATING: u8 = 0x1 << 1;
 const _FLAG_IS_TLS_SERVER: u8 = 0x1 << 2;
 const _FLAG_IS_TLS_CLIENT: u8 = 0x1 << 3;
-
-pub struct ThreadContext {
-	pub user_map: Option<StaticHash<(), ()>>,
-	pub user_key_buf: Vec<u8>,
-	pub user_value_buf: Vec<u8>,
-}
-
-impl ThreadContext {
-	fn new() -> Self {
-		Self {
-			user_map: None,
-			user_key_buf: vec![],
-			user_value_buf: vec![],
-		}
-	}
-}
 
 #[derive(Debug)]
 pub struct ConnectionContext {
@@ -407,7 +392,12 @@ pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic> {
 
 impl<OnRead, OnAccept, OnClose, OnPanic> EventHandler<OnRead, OnAccept, OnClose, OnPanic>
 where
-	OnRead: Fn(ConnectionData, &[u8], &mut ConnectionContext, &mut ThreadContext) -> Result<(), Error>
+	OnRead: Fn(
+			ConnectionData,
+			&[u8],
+			&mut ConnectionContext,
+			&mut Box<dyn Any + Send + Sync>,
+		) -> Result<(), Error>
 		+ Send
 		+ 'static
 		+ Clone
@@ -1446,7 +1436,7 @@ where
 							connection_data,
 							&ctx.buffer[0..len.try_into()?],
 							connection_context,
-							&mut ctx.thread_context,
+							&mut ctx.user_data,
 						) {
 							Ok(_) => {}
 							Err(e) => {
@@ -2547,6 +2537,10 @@ impl GuardedData {
 	}
 }
 
+pub trait UserData {}
+struct EmptyUserData {}
+impl UserData for EmptyUserData {}
+
 struct Context {
 	guarded_data: Arc<RwLock<GuardedData>>,
 	add_pending: Vec<EventConnectionInfo>,
@@ -2562,7 +2556,7 @@ struct Context {
 	counter: usize, // used for handling panics
 	saturating_handles: HashSet<Handle>,
 	cur_connections: Arc<RwLock<usize>>,
-	thread_context: ThreadContext,
+	user_data: Box<dyn Any + Send + Sync>,
 }
 
 impl Context {
@@ -2591,7 +2585,6 @@ impl Context {
 			accepted_connections: vec![],
 			nwrites: vec![],
 			input_events: vec![],
-
 			#[cfg(any(target_os = "linux"))]
 			selector: epoll_create1(EpollCreateFlags::empty())?,
 			#[cfg(any(
@@ -2608,7 +2601,7 @@ impl Context {
 			buffer,
 			saturating_handles: HashSet::new(),
 			cur_connections,
-			thread_context: ThreadContext::new(),
+			user_data: Box::new(0),
 		})
 	}
 }

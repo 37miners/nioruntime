@@ -493,6 +493,98 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		return None;
 	}
 
+	/*
+					if self.last == u64::MAX {
+							self.last = entry.try_into()?;
+							self.pos = self.last;
+					}
+
+					// set next entry to the current first
+					let offset = self.get_iterator_next_offset(entry);
+					let ebytes = self.first.to_be_bytes();
+					self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+					// set the prev pointer to u64::MAX (end of chain)
+					let offset = self.get_iterator_prev_offset(entry);
+					let ebytes = u64::MAX.to_be_bytes();
+					self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+					// update the prev pointer of the current first to point to
+					// the new entry
+					if self.first != u64::MAX {
+							let offset = self.get_iterator_prev_offset(self.first.try_into()?);
+							let ebytes = entry.to_be_bytes();
+							self.data[offset..offset + 8].clone_from_slice(&ebytes);
+					}
+
+					// set first to this new entry
+					self.first = entry.try_into()?;
+	*/
+
+	/// Bring an entry to the front of queue returned by the iterator. This is used by caches
+	/// since get is immutable and may not be called on every request.
+	pub fn bring_to_front(&mut self, key: &[u8]) -> Result<bool, Error> {
+		if key.len() != self.config.key_len as usize {
+			return Ok(false);
+		}
+
+		let hash = self.get_hash(key);
+
+		for count in 0..self.config.max_entries {
+			let n = hash + count;
+			let entry = n % self.config.max_entries;
+			let ohb = self.get_overhead_byte(entry);
+			if ohb == EMPTY {
+				return Ok(false);
+			} else if ohb == OCCUPIED {
+				if self.cmp_key(key, entry) {
+					let prev_offset = self.get_iterator_prev_offset(entry);
+					let next_offset = self.get_iterator_next_offset(entry);
+					let prev =
+						u64::from_be_bytes(self.data[prev_offset..prev_offset + 8].try_into()?);
+					let next =
+						u64::from_be_bytes(self.data[next_offset..next_offset + 8].try_into()?);
+
+					if prev != u64::MAX {
+						let offset = self.get_iterator_next_offset(prev.try_into()?);
+						let ebytes = next.to_be_bytes();
+						self.data[offset..offset + 8].clone_from_slice(&ebytes);
+					}
+
+					if next != u64::MAX {
+						let offset = self.get_iterator_prev_offset(next.try_into()?);
+						let ebytes = prev.to_be_bytes();
+						self.data[offset..offset + 8].clone_from_slice(&ebytes);
+					} else {
+						self.last = prev;
+					}
+
+					// set our next pointer to the current first (may be u64::MAX)
+					let offset = self.get_iterator_next_offset(entry);
+					let ebytes = self.first.to_be_bytes();
+					self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+					// set the prev pointer to u64::MAX (end of chain)
+					let offset = self.get_iterator_prev_offset(entry);
+					let ebytes = u64::MAX.to_be_bytes();
+					self.data[offset..offset + 8].clone_from_slice(&ebytes);
+
+					// update the prev pointer of the current first to point to the new entry
+					if self.first != u64::MAX {
+						let offset = self.get_iterator_prev_offset(self.first.try_into()?);
+						let ebytes = (entry as u64).to_be_bytes();
+						self.data[offset..offset + 8].clone_from_slice(&ebytes);
+					}
+
+					self.first = entry.try_into()?;
+					return Ok(true);
+				}
+			}
+		}
+
+		Ok(false)
+	}
+
 	/// Insert a value in the hashtable to be associated with the specified key.
 	/// In this function, both key and value must implement the
 	/// [`crate::ser::Serializable`] trait.
@@ -1473,6 +1565,81 @@ mod test {
 		sh.clear()?;
 
 		assert!(sh.insert_raw(&[3], &[3]).is_ok());
+
+		Ok(())
+	}
+
+	#[test]
+	fn bring_to_front() -> Result<(), Error> {
+		let mut sh: StaticHash<(), ()> = StaticHash::new(StaticHashConfig {
+			max_entries: 3,
+			key_len: 1,
+			entry_len: 1,
+			max_load_factor: 1.0,
+			..Default::default()
+		})?;
+
+		sh.insert_raw(&[0], &[0])?;
+		sh.insert_raw(&[1], &[1])?;
+		sh.insert_raw(&[2], &[2])?;
+
+		debug!("loop 1")?;
+		let mut i = 0;
+		for (k, v) in sh.iter_raw() {
+			debug!("k={:?},v={:?}", k, v)?;
+			assert_eq!(k[0], i);
+			assert_eq!(v[0], i);
+			i += 1;
+		}
+
+		debug!("loop 2")?;
+		sh.bring_to_front(&[1])?;
+		let mut i = 0;
+		for (k, v) in sh.iter_raw() {
+			debug!("k={:?},v={:?}", k, v)?;
+			if i == 0 {
+				assert_eq!(k[0], 0);
+			} else if i == 1 {
+				assert_eq!(k[0], 2);
+			} else if i == 2 {
+				assert_eq!(k[0], 1);
+			}
+			i += 1;
+		}
+
+		assert_eq!(i, 3);
+
+		debug!("loop 3")?;
+		sh.bring_to_front(&[0])?;
+		let mut i = 0;
+		for (k, v) in sh.iter_raw() {
+			debug!("k={:?},v={:?}", k, v)?;
+			if i == 0 {
+				assert_eq!(k[0], 2);
+			} else if i == 1 {
+				assert_eq!(k[0], 1);
+			} else if i == 2 {
+				assert_eq!(k[0], 0);
+			}
+			i += 1;
+		}
+
+		assert_eq!(i, 3);
+
+		debug!("loop 4")?;
+		sh.bring_to_front(&[0])?;
+		let mut i = 0;
+		for (k, v) in sh.iter_raw() {
+			debug!("k={:?},v={:?}", k, v)?;
+			if i == 0 {
+				assert_eq!(k[0], 2);
+			} else if i == 1 {
+				assert_eq!(k[0], 1);
+			} else if i == 2 {
+				assert_eq!(k[0], 0);
+			}
+			i += 1;
+		}
 
 		Ok(())
 	}

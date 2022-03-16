@@ -23,11 +23,12 @@ use nioruntime_deps::nix::sys::socket::{
 use nioruntime_deps::path_clean::clean;
 use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
-use nioruntime_evh::{ConnectionContext, ConnectionData, ThreadContext};
+use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EventHandlerConfig};
 use nioruntime_log::*;
 use nioruntime_util::{lockr, lockw};
 use nioruntime_util::{StaticHash, StaticHashConfig};
+use std::any::Any;
 use std::convert::TryInto;
 use std::fs::{metadata, File, Metadata};
 use std::io::Read;
@@ -39,7 +40,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use std::os::unix::prelude::RawFd;
 
@@ -176,6 +177,26 @@ fn bytes_eq(bytes1: &[u8], bytes2: &[u8]) -> bool {
 	}
 }
 
+struct ThreadContext {
+	header_map: Option<StaticHash<(), ()>>,
+	cache_hits: Option<StaticHash<(), ()>>,
+	key_buf: Vec<u8>,
+	value_buf: Vec<u8>,
+	instant: Instant,
+}
+
+impl ThreadContext {
+	fn new() -> Self {
+		Self {
+			header_map: None,
+			cache_hits: None,
+			key_buf: vec![],
+			value_buf: vec![],
+			instant: Instant::now(),
+		}
+	}
+}
+
 /// Currently just support GET/POST.
 #[derive(Debug)]
 pub enum HttpMethod {
@@ -197,7 +218,7 @@ pub struct HttpHeaders<'a> {
 	version: HttpVersion,
 	uri: &'a [u8],
 	query: &'a [u8],
-	user_map: &'a StaticHash<(), ()>,
+	header_map: &'a StaticHash<(), ()>,
 	len: usize,
 }
 
@@ -205,9 +226,7 @@ impl<'a> HttpHeaders<'a> {
 	fn new(
 		buffer: &'a [u8],
 		config: &HttpConfig,
-		user_map: &'a mut StaticHash<(), ()>,
-		user_key_buf: &mut Vec<u8>,
-		user_value_buf: &mut Vec<u8>,
+		thread_context: &'a mut ThreadContext,
 	) -> Result<Option<Self>, Error> {
 		let (method, offset) = match Self::parse_method(buffer, config)? {
 			Some((method, offset)) => (method, offset),
@@ -234,12 +253,14 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
+		let header_map = thread_context.header_map.as_mut().unwrap();
+
 		let len = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
-			user_map,
-			user_key_buf,
-			user_value_buf,
+			header_map,
+			&mut thread_context.key_buf,
+			&mut thread_context.value_buf,
 		)? {
 			Some(noffset) => noffset + offset + 2,
 			None => return Ok(None),
@@ -254,7 +275,7 @@ impl<'a> HttpHeaders<'a> {
 			version,
 			uri,
 			query,
-			user_map,
+			header_map,
 			len,
 		}))
 	}
@@ -281,11 +302,11 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn get_header_value(&self, name: String) -> Result<Option<String>, Error> {
 		let mut name_bytes = name.as_bytes().to_vec();
-		let key_len = self.user_map.config().key_len;
+		let key_len = self.header_map.config().key_len;
 		for _ in name_bytes.len()..key_len {
 			name_bytes.push(0);
 		}
-		match self.user_map.get_raw(&name_bytes) {
+		match self.header_map.get_raw(&name_bytes) {
 			Some(value) => {
 				let len = u32::from_be_bytes(value[0..4].try_into().unwrap()) as usize;
 				Ok(Some(std::str::from_utf8(&value[4..4 + len])?.to_string()))
@@ -296,7 +317,7 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn get_header_names(&self) -> Result<Vec<String>, Error> {
 		let mut ret = vec![];
-		for (header, _) in self.user_map.iter_raw() {
+		for (header, _) in self.header_map.iter_raw() {
 			let len = header.len();
 			let mut header_ret = vec![];
 			for i in 0..len {
@@ -426,9 +447,9 @@ impl<'a> HttpHeaders<'a> {
 	fn parse_headers(
 		buffer: &[u8],
 		config: &HttpConfig,
-		user_map: &mut StaticHash<(), ()>,
-		user_key_buf: &mut Vec<u8>,
-		user_value_buf: &mut Vec<u8>,
+		header_map: &mut StaticHash<(), ()>,
+		key_buf: &mut Vec<u8>,
+		value_buf: &mut Vec<u8>,
 	) -> Result<Option<usize>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
@@ -462,35 +483,35 @@ impl<'a> HttpHeaders<'a> {
 					return Err(ErrorKind::HttpError400("Bad request: 1".into()).into());
 				}
 
-				if key_offset >= user_key_buf.len() {
+				if key_offset >= key_buf.len() {
 					return Err(
 						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
 					);
 				}
 
-				user_key_buf[key_offset] = buffer[i];
+				key_buf[key_offset] = buffer[i];
 				key_offset += 1;
 			} else if proc_key {
 				i += 1; // skip over the empty space
 				proc_key = false;
 			} else if buffer[i] != '\r' as u8 && buffer[i] != '\n' as u8 {
-				if value_offset >= user_value_buf.len() {
+				if value_offset >= value_buf.len() {
 					return Err(
 						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
 					);
 				}
-				user_value_buf[value_offset] = buffer[i];
+				value_buf[value_offset] = buffer[i];
 				value_offset += 1;
 			} else {
-				user_value_buf[0..4].clone_from_slice(&(value_offset as u32).to_be_bytes());
+				value_buf[0..4].clone_from_slice(&(value_offset as u32).to_be_bytes());
 
-				user_map.insert_raw(&user_key_buf, &user_value_buf)?;
+				header_map.insert_raw(&key_buf, &value_buf)?;
 
 				for j in 0..key_offset {
-					user_key_buf[j] = 0;
+					key_buf[j] = 0;
 				}
 				for j in 0..value_offset {
-					user_value_buf[j] = 0;
+					value_buf[j] = 0;
 				}
 
 				i += 1;
@@ -524,6 +545,9 @@ pub struct HttpConfig {
 	pub cache_chunk_size: u64,
 	pub max_load_factor: f64,
 	pub server_name: Vec<u8>,
+	pub max_bring_to_front: usize,
+	pub process_cache_update: u128,
+	pub cache_recheck_fs_millis: u128,
 }
 
 impl Default for HttpConfig {
@@ -539,9 +563,12 @@ impl Default for HttpConfig {
 			root_dir: "~/.niohttpd".to_string().as_bytes().to_vec(),
 			max_cache_files: 1_000,
 			max_cache_chunks: 10_000,
+			max_bring_to_front: 1_000,
 			cache_chunk_size: 1024,
 			max_load_factor: 0.9,
 			server_name: format!("nioruntime httpd/{}", VERSION).as_bytes().to_vec(),
+			process_cache_update: 1_000,    // 1 second
+			cache_recheck_fs_millis: 3_000, // 3 seconds
 		}
 	}
 }
@@ -590,8 +617,8 @@ impl HttpServer {
 			self.config.max_load_factor,
 		)?));
 
-		evh.set_on_read(move |conn_data, buf, ctx, thread_ctx| {
-			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache, thread_ctx)
+		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
+			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache, user_data)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx| Self::process_on_accept(conn_data, ctx, &config2))?;
 		evh.set_on_close(move |conn_data, ctx| Self::process_on_close(conn_data, ctx, &config3))?;
@@ -631,7 +658,7 @@ impl HttpServer {
 		thread_context: &mut ThreadContext,
 		config: &HttpConfig,
 	) -> Result<(), Error> {
-		let needed = match &mut thread_context.user_map {
+		let needed = match &mut thread_context.header_map {
 			Some(_map) => false,
 			None => true,
 		};
@@ -641,18 +668,40 @@ impl HttpServer {
 				key_len: config.max_header_name_len,
 				entry_len: config.max_header_value_len,
 				max_entries: config.max_header_entries + 1,
-				max_load_factor: 0.999999,
+				max_load_factor: 1.0,
 				..Default::default()
 			};
-			thread_context.user_map = Some(StaticHash::new(c)?);
+			thread_context.header_map = Some(StaticHash::new(c)?);
 			thread_context
-				.user_key_buf
+				.key_buf
 				.resize(config.max_header_name_len, 0u8);
 			thread_context
-				.user_value_buf
+				.value_buf
 				.resize(config.max_header_value_len, 0u8);
+
+			let c = StaticHashConfig {
+				key_len: 32,
+				entry_len: 16,
+				max_entries: config.max_bring_to_front,
+				max_load_factor: 1.0,
+				..Default::default()
+			};
+
+			thread_context.cache_hits = Some(StaticHash::new(c)?);
+			thread_context.instant = Instant::now();
 		}
 
+		Ok(())
+	}
+
+	fn init_user_data(user_data: &mut Box<dyn Any + Send + Sync>) -> Result<(), Error> {
+		match user_data.downcast_ref::<ThreadContext>() {
+			Some(_value) => {}
+			None => {
+				let value = ThreadContext::new();
+				*user_data = Box::new(value);
+			}
+		}
 		Ok(())
 	}
 
@@ -662,8 +711,10 @@ impl HttpServer {
 		ctx: &mut ConnectionContext,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
-		thread_context: &mut ThreadContext,
+		user_data: &mut Box<dyn Any + Send + Sync>,
 	) -> Result<(), Error> {
+		Self::init_user_data(user_data)?;
+		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 		Self::init_thread_context(thread_context, config)?;
 
 		let buffer = ctx.get_buffer();
@@ -680,15 +731,7 @@ impl HttpServer {
 		if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
-				let amt = Self::process_buffer(
-					conn_data,
-					buffer,
-					config,
-					cache,
-					thread_context.user_map.as_mut().unwrap(),
-					&mut thread_context.user_key_buf,
-					&mut thread_context.user_value_buf,
-				)?;
+				let amt = Self::process_buffer(conn_data, buffer, config, cache, thread_context)?;
 				if amt == 0 {
 					break;
 				}
@@ -697,17 +740,14 @@ impl HttpServer {
 		} else {
 			let mut offset = 0;
 			loop {
+				let pbuf = &nbuf[offset..];
+				if pbuf.len() == 0 {
+					break;
+				}
+
 				// premptively try to process the incoming buffer without appending
 				// in many cases this will work and be faster
-				let amt = Self::process_buffer(
-					conn_data,
-					&nbuf[offset..],
-					config,
-					cache,
-					thread_context.user_map.as_mut().unwrap(),
-					&mut thread_context.user_key_buf,
-					&mut thread_context.user_value_buf,
-				)?;
+				let amt = Self::process_buffer(conn_data, pbuf, config, cache, thread_context)?;
 				if amt == 0 {
 					Self::append_buffer(&nbuf[offset..], buffer)?;
 					break;
@@ -724,12 +764,9 @@ impl HttpServer {
 		buffer: &[u8],
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
-		user_map: &mut StaticHash<(), ()>,
-		user_key_buf: &mut Vec<u8>,
-		user_value_buf: &mut Vec<u8>,
+		thread_context: &mut ThreadContext,
 	) -> Result<usize, Error> {
-		let headers = match HttpHeaders::new(buffer, config, user_map, user_key_buf, user_value_buf)
-		{
+		let headers = match HttpHeaders::new(buffer, config, thread_context) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -746,6 +783,7 @@ impl HttpServer {
 						conn_data.close()?;
 					}
 					_ => {
+						error!("Internal server error: {}", e)?;
 						conn_data.write(HTTP_ERROR_500)?;
 						conn_data.close()?;
 					}
@@ -755,10 +793,9 @@ impl HttpServer {
 			}
 		};
 
-		debug!("header = {:?}", headers)?;
-
-		let len = match headers {
+		let (len, key) = match headers {
 			Some(headers) => {
+				let mut key = None;
 				match Self::send_file(
 					&headers.uri,
 					conn_data,
@@ -766,7 +803,9 @@ impl HttpServer {
 					cache,
 					headers.get_version(),
 				) {
-					Ok(_) => {}
+					Ok(k) => {
+						key = k;
+					}
 					Err(e) => {
 						match e.kind() {
 							ErrorKind::HttpError404(_) => {
@@ -776,6 +815,7 @@ impl HttpServer {
 								conn_data.write(HTTP_ERROR_403)?;
 							}
 							_ => {
+								error!("Internal server error: {}", e)?;
 								conn_data.write(HTTP_ERROR_500)?;
 								conn_data.close()?;
 							}
@@ -787,14 +827,46 @@ impl HttpServer {
 						)?;
 					}
 				}
-				headers.len()
+				(headers.len(), key)
 			}
-			None => 0,
+			None => (0, None),
 		};
 
-		user_map.clear()?;
+		Self::update_thread_context(thread_context, key, config, cache)?;
 
 		Ok(len)
+	}
+
+	fn update_thread_context(
+		thread_context: &mut ThreadContext,
+		key: Option<[u8; 32]>,
+		config: &HttpConfig,
+		cache: &Arc<RwLock<HttpCache>>,
+	) -> Result<(), Error> {
+		match key {
+			Some(key) => {
+				let map = thread_context.cache_hits.as_mut().unwrap();
+				map.insert_raw(&key, &[0u8; 16])?;
+			}
+			None => {}
+		}
+
+		match thread_context.instant.elapsed().as_millis() > config.process_cache_update {
+			true => {
+				let map = thread_context.cache_hits.as_mut().unwrap();
+				let mut cache = lockw!(cache)?;
+				for (k, _v) in map.iter_raw() {
+					cache.bring_to_front(k.try_into()?)?;
+				}
+				map.clear()?;
+				thread_context.instant = Instant::now();
+			}
+			false => {}
+		}
+
+		thread_context.header_map.as_mut().unwrap().clear()?;
+
+		Ok(())
 	}
 
 	fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
@@ -876,7 +948,7 @@ impl HttpServer {
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 		http_version: &HttpVersion,
-	) -> Result<(), Error> {
+	) -> Result<Option<[u8; 32]>, Error> {
 		let now = SystemTime::now();
 
 		let mut path = config.root_dir.clone();
@@ -885,15 +957,22 @@ impl HttpServer {
 		Self::check_path(&path, &config.root_dir)?;
 
 		// try both the exact path and the version with index appended (metadata too expensive)
-		if Self::try_send_cache(conn_data, &config, &path, &cache, now, http_version)? {
-			return Ok(());
-		} else {
+		let (found, need_update, key) =
+			Self::try_send_cache(conn_data, &config, &path, &cache, now, http_version)?;
+		let need_update = if found && !need_update {
+			return Ok(Some(key));
+		} else if !found {
 			let mut path2 = path.clone();
 			path2.extend_from_slice("/index.html".as_bytes());
-			if Self::try_send_cache(conn_data, config, &path2, cache, now, http_version)? {
-				return Ok(());
+			let (found, need_update, key) =
+				Self::try_send_cache(conn_data, config, &path2, cache, now, http_version)?;
+			if found && !need_update {
+				return Ok(Some(key));
 			}
-		}
+			need_update
+		} else {
+			need_update
+		};
 
 		// if neither found, we have to try to read the file
 		let md = match metadata(std::str::from_utf8(&path)?) {
@@ -926,11 +1005,13 @@ impl HttpServer {
 			cache.clone(),
 			now,
 			http_version,
+			need_update,
 		)?;
 
-		Ok(())
+		Ok(None)
 	}
 
+	// found, need_update, key
 	fn try_send_cache(
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
@@ -938,39 +1019,79 @@ impl HttpServer {
 		cache: &Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
-	) -> Result<bool, Error> {
-		let found = {
+	) -> Result<(bool, bool, [u8; 32]), Error> {
+		let (key, update_lc) = {
 			let cache = lockr!(cache)?;
 			let mut headers_sent = false;
-			let (iter, len) = cache.iter(&path)?;
-			let mut len_sum = 0;
-			for chunk in iter {
-				let chunk_len = chunk.len();
-				let wlen = if chunk_len + len_sum < len.try_into()? {
-					chunk_len as usize
+			let (iter, len, key, last_check, last_modified) = cache.iter(&path)?;
+			if last_check == 0 && last_modified == 0 && len == 0 {
+				// not in the cache at all
+				return Ok((false, false, key));
+			}
+			let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
+			let (out_dated, update_lc) = if last_check != 0
+				&& now_millis.saturating_sub(last_check) > config.cache_recheck_fs_millis
+			{
+				let path_str = std::str::from_utf8(&path)?;
+				let md = metadata(&path_str)?;
+				let md_mod = md.modified()?;
+				let modified = md_mod.duration_since(UNIX_EPOCH)?.as_millis();
+				if modified == last_modified {
+					(false, Some(md_mod))
 				} else {
-					len as usize - len_sum
-				};
-				if !headers_sent {
-					Self::send_headers(
-						&conn_data,
-						config,
-						len,
-						Some(&chunk[..wlen]),
-						now,
-						http_version,
-					)?;
-					headers_sent = true;
-				} else {
-					conn_data.write(&chunk[..wlen])?;
+					(true, None)
+				}
+			} else {
+				(false, None)
+			};
+
+			if out_dated {
+				// it's found, but outdated
+				return Ok((true, true, key));
+			} else {
+				let mut len_sum = 0;
+				for chunk in iter {
+					let chunk_len = chunk.len();
+					let wlen = if chunk_len + len_sum < len.try_into()? {
+						chunk_len as usize
+					} else {
+						len as usize - len_sum
+					};
+					if !headers_sent {
+						Self::send_headers(
+							&conn_data,
+							config,
+							len,
+							Some(&chunk[..wlen]),
+							now,
+							http_version,
+						)?;
+						headers_sent = true;
+					} else {
+						conn_data.write(&chunk[..wlen])?;
+					}
+
+					len_sum += chunk_len;
+				}
+				if update_lc.is_none() {
+					// it's found, it doesn't need an update to last check
+					return Ok((true, false, key));
 				}
 
-				len_sum += chunk_len;
+				(key, update_lc)
 			}
-			headers_sent
 		};
 
-		Ok(found)
+		match update_lc {
+			Some(modified) => {
+				// update last_check value
+				let mut cache = lockw!(cache)?;
+				cache.update_timestamp(&path, now, modified)?;
+			}
+			None => {}
+		}
+
+		Ok((true, false, key))
 	}
 
 	fn load_cache(
@@ -981,6 +1102,7 @@ impl HttpServer {
 		cache: Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
+		need_update: bool,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		std::thread::spawn(move || -> Result<(), Error> {
@@ -995,9 +1117,13 @@ impl HttpServer {
 			loop {
 				let len = file.read(&mut in_buf)?;
 				let nslice = &in_buf[0..len];
-				if len > 0 {
+				if len > 0
+					&& md_len <= (config.max_cache_chunks * config.cache_chunk_size).try_into()?
+				{
 					let mut cache = lockw!(cache)?;
-
+					if need_update {
+						cache.remove(&path)?;
+					}
 					if len_sum != 0 || !(*cache).exists(&path)? {
 						len_sum += len;
 						(*cache).append_file_chunk(
@@ -1005,6 +1131,8 @@ impl HttpServer {
 							nslice,
 							Some(md_len),
 							len_sum as u64 == md_len,
+							now,
+							md.modified().unwrap_or(now),
 						)?;
 					}
 				}
