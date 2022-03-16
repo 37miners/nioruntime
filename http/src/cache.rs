@@ -95,7 +95,7 @@ impl HttpCache {
 					max_entries,
 					iterator: true,
 					key_len: 32,
-					entry_len: 40,
+					entry_len: 48,
 					max_load_factor,
 				})?,
 				slabs: SlabAllocator::new(max_slabs, chunk_size + 25),
@@ -108,7 +108,7 @@ impl HttpCache {
 		}
 	}
 
-	pub fn iter(&self, file: &[u8]) -> Result<(Iter, u64, [u8; 32], u128, u128), Error> {
+	pub fn iter(&self, file: &[u8]) -> Result<(Iter, u64, [u8; 32], u128, u128, [u8; 8]), Error> {
 		let mut hasher = Sha256::new();
 		hasher.update(file);
 		let key: [u8; 32] = hasher.finalize()[..].try_into()?;
@@ -117,6 +117,7 @@ impl HttpCache {
 				let cur = u64::from_be_bytes(entry[0..8].try_into()?);
 				let last_check = u128::from_be_bytes(entry[8..24].try_into()?);
 				let last_modified = u128::from_be_bytes(entry[24..40].try_into()?);
+				let etag: [u8; 8] = entry[40..48].try_into()?;
 				let slab = self.slabs.get(cur)?;
 				match slab.data[24] {
 					0 => (
@@ -128,6 +129,7 @@ impl HttpCache {
 						key,
 						last_check,
 						last_modified,
+						etag,
 					),
 					_ => {
 						let len = u64::from_be_bytes(slab.data[8..16].try_into()?);
@@ -137,6 +139,7 @@ impl HttpCache {
 							key,
 							last_check,
 							last_modified,
+							etag,
 						)
 					}
 				}
@@ -150,6 +153,7 @@ impl HttpCache {
 				key,
 				0,
 				0,
+				[0u8; 8],
 			),
 		})
 	}
@@ -159,6 +163,7 @@ impl HttpCache {
 		file: &[u8],
 		now: SystemTime,
 		last_modified: SystemTime,
+		etag: [u8; 8],
 	) -> Result<bool, Error> {
 		let mut hasher = Sha256::new();
 		hasher.update(file);
@@ -171,7 +176,7 @@ impl HttpCache {
 
 		match entry {
 			Some(entry) => {
-				let mut value = [0u8; 40];
+				let mut value = [0u8; 48];
 				value[0..8].clone_from_slice(&entry.to_be_bytes());
 				value[8..24]
 					.clone_from_slice(&now.duration_since(UNIX_EPOCH)?.as_millis().to_be_bytes());
@@ -181,6 +186,7 @@ impl HttpCache {
 						.as_millis()
 						.to_be_bytes(),
 				);
+				value[40..48].clone_from_slice(&etag);
 				self.map.insert_raw(&key, &value)?;
 				Ok(true)
 			}
@@ -193,6 +199,7 @@ impl HttpCache {
 		file: &[u8],
 		value: &[u8],
 		len: Option<u64>,
+		etag: Option<[u8; 8]>,
 		complete: bool,
 		now: SystemTime,
 		last_modified: SystemTime,
@@ -205,6 +212,13 @@ impl HttpCache {
 				"Invalid length '{}'. Chunk size is {}.",
 				value.len(),
 				self.chunk_size
+			))
+			.into());
+		}
+
+		if len.is_some() && etag.is_none() {
+			return Err(ErrorKind::IllegalArgument(format!(
+				"If len is specified, etag must also be specified"
 			))
 			.into());
 		}
@@ -266,7 +280,7 @@ impl HttpCache {
 		match new_entry {
 			Some(entry) => {
 				self.cur_entries += 1;
-				let mut value = [0u8; 40];
+				let mut value = [0u8; 48];
 				value[0..8].clone_from_slice(&entry.to_be_bytes());
 				value[8..24]
 					.clone_from_slice(&now.duration_since(UNIX_EPOCH)?.as_millis().to_be_bytes());
@@ -276,6 +290,7 @@ impl HttpCache {
 						.as_millis()
 						.to_be_bytes(),
 				);
+				value[40..48].clone_from_slice(&etag.unwrap());
 				self.map.insert_raw(&key, &value)?;
 			}
 			None => {}
@@ -352,6 +367,7 @@ impl HttpCache {
 #[cfg(test)]
 mod test {
 	use crate::cache::HttpCache;
+	use nioruntime_deps::rand;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
 	use std::time::{SystemTime, UNIX_EPOCH};
@@ -370,6 +386,7 @@ mod test {
 			&file1,
 			&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(16),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
@@ -379,6 +396,7 @@ mod test {
 			&file2,
 			&[1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(32),
+			Some(rand::random()),
 			false,
 			SystemTime::now(),
 			SystemTime::now(),
@@ -387,12 +405,13 @@ mod test {
 			&file2,
 			&[2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			None,
+			None,
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file1)?;
 		assert_eq!(len, 16);
 		assert_eq!(
 			iter.next().unwrap(),
@@ -400,7 +419,7 @@ mod test {
 		);
 		assert!(iter.next().is_none());
 
-		let (mut iter, len, _, _, _) = cache.iter(&file2)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file2)?;
 		assert_eq!(len, 32);
 		assert_eq!(
 			iter.next().unwrap(),
@@ -427,12 +446,13 @@ mod test {
 			&file1,
 			&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(16),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file1)?;
 		assert_eq!(len, 16);
 		assert_eq!(
 			iter.next().unwrap(),
@@ -445,6 +465,7 @@ mod test {
 			&file2,
 			&[1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(48),
+			Some(rand::random()),
 			false,
 			SystemTime::now(),
 			SystemTime::now(),
@@ -453,6 +474,7 @@ mod test {
 			&file2,
 			&[2, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(48),
+			Some(rand::random()),
 			false,
 			SystemTime::now(),
 			SystemTime::now(),
@@ -461,12 +483,13 @@ mod test {
 			&file2,
 			&[3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(48),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, len, _, _, _) = cache.iter(&file2)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file2)?;
 		assert_eq!(len, 48);
 		assert_eq!(
 			iter.next().unwrap(),
@@ -482,25 +505,26 @@ mod test {
 		);
 		assert!(iter.next().is_none());
 
-		let (mut iter, _len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, _len, _, _, _, _) = cache.iter(&file1)?;
 		assert!(iter.next().is_none());
 
 		cache.append_file_chunk(
 			&file3,
 			&[4, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(16),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, _len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, _len, _, _, _, _) = cache.iter(&file1)?;
 		assert!(iter.next().is_none());
 
-		let (mut iter, _len, _, _, _) = cache.iter(&file2)?;
+		let (mut iter, _len, _, _, _, _) = cache.iter(&file2)?;
 		assert!(iter.next().is_none());
 
-		let (mut iter, len, _, _, _) = cache.iter(&file3)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file3)?;
 		assert_eq!(len, 16);
 		assert_eq!(
 			iter.next().unwrap(),
@@ -522,6 +546,7 @@ mod test {
 			&file1,
 			&[200],
 			Some(1),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
@@ -531,16 +556,17 @@ mod test {
 			&file2,
 			&[201],
 			Some(1),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file1)?;
 		assert_eq!(len, 1);
 		assert_eq!(iter.next().unwrap()[0], 200);
 
-		let (mut iter, len, _, _, _) = cache.iter(&file2)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file2)?;
 		assert_eq!(len, 1);
 		assert_eq!(iter.next().unwrap()[0], 201);
 
@@ -548,19 +574,20 @@ mod test {
 			&file3,
 			&[202],
 			Some(1),
+			Some(rand::random()),
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, _len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, _len, _, _, _, _) = cache.iter(&file1)?;
 		assert!(iter.next().is_none());
 
-		let (mut iter, len, _, _, _) = cache.iter(&file2)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file2)?;
 		assert_eq!(len, 1);
 		assert_eq!(iter.next().unwrap()[0], 201);
 
-		let (mut iter, len, _, _, _) = cache.iter(&file3)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file3)?;
 		assert_eq!(len, 1);
 		assert_eq!(iter.next().unwrap()[0], 202);
 
@@ -576,30 +603,24 @@ mod test {
 		let now = SystemTime::now();
 		let millis = now.duration_since(UNIX_EPOCH)?.as_millis();
 
-		cache.append_file_chunk(
-			&file1,
-			&[10],
-			Some(1),
-			true,
-			SystemTime::now(),
-			SystemTime::now(),
-		)?;
+		let etag_in = rand::random();
+		cache.append_file_chunk(&file1, &[10], Some(1), Some(etag_in), true, now, now)?;
 
-		let (mut iter, len, _, last, _) = cache.iter(&file1)?;
+		let (mut iter, len, _, last, _, _) = cache.iter(&file1)?;
 		let next = iter.next().unwrap();
 		assert_eq!(next[0], 10);
 		assert_eq!(len, 1);
-
 		assert_eq!(last, millis);
 
 		std::thread::sleep(std::time::Duration::from_millis(10));
 
 		let now = SystemTime::now();
 		let millis = now.duration_since(UNIX_EPOCH)?.as_millis();
-		cache.update_timestamp(&file1, now, now)?;
-		let (_, _, _, last_check, last_modified) = cache.iter(&file1)?;
+		cache.update_timestamp(&file1, now, now, etag_in)?;
+		let (_, _, _, last_check, last_modified, etag_out) = cache.iter(&file1)?;
 		assert_eq!(last_check, millis);
 		assert_eq!(last_modified, millis);
+		assert_eq!(etag_in, etag_out);
 
 		Ok(())
 	}
@@ -612,24 +633,26 @@ mod test {
 			&file1,
 			&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			Some(32),
+			Some(rand::random()),
 			false,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, _len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, _len, _, _, _, _) = cache.iter(&file1)?;
 		assert!(iter.next().is_none());
 
 		cache.append_file_chunk(
 			&file1,
 			&[1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
 			None,
+			None,
 			true,
 			SystemTime::now(),
 			SystemTime::now(),
 		)?;
 
-		let (mut iter, len, _, _, _) = cache.iter(&file1)?;
+		let (mut iter, len, _, _, _, _) = cache.iter(&file1)?;
 		assert_eq!(len, 32);
 		assert_eq!(
 			iter.next().unwrap(),

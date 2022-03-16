@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use crate::cache::HttpCache;
-use nioruntime_deps::chrono::{DateTime, Datelike, Timelike, Utc, Weekday};
+use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
 use nioruntime_deps::dirs;
+use nioruntime_deps::hex;
 use nioruntime_deps::lazy_static::lazy_static;
 use nioruntime_deps::libc;
 use nioruntime_deps::nix::sys::socket::{
@@ -22,6 +23,7 @@ use nioruntime_deps::nix::sys::socket::{
 };
 use nioruntime_deps::path_clean::clean;
 use nioruntime_deps::rand;
+use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EventHandlerConfig};
@@ -45,17 +47,27 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::os::unix::prelude::RawFd;
 
 lazy_static! {
+	static ref HTTP_PARTIAL_206_HEADERS_VEC: Vec<Vec<u8>> = vec![
+		" 206 Partial Content\r\nServer: ".as_bytes().to_vec(),
+		"\"\r\nContent-Range: bytes ".as_bytes().to_vec(),
+		"-".as_bytes().to_vec(),
+		"/".as_bytes().to_vec(),
+		"\r\n\r\n".as_bytes().to_vec(),
+	];
 	static ref HTTP_OK_200_HEADERS_VEC: Vec<Vec<u8>> = vec![
 		" 200 OK\r\nServer: ".as_bytes().to_vec(),
 		"\r\nDate: ".as_bytes().to_vec(),
 		"\r\nLast-Modified: ".as_bytes().to_vec(),
 		"\r\nConnection: ".as_bytes().to_vec(),
 		"\r\nContent-Length: ".as_bytes().to_vec(),
-		"\r\nAccept-Ranges: bytes\r\n\r\n".as_bytes().to_vec(),
+		"\r\nETag: \"".as_bytes().to_vec(),
+		"\"\r\nAccept-Ranges: bytes\r\n\r\n".as_bytes().to_vec(),
 	];
 }
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+const RANGE_BYTES: &[u8] = "Range".as_bytes();
 
 const GET_BYTES: &[u8] = "GET ".as_bytes();
 const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -85,7 +97,7 @@ const HTTP10_BYTES: &[u8] = "HTTP/1.0".as_bytes();
 const HTTP11_BYTES: &[u8] = "HTTP/1.1".as_bytes();
 const HTTP20_BYTES: &[u8] = "HTTP/2.0".as_bytes();
 
-const KEEP_ALIVE_BYTES: &[u8] = "Keep-alive".as_bytes();
+const KEEP_ALIVE_BYTES: &[u8] = "keep-alive".as_bytes();
 const CLOSE_BYTES: &[u8] = "close".as_bytes();
 
 warn!();
@@ -220,6 +232,7 @@ pub struct HttpHeaders<'a> {
 	query: &'a [u8],
 	header_map: &'a StaticHash<(), ()>,
 	len: usize,
+	range: bool,
 }
 
 impl<'a> HttpHeaders<'a> {
@@ -255,14 +268,14 @@ impl<'a> HttpHeaders<'a> {
 
 		let header_map = thread_context.header_map.as_mut().unwrap();
 
-		let len = match Self::parse_headers(
+		let (len, range) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
 			header_map,
 			&mut thread_context.key_buf,
 			&mut thread_context.value_buf,
 		)? {
-			Some(noffset) => noffset + offset + 2,
+			Some((noffset, range)) => (noffset + offset + 2, range),
 			None => return Ok(None),
 		};
 
@@ -277,7 +290,12 @@ impl<'a> HttpHeaders<'a> {
 			query,
 			header_map,
 			len,
+			range,
 		}))
+	}
+
+	pub fn has_range(&self) -> bool {
+		self.range
 	}
 
 	pub fn len(&self) -> usize {
@@ -450,12 +468,13 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<usize>, Error> {
+	) -> Result<Option<(usize, bool)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
 		let mut key_offset = 0;
 		let mut value_offset = 4;
+		let mut range = false;
 
 		loop {
 			if i > config.max_header_size {
@@ -477,7 +496,7 @@ impl<'a> HttpHeaders<'a> {
 
 						if buffer[0] == '\r' as u8 && buffer[1] == '\n' as u8 {
 							// no headers
-							return Ok(Some(i + 2));
+							return Ok(Some((i + 2, range)));
 						}
 					}
 					return Err(ErrorKind::HttpError400("Bad request: 1".into()).into());
@@ -503,8 +522,12 @@ impl<'a> HttpHeaders<'a> {
 				value_buf[value_offset] = buffer[i];
 				value_offset += 1;
 			} else {
-				value_buf[0..4].clone_from_slice(&(value_offset as u32).to_be_bytes());
+				value_buf[0..4]
+					.clone_from_slice(&((value_offset.saturating_sub(4)) as u32).to_be_bytes());
 
+				if bytes_eq(&key_buf[0..key_offset], RANGE_BYTES) {
+					range = true;
+				}
 				header_map.insert_raw(&key_buf, &value_buf)?;
 
 				for j in 0..key_offset {
@@ -516,11 +539,13 @@ impl<'a> HttpHeaders<'a> {
 
 				i += 1;
 				proc_key = true;
+				key_offset = 0;
+				value_offset = 4;
 
 				if i + 2 < buffer_len && buffer[i + 1] == '\r' as u8 && buffer[i + 2] == '\n' as u8
 				{
 					// end of headers
-					return Ok(Some(i + 3));
+					return Ok(Some(((i + 3), range)));
 				}
 			}
 			i += 1;
@@ -795,6 +820,34 @@ impl HttpServer {
 
 		let (len, key) = match headers {
 			Some(headers) => {
+				let range: Option<(usize, usize)> = match headers.has_range() {
+					true => {
+						let range = headers.get_header_value("Range".to_string())?;
+						match range {
+							Some(range) => {
+								let start_index = range.find("=");
+								match start_index {
+									Some(start_index) => {
+										let dash_index = range.find("-");
+										match dash_index {
+											Some(dash_index) => {
+												let end = range.len();
+												let start_str =
+													&range[(start_index + 1)..dash_index];
+												let end_str = &range[(dash_index + 1)..end];
+												Some((start_str.parse()?, end_str.parse()?))
+											}
+											None => None,
+										}
+									}
+									None => None,
+								}
+							}
+							None => None,
+						}
+					}
+					false => None,
+				};
 				let mut key = None;
 				match Self::send_file(
 					&headers.uri,
@@ -802,6 +855,7 @@ impl HttpServer {
 					config,
 					cache,
 					headers.get_version(),
+					range,
 				) {
 					Ok(k) => {
 						key = k;
@@ -948,6 +1002,7 @@ impl HttpServer {
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 		http_version: &HttpVersion,
+		range: Option<(usize, usize)>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		let now = SystemTime::now();
 
@@ -958,14 +1013,14 @@ impl HttpServer {
 
 		// try both the exact path and the version with index appended (metadata too expensive)
 		let (found, need_update, key) =
-			Self::try_send_cache(conn_data, &config, &path, &cache, now, http_version)?;
+			Self::try_send_cache(conn_data, &config, &path, &cache, now, http_version, range)?;
 		let need_update = if found && !need_update {
 			return Ok(Some(key));
 		} else if !found {
 			let mut path2 = path.clone();
 			path2.extend_from_slice("/index.html".as_bytes());
 			let (found, need_update, key) =
-				Self::try_send_cache(conn_data, config, &path2, cache, now, http_version)?;
+				Self::try_send_cache(conn_data, config, &path2, cache, now, http_version, range)?;
 			if found && !need_update {
 				return Ok(Some(key));
 			}
@@ -1005,6 +1060,7 @@ impl HttpServer {
 			cache.clone(),
 			now,
 			http_version,
+			range,
 			need_update,
 		)?;
 
@@ -1019,11 +1075,12 @@ impl HttpServer {
 		cache: &Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
+		range: Option<(usize, usize)>,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
-		let (key, update_lc) = {
+		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
 			let mut headers_sent = false;
-			let (iter, len, key, last_check, last_modified) = cache.iter(&path)?;
+			let (iter, len, key, last_check, last_modified, etag) = cache.iter(&path)?;
 			if last_check == 0 && last_modified == 0 && len == 0 {
 				// not in the cache at all
 				return Ok((false, false, key));
@@ -1050,6 +1107,7 @@ impl HttpServer {
 				return Ok((true, true, key));
 			} else {
 				let mut len_sum = 0;
+				let now = now.duration_since(UNIX_EPOCH)?.as_millis();
 				for chunk in iter {
 					let chunk_len = chunk.len();
 					let wlen = if chunk_len + len_sum < len.try_into()? {
@@ -1064,11 +1122,14 @@ impl HttpServer {
 							len,
 							Some(&chunk[..wlen]),
 							now,
+							last_modified,
 							http_version,
+							etag,
+							range,
 						)?;
 						headers_sent = true;
 					} else {
-						conn_data.write(&chunk[..wlen])?;
+						Self::write_range(conn_data, &chunk[..wlen], range, len_sum)?;
 					}
 
 					len_sum += chunk_len;
@@ -1078,7 +1139,7 @@ impl HttpServer {
 					return Ok((true, false, key));
 				}
 
-				(key, update_lc)
+				(key, update_lc, etag)
 			}
 		};
 
@@ -1086,7 +1147,7 @@ impl HttpServer {
 			Some(modified) => {
 				// update last_check value
 				let mut cache = lockw!(cache)?;
-				cache.update_timestamp(&path, now, modified)?;
+				cache.update_timestamp(&path, now, modified, etag)?;
 			}
 			None => {}
 		}
@@ -1102,6 +1163,7 @@ impl HttpServer {
 		cache: Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
+		range: Option<(usize, usize)>,
 		need_update: bool,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
@@ -1110,10 +1172,29 @@ impl HttpServer {
 			let md_len = md.len();
 			let mut in_buf = vec![];
 			in_buf.resize(config.cache_chunk_size.try_into()?, 0u8);
+
 			let mut file = File::open(&path_str)?;
-			Self::send_headers(&conn_data, &config, md.len(), None, now, &http_version)?;
+			let mut sha256 = Sha256::new();
+			std::io::copy(&mut file, &mut sha256)?;
+			let hash = sha256.finalize();
+			let etag: [u8; 8] = hash[0..8].try_into()?;
+			let now_u128 = now.duration_since(UNIX_EPOCH)?.as_millis();
+
+			let mut file = File::open(&path_str)?;
+			Self::send_headers(
+				&conn_data,
+				&config,
+				md.len(),
+				None,
+				now_u128,
+				md.modified()?.duration_since(UNIX_EPOCH)?.as_millis(),
+				&http_version,
+				etag,
+				range,
+			)?;
 
 			let mut len_sum = 0;
+			let mut len_written = 0;
 			loop {
 				let len = file.read(&mut in_buf)?;
 				let nslice = &in_buf[0..len];
@@ -1130,13 +1211,16 @@ impl HttpServer {
 							&path,
 							nslice,
 							Some(md_len),
+							Some(etag),
 							len_sum as u64 == md_len,
 							now,
 							md.modified().unwrap_or(now),
 						)?;
 					}
 				}
-				conn_data.write(nslice)?;
+
+				Self::write_range(&conn_data, nslice, range, len_written)?;
+				len_written += nslice.len();
 
 				if len <= 0 {
 					break;
@@ -1148,48 +1232,82 @@ impl HttpServer {
 		Ok(())
 	}
 
+	fn write_range(
+		conn_data: &ConnectionData,
+		nslice: &[u8],
+		range: Option<(usize, usize)>,
+		len_written: usize,
+	) -> Result<(), Error> {
+		match range {
+			Some(range) => {
+				let nslice_len = nslice.len();
+				if !(len_written > (1 + range.1) || len_written + nslice_len < range.0) {
+					let mut start = 0;
+					let mut end = nslice_len;
+					if len_written + nslice_len >= (1 + range.1) {
+						end = nslice_len - ((len_written + nslice_len) - (1 + range.1));
+					}
+					if len_written < range.0 {
+						start = range.0 - len_written;
+					}
+					if start < end {
+						conn_data.write(&nslice[start..end])?;
+					}
+				}
+			}
+			None => {
+				conn_data.write(nslice)?;
+			}
+		}
+		Ok(())
+	}
+
 	fn extend_len(response: &mut Vec<u8>, len: u64) -> Result<(), Error> {
-		if len > 1_000_000_000_000 {
+		if len >= 1_000_000_000_000 {
 			return Err(ErrorKind::TooLargeRead("File too big".into()).into());
 		}
-		if len > 100_000_000_000 {
+		if len >= 100_000_000_000 {
 			response.push((((len % 1_000_000_000_000) / 100_000_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 10_000_000_000 {
+		if len >= 10_000_000_000 {
 			response.push((((len % 100_000_000_000) / 10_000_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 1_000_000_000 {
+		if len >= 1_000_000_000 {
 			response.push((((len % 10_000_000_000) / 1_000_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 100_000_000 {
+		if len >= 100_000_000 {
 			response.push((((len % 1_000_000_000) / 100_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 10_000_000 {
+		if len >= 10_000_000 {
 			response.push((((len % 100_000_000) / 10_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 1_000_000 {
+		if len >= 1_000_000 {
 			response.push((((len % 10_000_000) / 1_000_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 100_000 {
+		if len >= 100_000 {
 			response.push((((len % 1_000_000) / 100_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 10_000 {
+		if len >= 10_000 {
 			response.push((((len % 100_000) / 10_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 1_000 {
+		if len >= 1_000 {
 			response.push((((len % 10_000) / 1_000) as u8 + '0' as u8) as u8);
 		}
-		if len > 100 {
+		if len >= 100 {
 			response.push((((len % 1_000) / 100) as u8 + '0' as u8) as u8);
 		}
-		if len > 10 {
+		if len >= 10 {
 			response.push((((len % 100) / 10) as u8 + '0' as u8) as u8);
 		}
 		response.push(((len % 10) as u8 + '0' as u8) as u8);
 		Ok(())
 	}
 
-	fn extend_date(response: &mut Vec<u8>, date: SystemTime) -> Result<(), Error> {
+	fn extend_date(response: &mut Vec<u8>, date: u128) -> Result<(), Error> {
+		let date: DateTime<Utc> = DateTime::<Utc>::from_utc(
+			NaiveDateTime::from_timestamp((date / 1000).try_into()?, 0),
+			Utc,
+		);
 		let date: DateTime<Utc> = date.into();
 		match date.weekday() {
 			Weekday::Mon => {
@@ -1296,13 +1414,21 @@ impl HttpServer {
 		Ok(())
 	}
 
+	fn extend_etag(response: &mut Vec<u8>, etag: [u8; 8]) -> Result<(), Error> {
+		response.extend_from_slice(hex::encode(etag).as_bytes());
+		Ok(())
+	}
+
 	fn send_headers(
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		len: u64,
 		chunk: Option<&[u8]>,
-		now: SystemTime,
+		now: u128,
+		last_modified: u128,
 		http_version: &HttpVersion,
+		etag: [u8; 8],
+		range: Option<(usize, usize)>,
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -1310,22 +1436,64 @@ impl HttpServer {
 			HttpVersion::V11 => response.extend_from_slice(&HTTP11_BYTES),
 			HttpVersion::V20 => response.extend_from_slice(&HTTP11_BYTES),
 		}
-		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[0]);
+		match range {
+			Some(_range) => response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[0]),
+			None => response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[0]),
+		}
 		response.extend_from_slice(&config.server_name);
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[1]);
 		Self::extend_date(&mut response, now)?;
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[2]);
-		Self::extend_date(&mut response, now)?;
+		Self::extend_date(&mut response, last_modified)?;
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[3]);
 		match http_version {
 			HttpVersion::V10 | HttpVersion::Unknown => response.extend_from_slice(&CLOSE_BYTES),
 			HttpVersion::V11 | HttpVersion::V20 => response.extend_from_slice(&KEEP_ALIVE_BYTES),
 		}
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[4]);
-		Self::extend_len(&mut response, len)?;
+		match range {
+			Some(range) => {
+				let mut rlen = (1 + range.1).saturating_sub(range.0).try_into()?;
+				if rlen > len {
+					rlen = len;
+				}
+
+				Self::extend_len(&mut response, rlen)?
+			}
+			None => Self::extend_len(&mut response, len)?,
+		}
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[5]);
+		Self::extend_etag(&mut response, etag)?;
+		match range {
+			Some(range) => {
+				response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[1]);
+				Self::extend_len(&mut response, range.0.try_into()?)?;
+				response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[2]);
+				Self::extend_len(&mut response, range.1.try_into()?)?;
+				response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[3]);
+				Self::extend_len(&mut response, len)?;
+				response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[4]);
+			}
+			None => response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[6]),
+		}
+
 		match chunk {
-			Some(chunk) => response.extend_from_slice(&chunk),
+			Some(chunk) => match range {
+				Some(range) => {
+					let chunk_len = chunk.len();
+					let start = range.0;
+					let mut end = range.1 + 1;
+					if end > chunk_len {
+						end = chunk_len;
+					}
+					if start < end {
+						response.extend_from_slice(&chunk[start..end]);
+					}
+				}
+				None => {
+					response.extend_from_slice(&chunk);
+				}
+			},
 			None => {}
 		}
 
