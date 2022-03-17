@@ -31,9 +31,10 @@ use nioruntime_log::*;
 use nioruntime_util::{lockr, lockw};
 use nioruntime_util::{StaticHash, StaticHashConfig};
 use std::any::Any;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::{metadata, File, Metadata};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::mem;
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -68,6 +69,7 @@ lazy_static! {
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 const RANGE_BYTES: &[u8] = "Range".as_bytes();
+const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 
 const GET_BYTES: &[u8] = "GET ".as_bytes();
 const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -195,6 +197,7 @@ struct ThreadContext {
 	key_buf: Vec<u8>,
 	value_buf: Vec<u8>,
 	instant: Instant,
+	mime_map: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl ThreadContext {
@@ -205,6 +208,7 @@ impl ThreadContext {
 			key_buf: vec![],
 			value_buf: vec![],
 			instant: Instant::now(),
+			mime_map: HashMap::new(),
 		}
 	}
 }
@@ -239,7 +243,9 @@ impl<'a> HttpHeaders<'a> {
 	fn new(
 		buffer: &'a [u8],
 		config: &HttpConfig,
-		thread_context: &'a mut ThreadContext,
+		header_map: &'a mut StaticHash<(), ()>,
+		key_buf: &'a mut Vec<u8>,
+		value_buf: &'a mut Vec<u8>,
 	) -> Result<Option<Self>, Error> {
 		let (method, offset) = match Self::parse_method(buffer, config)? {
 			Some((method, offset)) => (method, offset),
@@ -266,14 +272,12 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
-		let header_map = thread_context.header_map.as_mut().unwrap();
-
 		let (len, range) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
 			header_map,
-			&mut thread_context.key_buf,
-			&mut thread_context.value_buf,
+			key_buf,
+			value_buf,
 		)? {
 			Some((noffset, range)) => (noffset + offset + 2, range),
 			None => return Ok(None),
@@ -573,6 +577,7 @@ pub struct HttpConfig {
 	pub max_bring_to_front: usize,
 	pub process_cache_update: u128,
 	pub cache_recheck_fs_millis: u128,
+	pub mime_map: Vec<(String, String)>,
 }
 
 impl Default for HttpConfig {
@@ -594,6 +599,174 @@ impl Default for HttpConfig {
 			server_name: format!("nioruntime httpd/{}", VERSION).as_bytes().to_vec(),
 			process_cache_update: 1_000,    // 1 second
 			cache_recheck_fs_millis: 3_000, // 3 seconds
+			mime_map: vec![
+				("html".to_string(), "text/html".to_string()),
+				("htm".to_string(), "text/html".to_string()),
+				("shtml".to_string(), "text/html".to_string()),
+				("txt".to_string(), "text/plain".to_string()),
+				("css".to_string(), "text/css".to_string()),
+				("xml".to_string(), "text/xml".to_string()),
+				("gif".to_string(), "image/gif".to_string()),
+				("jpeg".to_string(), "image/jpeg".to_string()),
+				("jpg".to_string(), "image/jpeg".to_string()),
+				("js".to_string(), "application/javascript".to_string()),
+				("atom".to_string(), "application/atom+xml".to_string()),
+				("rss".to_string(), "application/rss+xml".to_string()),
+				("mml".to_string(), "text/mathml".to_string()),
+				(
+					"jad".to_string(),
+					"text/vnd.sun.j2me.app-descriptor".to_string(),
+				),
+				("wml".to_string(), "text/vnd.wap.wml".to_string()),
+				("htc".to_string(), "text/x-component".to_string()),
+				("avif".to_string(), "image/avif".to_string()),
+				("png".to_string(), "image/png".to_string()),
+				("svg".to_string(), "image/svg+xml".to_string()),
+				("svgz".to_string(), "image/svg+xml".to_string()),
+				("tif".to_string(), "image/tiff".to_string()),
+				("tiff".to_string(), "image/tiff".to_string()),
+				("wbmp".to_string(), "image/vnd.wap.wbmp".to_string()),
+				("webp".to_string(), "image/webp".to_string()),
+				("ico".to_string(), "image/x-icon".to_string()),
+				("jng".to_string(), "image/x-jng".to_string()),
+				("bmp".to_string(), "image/x-ms-bmp".to_string()),
+				("woff".to_string(), "font/woff".to_string()),
+				("woff2".to_string(), "font/woff2".to_string()),
+				("jar".to_string(), "application/java-archive".to_string()),
+				("war".to_string(), "application/java-archive".to_string()),
+				("ear".to_string(), "application/java-archive".to_string()),
+				("json".to_string(), "application/json".to_string()),
+				("hqx".to_string(), "application/mac-binhex40".to_string()),
+				("doc".to_string(), "application/msword".to_string()),
+				("pdf".to_string(), "application/pdf".to_string()),
+				("ps".to_string(), "application/postscript".to_string()),
+				("eps".to_string(), "application/postscript".to_string()),
+				("ai".to_string(), "application/postscript".to_string()),
+				("rtf".to_string(), "application/rtf".to_string()),
+				(
+					"m3u8".to_string(),
+					"application/vnd.apple.mpegurl".to_string(),
+				),
+				(
+					"kml".to_string(),
+					"application/vnd.google-earth.kml+xml".to_string(),
+				),
+				(
+					"kmz".to_string(),
+					"application/vnd.google-earth.kmz".to_string(),
+				),
+				("xls".to_string(), "application/vnd.ms-excel".to_string()),
+				(
+					"eot".to_string(),
+					"application/vnd.ms-fontobject".to_string(),
+				),
+				(
+					"ppt".to_string(),
+					"application/vnd.ms-powerpoint".to_string(),
+				),
+				(
+					"odg".to_string(),
+					"application/vnd.oasis.opendocument.graphics".to_string(),
+				),
+				(
+					"odp".to_string(),
+					"application/vnd.oasis.opendocument.presentation".to_string(),
+				),
+				(
+					"ods".to_string(),
+					"application/vnd.oasis.opendocument.spreadsheet".to_string(),
+				),
+				(
+					"odt".to_string(),
+					"application/vnd.oasis.opendocument.text".to_string(),
+				),
+				(
+					"pptx".to_string(),
+					"application/vnd.openxmlformats-officedocument.presentationml.presentation"
+						.to_string(),
+				),
+				(
+					"xlsx".to_string(),
+					"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
+				),
+				(
+					"docx".to_string(),
+					"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+						.to_string(),
+				),
+				("wmlc".to_string(), "application/vnd.wap.wmlc".to_string()),
+				("wasm".to_string(), "application/wasm".to_string()),
+				("7z".to_string(), "application/x-7z-compressed".to_string()),
+				("cco".to_string(), "application/x-cocoa".to_string()),
+				(
+					"jardiff".to_string(),
+					"application/x-java-archive-diff".to_string(),
+				),
+				(
+					"jnlp".to_string(),
+					"application/x-java-jnlp-file".to_string(),
+				),
+				("run".to_string(), "application/x-makeself".to_string()),
+				("pl".to_string(), "application/x-perl".to_string()),
+				("pm".to_string(), "application/x-perl".to_string()),
+				("prc".to_string(), "application/x-pilot".to_string()),
+				("pbd".to_string(), "application/x-pilot".to_string()),
+				(
+					"rar".to_string(),
+					"application/x-rar-compressed".to_string(),
+				),
+				(
+					"rpm".to_string(),
+					"application/x-redhat-package-manager".to_string(),
+				),
+				("sea".to_string(), "application/x-sea".to_string()),
+				(
+					"swf".to_string(),
+					"application/x-shockwave-flash".to_string(),
+				),
+				("sit".to_string(), "application/x-stuffit".to_string()),
+				("tcl".to_string(), "application/x-tcl".to_string()),
+				("tk".to_string(), "application/x-tcl".to_string()),
+				("der".to_string(), "application/x-x509-ca-cert".to_string()),
+				("pem".to_string(), "application/x-x509-ca-cert".to_string()),
+				("crt".to_string(), "application/x-x509-ca-cert".to_string()),
+				("xpi".to_string(), "application/x-xpinstall".to_string()),
+				("xhtml".to_string(), "application/xhtml+xml".to_string()),
+				("xspf".to_string(), "application/xspf+xml".to_string()),
+				("zip".to_string(), "application/zip".to_string()),
+				("bin".to_string(), "application/octet-stream".to_string()),
+				("exe".to_string(), "application/octet-stream".to_string()),
+				("dll".to_string(), "application/octet-stream".to_string()),
+				("deb".to_string(), "application/octet-stream".to_string()),
+				("dmg".to_string(), "application/octet-stream".to_string()),
+				("iso".to_string(), "application/octet-stream".to_string()),
+				("img".to_string(), "application/octet-stream".to_string()),
+				("msi".to_string(), "application/octet-stream".to_string()),
+				("msp".to_string(), "application/octet-stream".to_string()),
+				("msm".to_string(), "application/octet-stream".to_string()),
+				("mid".to_string(), "audio/midi".to_string()),
+				("midi".to_string(), "audio/midi".to_string()),
+				("kar".to_string(), "audio/midi".to_string()),
+				("mp3".to_string(), "audio/mpeg".to_string()),
+				("ogg".to_string(), "audio/ogg".to_string()),
+				("m4a".to_string(), "audio/x-m4a".to_string()),
+				("ra".to_string(), "audio/x-realaudio".to_string()),
+				("3gpg".to_string(), "video/3gpp".to_string()),
+				("3gp".to_string(), "video/mp2t".to_string()),
+				("ts".to_string(), "video/mp2t".to_string()),
+				("mp4".to_string(), "video/mp4".to_string()),
+				("mpeg".to_string(), "video/mpeg".to_string()),
+				("mpg".to_string(), "video/mpeg".to_string()),
+				("mov".to_string(), "video/quicktime".to_string()),
+				("webm".to_string(), "video/webm".to_string()),
+				("flv".to_string(), "video/x-flv".to_string()),
+				("m4v".to_string(), "video/x-m4v".to_string()),
+				("mng".to_string(), "video/x-mng".to_string()),
+				("asx".to_string(), "video/x-ms-asf".to_string()),
+				("asf".to_string(), "video/x-ms-asf".to_string()),
+				("wmv".to_string(), "video/x-ms-wmv".to_string()),
+				("avi".to_string(), "video/x-msvideo".to_string()),
+			],
 		}
 	}
 }
@@ -719,11 +892,22 @@ impl HttpServer {
 		Ok(())
 	}
 
-	fn init_user_data(user_data: &mut Box<dyn Any + Send + Sync>) -> Result<(), Error> {
+	fn init_user_data(
+		user_data: &mut Box<dyn Any + Send + Sync>,
+		config: &HttpConfig,
+	) -> Result<(), Error> {
 		match user_data.downcast_ref::<ThreadContext>() {
 			Some(_value) => {}
 			None => {
-				let value = ThreadContext::new();
+				let mut value = ThreadContext::new();
+
+				for entry in &config.mime_map {
+					let (k, v) = entry;
+					value
+						.mime_map
+						.insert(k.as_bytes().to_vec(), v.as_bytes().to_vec());
+				}
+
 				*user_data = Box::new(value);
 			}
 		}
@@ -738,7 +922,7 @@ impl HttpServer {
 		cache: &Arc<RwLock<HttpCache>>,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 	) -> Result<(), Error> {
-		Self::init_user_data(user_data)?;
+		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 		Self::init_thread_context(thread_context, config)?;
 
@@ -791,7 +975,14 @@ impl HttpServer {
 		cache: &Arc<RwLock<HttpCache>>,
 		thread_context: &mut ThreadContext,
 	) -> Result<usize, Error> {
-		let headers = match HttpHeaders::new(buffer, config, thread_context) {
+		let mime_map = &thread_context.mime_map;
+		let headers = match HttpHeaders::new(
+			buffer,
+			config,
+			thread_context.header_map.as_mut().unwrap(),
+			&mut thread_context.key_buf,
+			&mut thread_context.value_buf,
+		) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -820,33 +1011,31 @@ impl HttpServer {
 
 		let (len, key) = match headers {
 			Some(headers) => {
-				let range: Option<(usize, usize)> = match headers.has_range() {
-					true => {
-						let range = headers.get_header_value("Range".to_string())?;
-						match range {
-							Some(range) => {
-								let start_index = range.find("=");
-								match start_index {
-									Some(start_index) => {
-										let dash_index = range.find("-");
-										match dash_index {
-											Some(dash_index) => {
-												let end = range.len();
-												let start_str =
-													&range[(start_index + 1)..dash_index];
-												let end_str = &range[(dash_index + 1)..end];
-												Some((start_str.parse()?, end_str.parse()?))
-											}
-											None => None,
+				let range: Option<(usize, usize)> = if headers.has_range() {
+					let range = headers.get_header_value("Range".to_string())?;
+					match range {
+						Some(range) => {
+							let start_index = range.find("=");
+							match start_index {
+								Some(start_index) => {
+									let dash_index = range.find("-");
+									match dash_index {
+										Some(dash_index) => {
+											let end = range.len();
+											let start_str = &range[(start_index + 1)..dash_index];
+											let end_str = &range[(dash_index + 1)..end];
+											Some((start_str.parse()?, end_str.parse()?))
 										}
+										None => None,
 									}
-									None => None,
 								}
+								None => None,
 							}
-							None => None,
 						}
+						None => None,
 					}
-					false => None,
+				} else {
+					None
 				};
 				let mut key = None;
 				match Self::send_file(
@@ -856,6 +1045,7 @@ impl HttpServer {
 					cache,
 					headers.get_version(),
 					range,
+					&mime_map,
 				) {
 					Ok(k) => {
 						key = k;
@@ -1003,6 +1193,7 @@ impl HttpServer {
 		cache: &Arc<RwLock<HttpCache>>,
 		http_version: &HttpVersion,
 		range: Option<(usize, usize)>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		let now = SystemTime::now();
 
@@ -1012,15 +1203,31 @@ impl HttpServer {
 		Self::check_path(&path, &config.root_dir)?;
 
 		// try both the exact path and the version with index appended (metadata too expensive)
-		let (found, need_update, key) =
-			Self::try_send_cache(conn_data, &config, &path, &cache, now, http_version, range)?;
+		let (found, need_update, key) = Self::try_send_cache(
+			conn_data,
+			&config,
+			&path,
+			&cache,
+			now,
+			http_version,
+			range,
+			mime_map,
+		)?;
 		let need_update = if found && !need_update {
 			return Ok(Some(key));
 		} else if !found {
 			let mut path2 = path.clone();
 			path2.extend_from_slice("/index.html".as_bytes());
-			let (found, need_update, key) =
-				Self::try_send_cache(conn_data, config, &path2, cache, now, http_version, range)?;
+			let (found, need_update, key) = Self::try_send_cache(
+				conn_data,
+				config,
+				&path2,
+				cache,
+				now,
+				http_version,
+				range,
+				mime_map,
+			)?;
 			if found && !need_update {
 				return Ok(Some(key));
 			}
@@ -1032,8 +1239,7 @@ impl HttpServer {
 		// if neither found, we have to try to read the file
 		let md = match metadata(std::str::from_utf8(&path)?) {
 			Ok(md) => md,
-			Err(e) => {
-				warn!("metadata generated error: {}", e)?;
+			Err(_e) => {
 				return Err(ErrorKind::HttpError404("Not found".into()).into());
 			}
 		};
@@ -1042,8 +1248,7 @@ impl HttpServer {
 			path.extend_from_slice("/index.html".as_bytes());
 			let md = match metadata(std::str::from_utf8(&path)?) {
 				Ok(md) => md,
-				Err(e) => {
-					warn!("metadata generated error: {}", e)?;
+				Err(_e) => {
 					return Err(ErrorKind::HttpError404("Not found".into()).into());
 				}
 			};
@@ -1062,6 +1267,7 @@ impl HttpServer {
 			http_version,
 			range,
 			need_update,
+			mime_map,
 		)?;
 
 		Ok(None)
@@ -1076,6 +1282,7 @@ impl HttpServer {
 		now: SystemTime,
 		http_version: &HttpVersion,
 		range: Option<(usize, usize)>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -1126,6 +1333,8 @@ impl HttpServer {
 							http_version,
 							etag,
 							range,
+							path,
+							mime_map,
 						)?;
 						headers_sent = true;
 					} else {
@@ -1165,17 +1374,24 @@ impl HttpServer {
 		http_version: &HttpVersion,
 		range: Option<(usize, usize)>,
 		need_update: bool,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
+		let mime_map = mime_map.clone();
 		std::thread::spawn(move || -> Result<(), Error> {
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
 			let mut in_buf = vec![];
 			in_buf.resize(config.cache_chunk_size.try_into()?, 0u8);
 
-			let mut file = File::open(&path_str)?;
 			let mut sha256 = Sha256::new();
-			std::io::copy(&mut file, &mut sha256)?;
+			sha256.write(
+				&md.modified()?
+					.duration_since(UNIX_EPOCH)?
+					.as_millis()
+					.to_be_bytes(),
+			)?;
+			sha256.write(&md.len().to_be_bytes())?;
 			let hash = sha256.finalize();
 			let etag: [u8; 8] = hash[0..8].try_into()?;
 			let now_u128 = now.duration_since(UNIX_EPOCH)?.as_millis();
@@ -1191,6 +1407,8 @@ impl HttpServer {
 				&http_version,
 				etag,
 				range,
+				&path,
+				&mime_map,
 			)?;
 
 			let mut len_sum = 0;
@@ -1226,7 +1444,6 @@ impl HttpServer {
 					break;
 				}
 			}
-
 			Ok(())
 		});
 		Ok(())
@@ -1419,6 +1636,41 @@ impl HttpServer {
 		Ok(())
 	}
 
+	fn extend_content_type(
+		response: &mut Vec<u8>,
+		path: &Vec<u8>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+	) -> Result<(), Error> {
+		let mut last_dot = None;
+		let mut itt = path.len() - 1;
+		loop {
+			if itt <= 0 {
+				break;
+			}
+			if path[itt] == '.' as u8 {
+				last_dot = Some(itt);
+				break;
+			}
+			itt -= 1;
+		}
+
+		match last_dot {
+			Some(last_dot) => {
+				let mime = &path[(1 + last_dot)..];
+				match mime_map.get(&mime.to_vec()) {
+					Some(ctype) => {
+						response.extend_from_slice(CONTENT_TYPE_BYTES);
+						response.extend_from_slice(&ctype);
+					}
+					None => {}
+				}
+			}
+			None => {}
+		}
+
+		Ok(())
+	}
+
 	fn send_headers(
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
@@ -1429,6 +1681,8 @@ impl HttpServer {
 		http_version: &HttpVersion,
 		etag: [u8; 8],
 		range: Option<(usize, usize)>,
+		path: &Vec<u8>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -1462,6 +1716,9 @@ impl HttpServer {
 			}
 			None => Self::extend_len(&mut response, len)?,
 		}
+
+		Self::extend_content_type(&mut response, path, mime_map)?;
+
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[5]);
 		Self::extend_etag(&mut response, etag)?;
 		match range {
