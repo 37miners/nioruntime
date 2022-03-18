@@ -23,11 +23,12 @@ use colored::Colorize;
 use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
-use nioruntime_http::{HttpConfig, HttpServer};
+use nioruntime_http::{HttpApiConfig, HttpConfig, HttpServer};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::mem;
@@ -51,6 +52,15 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket};
 use std::os::windows::prelude::RawSocket;
 
 debug!();
+
+const EMPTY: &[u8] = b"HTTP/1.1 200 Ok\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 7\r\n\
+Connection: keep-alive\r\n\
+\r\nEmpty\r\n";
 
 struct MonAllocator;
 
@@ -362,6 +372,11 @@ fn main() -> Result<(), Error> {
 			false => 1,
 		};
 
+		let sleep = match args.is_present("sleep") {
+			true => args.value_of("sleep").unwrap().parse()?,
+			false => 0,
+		};
+
 		let max_rwhandles = match args.is_present("max_rwhandles") {
 			true => args.value_of("max_rwhandles").unwrap().parse()?,
 			false => 1_000_000,
@@ -381,6 +396,32 @@ fn main() -> Result<(), Error> {
 			};
 
 			let mut http = HttpServer::new(config);
+			let mut mappings = HashSet::new();
+			let mut extensions = HashSet::new();
+			mappings.insert("/testapi".as_bytes().to_vec());
+			extensions.insert("testextension".as_bytes().to_vec());
+			http.set_api_config(HttpApiConfig {
+				mappings,
+				extensions,
+			})?;
+
+			http.set_api_handler(move |conn_data, _, ctx| {
+				let conn_data = conn_data.clone();
+				let mut ctx = ctx.clone();
+				ctx.set_async()?;
+
+				std::thread::spawn(move || -> Result<(), Error> {
+					if sleep > 0 {
+						std::thread::sleep(std::time::Duration::from_millis(sleep));
+					}
+
+					conn_data.write(EMPTY)?;
+					ctx.async_complete()?;
+					Ok(())
+				});
+
+				Ok(())
+			})?;
 			http.start()?;
 
 			std::thread::sleep(std::time::Duration::from_millis(3000));

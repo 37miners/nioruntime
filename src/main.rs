@@ -30,6 +30,7 @@ fn main() -> Result<(), Error> {
 	};
 
 	let mut http = HttpServer::new(config);
+	http.set_api_handler(move |_, _, _| Ok(()))?;
 	http.start()?;
 	std::thread::park();
 	Ok(())

@@ -117,11 +117,15 @@ const _FLAG_IS_TLS_CLIENT: u8 = 0x1 << 3;
 #[derive(Debug)]
 pub struct ConnectionContext {
 	pub buffer: Vec<u8>,
+	pub is_async_complete: bool,
 }
 
 impl ConnectionContext {
 	fn new() -> Self {
-		Self { buffer: vec![] }
+		Self {
+			buffer: vec![],
+			is_async_complete: false,
+		}
 	}
 
 	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
@@ -209,6 +213,42 @@ impl ConnectionData {
 
 	pub fn get_buffer(&mut self) -> &mut Vec<u8> {
 		self.connection_info.get_buffer()
+	}
+
+	pub fn async_complete(&self) -> Result<(), Error> {
+		{
+			let mut write_status = lockw!(self.connection_info.write_status)?;
+			if (*write_status).is_closed() {
+				return Err(ErrorKind::ConnectionClosedError(format!(
+					"connection {} already closed",
+					self.get_connection_id()
+				))
+				.into());
+			}
+			(*write_status).set_async_complete();
+		}
+
+		self.notify_selector_thread()?;
+
+		Ok(())
+	}
+
+	pub fn close(&self) -> Result<(), Error> {
+		{
+			let mut write_status = lockw!(self.connection_info.write_status)?;
+			if (*write_status).is_closed() {
+				return Err(ErrorKind::ConnectionClosedError(format!(
+					"connection {} already closed",
+					self.get_connection_id()
+				))
+				.into());
+			}
+			(*write_status).set_close_oncomplete();
+		}
+
+		self.notify_selector_thread()?;
+
+		Ok(())
 	}
 
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
@@ -331,30 +371,11 @@ impl ConnectionData {
 		}
 	}
 
-	pub fn close(&self) -> Result<(), Error> {
-		{
-			let mut write_status = lockw!(self.connection_info.write_status)?;
-			if (*write_status).is_closed() {
-				return Err(ErrorKind::ConnectionClosedError(format!(
-					"connection {} already closed",
-					self.get_connection_id()
-				))
-				.into());
-			}
-			(*write_status).set_close_oncomplete();
-		}
-
-		self.notify_selector_thread()?;
-
-		Ok(())
-	}
-
 	fn notify_selector_thread(&self) -> Result<(), Error> {
 		{
 			let mut guarded_data = lockw!(self.guarded_data)?;
 			guarded_data.write_queue.push(self.get_connection_id());
 		}
-
 		self.wakeup.wakeup()?;
 		Ok(())
 	}
@@ -675,7 +696,7 @@ where
 			&wakeup.wakeup_handle_read.to_be_bytes(),
 		)?;
 
-		ctx.input_events.push(Event {
+		ctx.input_events.insert(Event {
 			handle: wakeup.wakeup_handle_read,
 			etype: EventType::Read,
 		});
@@ -828,6 +849,7 @@ where
 				handle_hash,
 				wakeup,
 				context_map,
+				callbacks,
 			)?;
 			if stop {
 				return Ok(stop);
@@ -1027,8 +1049,7 @@ where
 		};
 
 		match x {
-			Some((id, handle)) => {
-				debug!("rem {},{} from maps", id, handle)?;
+			Some((id, _handle)) => {
 				Self::close_connection(
 					id,
 					ctx,
@@ -1071,6 +1092,18 @@ where
 					Some(connection_info) => match connection_info {
 						EventConnectionInfo::ReadWriteConnection(ref c) => {
 							{
+								ctx.input_events.remove(&Event {
+									handle,
+									etype: EventType::Read,
+								});
+								ctx.input_events.remove(&Event {
+									handle,
+									etype: EventType::Write,
+								});
+								ctx.input_events.remove(&Event {
+									handle,
+									etype: EventType::Accept,
+								});
 								ctx.saturating_handles.remove(&handle);
 								{
 									let mut write_status = lockw!(c.write_status)?;
@@ -1479,11 +1512,9 @@ where
 		let mut connection_info = match connection_handle_map.get_mut(&event.handle) {
 			Some(connection_info) => connection_info,
 			None => {
-				return Err(ErrorKind::HandleNotFoundError(format!(
-					"Connection handle was not found for event: {:?}",
-					event
-				))
-				.into())
+				// connection already disconnected.
+				debug!("Connection handle was not found for event: {:?}", event)?;
+				return Ok(());
 			}
 		};
 
@@ -1492,34 +1523,37 @@ where
 				let connection_id = connection_info.get_connection_id();
 				debug!("connection_info={:?}", connection_info)?;
 
-				let mut write_status = lockw!(connection_info.write_status)?;
-				loop {
-					if (*write_status).write_buffer.len() == 0 {
-						(*write_status).set_is_pending(false);
-						if (*write_status).close_oncomplete() {
-							to_remove.push(connection_id);
-						} else {
-							// add a read event so that only reads will trigger
-							ctx.input_events.push(Event {
-								handle: connection_info.get_handle(),
-								etype: EventType::Read,
-							});
-						}
-						break; // we're done
-					}
-					let (wr, _len) =
-						Self::write_loop(event.handle, &mut (*write_status).write_buffer)?;
+				{
+					let mut write_status = lockw!(connection_info.write_status)?;
 
-					match wr {
-						WriteResult::Ok => {}
-						WriteResult::Err => {
-							// error occurred. must close conn
-							to_remove.push(connection_id);
-							break;
+					loop {
+						if (*write_status).write_buffer.len() == 0 {
+							(*write_status).set_is_pending(false);
+							if (*write_status).close_oncomplete() {
+								to_remove.push(connection_id);
+							} else {
+								ctx.input_events.insert(Event {
+									handle: connection_info.get_handle(),
+									etype: EventType::Read,
+								});
+							}
+
+							break; // we're done
 						}
-						WriteResult::Block => {
-							// would block, need to exit write loop
-							break;
+						let (wr, _len) =
+							Self::write_loop(event.handle, &mut (*write_status).write_buffer)?;
+
+						match wr {
+							WriteResult::Ok => {}
+							WriteResult::Err => {
+								// error occurred. must close conn
+								to_remove.push(connection_id);
+								break;
+							}
+							WriteResult::Block => {
+								// would block, need to exit write loop
+								break;
+							}
 						}
 					}
 				}
@@ -1945,6 +1979,7 @@ where
 		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 		context_map: &mut HashMap<u128, ConnectionContext>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	) -> Result<bool, Error> {
 		let stop = {
 			let mut guarded_data = lockw!(ctx.guarded_data)?;
@@ -1972,7 +2007,15 @@ where
 			)?;
 			ctx.add_pending.clear();
 
-			Self::process_nwrites(ctx, connection_id_map, connection_handle_map, handle_hash)?;
+			Self::process_nwrites(
+				ctx,
+				connection_id_map,
+				connection_handle_map,
+				handle_hash,
+				wakeup,
+				context_map,
+				callbacks,
+			)?;
 			ctx.nwrites.clear();
 		}
 
@@ -1999,6 +2042,9 @@ where
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		_handle_hash: &mut StaticHash<(), ()>,
+		wakeup: &Wakeup,
+		context_map: &mut HashMap<u128, ConnectionContext>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
@@ -2011,8 +2057,51 @@ where
 					match connection_handle_map.get_mut(&handle) {
 						Some(conn_info) => match conn_info {
 							EventConnectionInfo::ReadWriteConnection(item) => {
-								debug!("pushing wbuf to item = {:?}", item)?;
-								ctx.input_events.push(Event {
+								let mut async_complete = false;
+								{
+									let mut write_status = lockw!(item.write_status)?;
+									if (*write_status).write_buffer.len() == 0
+										&& !(*write_status).is_closed() && (*write_status)
+										.async_complete()
+									{
+										async_complete = true;
+									}
+								}
+
+								if async_complete {
+									match callbacks.on_read.as_ref() {
+										Some(on_read) => {
+											let connection_data = ConnectionData::new(
+												item,
+												&ctx.guarded_data,
+												&wakeup,
+											);
+											let connection_context =
+												context_map.get_mut(&item.get_connection_id());
+											match connection_context {
+												Some(connection_context) => {
+													connection_context.is_async_complete = true;
+													match (on_read)(
+														connection_data,
+														&ctx.buffer[0..0],
+														connection_context,
+														&mut ctx.user_data,
+													) {
+														Ok(_) => {}
+														Err(e) => {
+															warn!("on_read Callback resulted in error: {}", e)?;
+														}
+													}
+													connection_context.is_async_complete = false;
+												}
+												None => warn!("connection context not found!")?,
+											}
+										}
+										None => warn!("no onread handler found")?,
+									}
+								}
+
+								ctx.input_events.insert(Event {
 									handle: item.handle,
 									etype: EventType::Write,
 								});
@@ -2058,7 +2147,7 @@ where
 					handle_info.to_bytes(&mut handle_info_bytes)?;
 					handle_hash.insert_raw(&item.handle.to_be_bytes(), &handle_info_bytes)?;
 
-					ctx.input_events.push(Event {
+					ctx.input_events.insert(Event {
 						handle: item.handle,
 						etype: EventType::Read,
 					});
@@ -2079,7 +2168,7 @@ where
 						item.handles[ctx.tid], ctx.tid
 					)?;
 
-					ctx.input_events.push(Event {
+					ctx.input_events.insert(Event {
 						handle: item.handles[ctx.tid],
 						etype: EventType::Accept,
 					});
@@ -2211,6 +2300,7 @@ pub struct WriteStatus {
 const FLAG_CLOSE_ONCOMPLETE: u8 = 0x1 << 0;
 const FLAG_IS_CLOSED: u8 = 0x1 << 1;
 const FLAG_IS_PENDING: u8 = 0x1 << 2;
+const FLAG_ASYNC_COMPLETE: u8 = 0x1 << 3;
 
 impl WriteStatus {
 	fn new() -> Self {
@@ -2218,6 +2308,17 @@ impl WriteStatus {
 			write_buffer: vec![],
 			flags: 0,
 		}
+	}
+
+	fn set_async_complete(&mut self) {
+		self.flags |= FLAG_ASYNC_COMPLETE;
+	}
+
+	fn async_complete(&mut self) -> bool {
+		let ret = (self.flags & FLAG_ASYNC_COMPLETE) != 0;
+		// now unset it
+		self.flags &= !FLAG_ASYNC_COMPLETE;
+		ret
 	}
 
 	fn set_close_oncomplete(&mut self) {
@@ -2546,7 +2647,7 @@ struct Context {
 	add_pending: Vec<EventConnectionInfo>,
 	accepted_connections: Vec<EventConnectionInfo>,
 	nwrites: Vec<u128>,
-	input_events: Vec<Event>,
+	input_events: HashSet<Event>,
 	selector: SelectorHandle,
 	tid: usize,
 	buffer: Vec<u8>,
@@ -2584,7 +2685,7 @@ impl Context {
 			add_pending: vec![],
 			accepted_connections: vec![],
 			nwrites: vec![],
-			input_events: vec![],
+			input_events: HashSet::new(),
 			#[cfg(any(target_os = "linux"))]
 			selector: epoll_create1(EpollCreateFlags::empty())?,
 			#[cfg(any(

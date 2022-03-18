@@ -21,7 +21,7 @@ use nioruntime_deps::libc;
 use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag, SockType,
 };
-use nioruntime_deps::path_clean::clean;
+use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
@@ -31,7 +31,7 @@ use nioruntime_log::*;
 use nioruntime_util::{lockr, lockw};
 use nioruntime_util::{StaticHash, StaticHashConfig};
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs::{metadata, File, Metadata};
 use std::io::{Read, Write};
@@ -41,6 +41,7 @@ use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -73,6 +74,13 @@ const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 
 const GET_BYTES: &[u8] = "GET ".as_bytes();
 const POST_BYTES: &[u8] = "POST ".as_bytes();
+const HEAD_BYTES: &[u8] = "HEAD ".as_bytes();
+const DELETE_BYTES: &[u8] = "DELETE ".as_bytes();
+const PUT_BYTES: &[u8] = "PUT ".as_bytes();
+const OPTIONS_BYTES: &[u8] = "OPTIONS ".as_bytes();
+const CONNECT_BYTES: &[u8] = "CONNECT ".as_bytes();
+const PATCH_BYTES: &[u8] = "PATCH ".as_bytes();
+const TRACE_BYTES: &[u8] = "TRACE ".as_bytes();
 
 const MON_BYTES: &[u8] = "Mon, ".as_bytes();
 const TUE_BYTES: &[u8] = "Tue, ".as_bytes();
@@ -136,6 +144,7 @@ const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
+Content-Length: 12\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
@@ -198,6 +207,7 @@ struct ThreadContext {
 	value_buf: Vec<u8>,
 	instant: Instant,
 	mime_map: HashMap<Vec<u8>, Vec<u8>>,
+	async_connections: Arc<RwLock<HashSet<u128>>>,
 }
 
 impl ThreadContext {
@@ -209,15 +219,22 @@ impl ThreadContext {
 			value_buf: vec![],
 			instant: Instant::now(),
 			mime_map: HashMap::new(),
+			async_connections: Arc::new(RwLock::new(HashSet::new())),
 		}
 	}
 }
 
-/// Currently just support GET/POST.
 #[derive(Debug)]
 pub enum HttpMethod {
 	Get,
 	Post,
+	Delete,
+	Head,
+	Put,
+	Options,
+	Connect,
+	Patch,
+	Trace,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +251,7 @@ pub struct HttpHeaders<'a> {
 	version: HttpVersion,
 	uri: &'a [u8],
 	query: &'a [u8],
+	extension: &'a [u8],
 	header_map: &'a StaticHash<(), ()>,
 	len: usize,
 	range: bool,
@@ -252,8 +270,8 @@ impl<'a> HttpHeaders<'a> {
 			None => return Ok(None),
 		};
 		trace!("method={:?},offset={}", method, offset)?;
-		let (uri, offset) = match Self::parse_uri(&buffer[offset..], config)? {
-			Some((uri, noffset)) => (uri, noffset + offset),
+		let (uri, extension, offset) = match Self::parse_uri(&buffer[offset..], config)? {
+			Some((uri, extension, noffset)) => (uri, extension, noffset + offset),
 			None => return Ok(None),
 		};
 		trace!("uri={:?},offset={}", uri, offset)?;
@@ -292,10 +310,15 @@ impl<'a> HttpHeaders<'a> {
 			version,
 			uri,
 			query,
+			extension,
 			header_map,
 			len,
 			range,
 		}))
+	}
+
+	pub fn extension(&self) -> &[u8] {
+		self.extension
 	}
 
 	pub fn has_range(&self) -> bool {
@@ -360,8 +383,26 @@ impl<'a> HttpHeaders<'a> {
 			Ok(Some((HttpMethod::Get, 4)))
 		} else if bytes_eq(&buffer[0..5], POST_BYTES) {
 			Ok(Some((HttpMethod::Post, 5)))
+		} else if bytes_eq(&buffer[0..5], HEAD_BYTES) {
+			Ok(Some((HttpMethod::Head, 5)))
+		} else if bytes_eq(&buffer[0..4], PUT_BYTES) {
+			Ok(Some((HttpMethod::Put, 4)))
 		} else {
-			Err(ErrorKind::HttpError405("Method not supported".into()).into())
+			if buffer.len() < OPTIONS_BYTES.len() {
+				Ok(None)
+			} else if bytes_eq(&buffer[0..8], OPTIONS_BYTES) {
+				Ok(Some((HttpMethod::Options, 8)))
+			} else if bytes_eq(&buffer[0..8], CONNECT_BYTES) {
+				Ok(Some((HttpMethod::Connect, 8)))
+			} else if bytes_eq(&buffer[0..7], DELETE_BYTES) {
+				Ok(Some((HttpMethod::Delete, 7)))
+			} else if bytes_eq(&buffer[0..6], PATCH_BYTES) {
+				Ok(Some((HttpMethod::Patch, 6)))
+			} else if bytes_eq(&buffer[0..6], TRACE_BYTES) {
+				Ok(Some((HttpMethod::Trace, 6)))
+			} else {
+				Err(ErrorKind::HttpError405("Method not supported".into()).into())
+			}
 		}
 	}
 
@@ -399,9 +440,10 @@ impl<'a> HttpHeaders<'a> {
 	fn parse_uri(
 		buffer: &'a [u8],
 		config: &HttpConfig,
-	) -> Result<Option<(&'a [u8], usize)>, Error> {
+	) -> Result<Option<(&'a [u8], &'a [u8], usize)>, Error> {
 		let buffer_len = buffer.len();
 		let mut i = 0;
+		let mut x = 0;
 		let mut qpresent = false;
 		loop {
 			if i > config.max_header_size {
@@ -411,6 +453,9 @@ impl<'a> HttpHeaders<'a> {
 			}
 			if i >= buffer_len {
 				return Ok(None);
+			}
+			if buffer[i] == '.' as u8 {
+				x = i;
 			}
 			if buffer[i] == '?' as u8
 				|| buffer[i] == ' ' as u8
@@ -428,7 +473,14 @@ impl<'a> HttpHeaders<'a> {
 		if i == 0 || i + 1 >= buffer_len {
 			Ok(None)
 		} else {
-			Ok(Some((&buffer[0..i], if qpresent { i + 1 } else { i })))
+			if x != 0 {
+				x += 1;
+			}
+			Ok(Some((
+				&buffer[0..i],
+				&buffer[x..i],
+				if qpresent { i + 1 } else { i },
+			)))
 		}
 	}
 
@@ -592,9 +644,9 @@ impl Default for HttpConfig {
 			max_header_entries: 1_000,
 			root_dir: "~/.niohttpd".to_string().as_bytes().to_vec(),
 			max_cache_files: 1_000,
-			max_cache_chunks: 10_000,
+			max_cache_chunks: 100,
 			max_bring_to_front: 1_000,
-			cache_chunk_size: 1024,
+			cache_chunk_size: 1024 * 1024,
 			max_load_factor: 0.9,
 			server_name: format!("nioruntime httpd/{}", VERSION).as_bytes().to_vec(),
 			process_cache_update: 1_000,    // 1 second
@@ -771,12 +823,62 @@ impl Default for HttpConfig {
 	}
 }
 
-pub struct HttpServer {
-	config: HttpConfig,
-	_listeners: Vec<TcpListener>,
+pub struct HttpApiConfig {
+	pub mappings: HashSet<Vec<u8>>,
+	pub extensions: HashSet<Vec<u8>>,
 }
 
-impl HttpServer {
+impl Default for HttpApiConfig {
+	fn default() -> Self {
+		Self {
+			mappings: HashSet::new(),
+			extensions: HashSet::new(),
+		}
+	}
+}
+
+#[derive(Clone)]
+pub struct ApiContext {
+	async_connections: Arc<RwLock<HashSet<u128>>>,
+	conn_data: ConnectionData,
+}
+
+impl ApiContext {
+	pub fn set_async(&mut self) -> Result<(), Error> {
+		let mut async_connections = lockw!(self.async_connections)?;
+		async_connections.insert(self.conn_data.get_connection_id());
+		Ok(())
+	}
+
+	pub fn async_complete(&mut self) -> Result<(), Error> {
+		self.conn_data.async_complete()?;
+		Ok(())
+	}
+
+	fn new(async_connections: Arc<RwLock<HashSet<u128>>>, conn_data: ConnectionData) -> Self {
+		Self {
+			async_connections,
+			conn_data,
+		}
+	}
+}
+
+pub struct HttpServer<ApiHandler> {
+	config: HttpConfig,
+	_listeners: Vec<TcpListener>,
+	api_config: Arc<RwLock<HttpApiConfig>>,
+	api_handler: Option<Pin<Box<ApiHandler>>>,
+}
+
+impl<ApiHandler> HttpServer<ApiHandler>
+where
+	ApiHandler: Fn(&ConnectionData, &HttpHeaders, &mut ApiContext) -> Result<(), Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
+{
 	pub fn new(mut config: HttpConfig) -> Self {
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
@@ -789,13 +891,15 @@ impl HttpServer {
 		let mut root_dir = std::str::from_utf8(&config.root_dir).unwrap().to_string();
 
 		root_dir = root_dir.replace("~", &home_dir);
-		root_dir = clean(&root_dir);
+		root_dir = path_clean(&root_dir);
 		root_dir = format!("{}/www", root_dir);
 		config.root_dir = root_dir.as_bytes().to_vec();
 
 		Self {
 			config,
 			_listeners: vec![],
+			api_config: Arc::new(RwLock::new(HttpApiConfig::default())),
+			api_handler: None,
 		}
 	}
 
@@ -815,8 +919,20 @@ impl HttpServer {
 			self.config.max_load_factor,
 		)?));
 
+		let api_config = self.api_config.clone();
+		let api_handler = self.api_handler.clone();
+
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache, user_data)
+			Self::process_on_read(
+				&conn_data,
+				buf,
+				ctx,
+				&config1,
+				&cache,
+				&api_config,
+				&api_handler,
+				user_data,
+			)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx| Self::process_on_accept(conn_data, ctx, &config2))?;
 		evh.set_on_close(move |conn_data, ctx| Self::process_on_close(conn_data, ctx, &config3))?;
@@ -849,6 +965,17 @@ impl HttpServer {
 	}
 
 	pub fn stop(&self) -> Result<(), Error> {
+		Ok(())
+	}
+
+	pub fn set_api_handler(&mut self, handler: ApiHandler) -> Result<(), Error> {
+		self.api_handler = Some(Box::pin(handler));
+		Ok(())
+	}
+
+	pub fn set_api_config(&mut self, api_config: HttpApiConfig) -> Result<(), Error> {
+		let mut self_config = lockw!(self.api_config)?;
+		*self_config = api_config;
 		Ok(())
 	}
 
@@ -914,37 +1041,78 @@ impl HttpServer {
 		Ok(())
 	}
 
+	fn process_async(
+		ctx: &mut ConnectionContext,
+		thread_context: &ThreadContext,
+		conn_data: &ConnectionData,
+	) -> Result<(), Error> {
+		if ctx.is_async_complete {
+			let mut async_connections = lockw!(thread_context.async_connections)?;
+			async_connections.remove(&conn_data.get_connection_id());
+		}
+		Ok(())
+	}
+
 	fn process_on_read(
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		ctx: &mut ConnectionContext,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
+		api_config: &Arc<RwLock<HttpApiConfig>>,
+		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 	) -> Result<(), Error> {
 		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
+		Self::process_async(ctx, thread_context, conn_data)?;
 		Self::init_thread_context(thread_context, config)?;
 
 		let buffer = ctx.get_buffer();
 		let buffer_len = buffer.len();
+		let connection_id = conn_data.get_connection_id();
 
 		debug!(
 			"on_read[{}] = '{:?}', acc_handle={:?}, buffer_len={}",
-			conn_data.get_connection_id(),
+			connection_id,
 			nbuf,
 			conn_data.get_accept_handle(),
 			buffer_len,
 		)?;
 
-		if buffer_len > 0 {
+		let is_async = {
+			let async_connections = lockr!(thread_context.async_connections)?;
+			async_connections.get(&connection_id).is_some()
+		};
+		if is_async {
+			// it's async just append to the buffer and return
+			Self::append_buffer(nbuf, buffer)?;
+		} else if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
-				let amt = Self::process_buffer(conn_data, buffer, config, cache, thread_context)?;
+				let amt = Self::process_buffer(
+					conn_data,
+					buffer,
+					config,
+					cache,
+					api_config,
+					thread_context,
+					api_handler,
+				)?;
 				if amt == 0 {
 					break;
 				}
 				buffer.drain(..amt);
+
+				// if were now async, we must break
+				{
+					if lockr!(thread_context.async_connections)?
+						.get(&connection_id)
+						.is_some()
+					{
+						break;
+					}
+				}
 			}
 		} else {
 			let mut offset = 0;
@@ -956,12 +1124,32 @@ impl HttpServer {
 
 				// premptively try to process the incoming buffer without appending
 				// in many cases this will work and be faster
-				let amt = Self::process_buffer(conn_data, pbuf, config, cache, thread_context)?;
+				let amt = Self::process_buffer(
+					conn_data,
+					pbuf,
+					config,
+					cache,
+					api_config,
+					thread_context,
+					api_handler,
+				)?;
 				if amt == 0 {
-					Self::append_buffer(&nbuf[offset..], buffer)?;
+					Self::append_buffer(&pbuf, buffer)?;
 					break;
 				}
+
 				offset += amt;
+
+				// if were now async, we must break
+				{
+					if lockr!(thread_context.async_connections)?
+						.get(&connection_id)
+						.is_some()
+					{
+						Self::append_buffer(&nbuf[offset..], buffer)?;
+						break;
+					}
+				}
 			}
 		}
 
@@ -973,9 +1161,12 @@ impl HttpServer {
 		buffer: &[u8],
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
+		api_config: &Arc<RwLock<HttpApiConfig>>,
 		thread_context: &mut ThreadContext,
+		api_handler: &Option<Pin<Box<ApiHandler>>>,
 	) -> Result<usize, Error> {
 		let mime_map = &thread_context.mime_map;
+		let async_connections = &thread_context.async_connections;
 		let headers = match HttpHeaders::new(
 			buffer,
 			config,
@@ -1038,37 +1229,66 @@ impl HttpServer {
 					None
 				};
 				let mut key = None;
-				match Self::send_file(
-					&headers.uri,
-					conn_data,
-					config,
-					cache,
-					headers.get_version(),
-					range,
-					&mime_map,
-				) {
-					Ok(k) => {
-						key = k;
-					}
-					Err(e) => {
-						match e.kind() {
-							ErrorKind::HttpError404(_) => {
-								conn_data.write(HTTP_ERROR_404)?;
+
+				// check for api mapping/extension
+				let was_api = {
+					let api_config = lockr!(api_config)?;
+					if api_config.mappings.get(headers.uri).is_some()
+						|| api_config.extensions.get(headers.extension()).is_some()
+					{
+						match api_handler {
+							Some(api_handler) => {
+								let mut ctx = ApiContext::new(
+									thread_context.async_connections.clone(),
+									conn_data.clone(),
+								);
+								(api_handler)(conn_data, &headers, &mut ctx)?;
+								true
 							}
-							ErrorKind::HttpError403(_) => {
-								conn_data.write(HTTP_ERROR_403)?;
-							}
-							_ => {
-								error!("Internal server error: {}", e)?;
-								conn_data.write(HTTP_ERROR_500)?;
-								conn_data.close()?;
+							None => {
+								error!("no api handler configured!")?;
+								false
 							}
 						}
-						debug!(
-							"sending file {} generated error: {}",
-							std::str::from_utf8(&headers.uri)?,
-							e
-						)?;
+					} else {
+						false
+					}
+				};
+
+				if !was_api {
+					match Self::send_file(
+						&headers.uri,
+						conn_data,
+						config,
+						cache,
+						headers.get_version(),
+						range,
+						&mime_map,
+						&async_connections,
+					) {
+						Ok(k) => {
+							key = k;
+						}
+						Err(e) => {
+							match e.kind() {
+								ErrorKind::HttpError404(_) => {
+									conn_data.write(HTTP_ERROR_404)?;
+								}
+								ErrorKind::HttpError403(_) => {
+									conn_data.write(HTTP_ERROR_403)?;
+								}
+								_ => {
+									error!("Internal server error: {}", e)?;
+									conn_data.write(HTTP_ERROR_500)?;
+									conn_data.close()?;
+								}
+							}
+							debug!(
+								"sending file {} generated error: {}",
+								std::str::from_utf8(&headers.uri)?,
+								e
+							)?;
+						}
 					}
 				}
 				(headers.len(), key)
@@ -1114,61 +1334,64 @@ impl HttpServer {
 	}
 
 	fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
-		let mut i = 0;
-		let mut prev = 0;
-		let mut prev_prev = 0;
-		let mut prev_prev_prev = 0;
-		let mut path_len = path.len();
-		loop {
-			if i >= path_len {
-				break;
-			}
-			if prev_prev_prev == '/' as u8 && prev_prev == '.' as u8 && prev == '.' as u8 {
-				// delete and remove prev dir
-				if i < 4 {
-					return Err(ErrorKind::HttpError403("Forbidden".into()).into());
-				}
-				let mut j = i - 4;
+		clean(path)
+		/*
+				let mut i = 0;
+				let mut prev = 0;
+				let mut prev_prev = 0;
+				let mut prev_prev_prev = 0;
+				let mut path_len = path.len();
 				loop {
-					if path[j] == '/' as u8 {
+					if i >= path_len {
 						break;
 					}
+					if prev_prev_prev == '/' as u8 && prev_prev == '.' as u8 && prev == '.' as u8 {
+						// delete and remove prev dir
+						if i < 4 {
+							return Err(ErrorKind::HttpError403("Forbidden".into()).into());
+						}
+						let mut j = i - 4;
+						loop {
+							if path[j] == '/' as u8 {
+								break;
+							}
 
-					j -= 1;
+							j -= 1;
+						}
+						path.drain(j..i);
+						path_len = path.len();
+						i = j;
+						prev = if i > 0 { path[i] } else { 0 };
+						prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
+						prev_prev_prev = if i as i32 - 2 >= 0 { path[i - 2] } else { 0 };
+						continue;
+					} else if prev_prev == '/' as u8 && prev == '.' as u8 {
+						if path[i] == '/' as u8 {
+							// delete
+							path.drain(i - 2..i);
+							path_len = path.len();
+							i -= 2;
+							prev = if i > 0 { path[i] } else { 0 };
+							prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
+							prev_prev_prev = if i as i32 - 2 > 0 { path[i - 2] } else { 0 };
+							continue;
+						}
+					}
+
+					prev_prev_prev = prev_prev;
+					prev_prev = prev;
+					prev = path[i];
+
+					i += 1;
 				}
-				path.drain(j..i);
+
 				path_len = path.len();
-				i = j;
-				prev = if i > 0 { path[i] } else { 0 };
-				prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
-				prev_prev_prev = if i as i32 - 2 >= 0 { path[i - 2] } else { 0 };
-				continue;
-			} else if prev_prev == '/' as u8 && prev == '.' as u8 {
-				if path[i] == '/' as u8 {
-					// delete
-					path.drain(i - 2..i);
-					path_len = path.len();
-					i -= 2;
-					prev = if i > 0 { path[i] } else { 0 };
-					prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
-					prev_prev_prev = if i as i32 - 2 > 0 { path[i - 2] } else { 0 };
-					continue;
+				if path_len > 0 && path[path_len - 1] == '/' as u8 {
+					path.drain(path_len - 1..);
 				}
-			}
 
-			prev_prev_prev = prev_prev;
-			prev_prev = prev;
-			prev = path[i];
-
-			i += 1;
-		}
-
-		path_len = path.len();
-		if path_len > 0 && path[path_len - 1] == '/' as u8 {
-			path.drain(path_len - 1..);
-		}
-
-		Ok(())
+				Ok(())
+		*/
 	}
 
 	fn check_path(path: &[u8], root_dir: &[u8]) -> Result<(), Error> {
@@ -1194,6 +1417,7 @@ impl HttpServer {
 		http_version: &HttpVersion,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		let now = SystemTime::now();
 
@@ -1268,6 +1492,7 @@ impl HttpServer {
 			range,
 			need_update,
 			mime_map,
+			async_connections,
 		)?;
 
 		Ok(None)
@@ -1375,10 +1600,17 @@ impl HttpServer {
 		range: Option<(usize, usize)>,
 		need_update: bool,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
+
+		let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone());
+
+		ctx.set_async()?;
+		let mut ctx = ctx.clone();
 		std::thread::spawn(move || -> Result<(), Error> {
+			//std::thread::sleep(std::time::Duration::from_secs(3));
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
 			let mut in_buf = vec![];
@@ -1444,6 +1676,8 @@ impl HttpServer {
 					break;
 				}
 			}
+
+			ctx.async_complete()?;
 			Ok(())
 		});
 		Ok(())
@@ -1825,9 +2059,67 @@ impl HttpServer {
 	}
 }
 
+fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
+	let mut i = 0;
+	let mut prev = 0;
+	let mut prev_prev = 0;
+	let mut prev_prev_prev = 0;
+	let mut path_len = path.len();
+	loop {
+		if i >= path_len {
+			break;
+		}
+		if prev_prev_prev == '/' as u8 && prev_prev == '.' as u8 && prev == '.' as u8 {
+			// delete and remove prev dir
+			if i < 4 {
+				return Err(ErrorKind::HttpError403("Forbidden".into()).into());
+			}
+			let mut j = i - 4;
+			loop {
+				if path[j] == '/' as u8 {
+					break;
+				}
+
+				j -= 1;
+			}
+			path.drain(j..i);
+			path_len = path.len();
+			i = j;
+			prev = if i > 0 { path[i] } else { 0 };
+			prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
+			prev_prev_prev = if i as i32 - 2 >= 0 { path[i - 2] } else { 0 };
+			continue;
+		} else if prev_prev == '/' as u8 && prev == '.' as u8 {
+			if path[i] == '/' as u8 {
+				// delete
+				path.drain(i - 2..i);
+				path_len = path.len();
+				i -= 2;
+				prev = if i > 0 { path[i] } else { 0 };
+				prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
+				prev_prev_prev = if i as i32 - 2 > 0 { path[i - 2] } else { 0 };
+				continue;
+			}
+		}
+
+		prev_prev_prev = prev_prev;
+		prev_prev = prev;
+		prev = path[i];
+
+		i += 1;
+	}
+
+	path_len = path.len();
+	if path_len > 0 && path[path_len - 1] == '/' as u8 {
+		path.drain(path_len - 1..);
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod test {
-	use crate::http::{HttpConfig, HttpServer};
+	use crate::http::{clean, HttpConfig, HttpServer};
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
 	use std::net::SocketAddr;
@@ -1846,6 +2138,7 @@ mod test {
 		};
 
 		let mut http = HttpServer::new(config);
+		http.set_api_handler(move |_, _, _| Ok(()))?;
 		http.start()?;
 		//std::thread::park();
 
@@ -1855,58 +2148,58 @@ mod test {
 	#[test]
 	fn test_clean() -> Result<(), Error> {
 		let mut path = "/abc".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc".as_bytes(), path);
 
 		let mut path = "/abc/".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc".as_bytes(), path);
 
 		let mut path = "/abc/def/../ok".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc/ok", std::str::from_utf8(&path)?);
 
 		let mut path = "/abc/def/./ok".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc/def/ok", std::str::from_utf8(&path)?);
 
 		let mut path = "/abc/def/./ok/./abc".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc/def/ok/abc", std::str::from_utf8(&path)?);
 
 		let mut path = "/abc/def/././ghi".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/abc/def/ghi", std::str::from_utf8(&path)?);
 
 		let mut path = "/x/abcdef/../ghi/def/abc/../xyz".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/x/ghi/def/xyz", std::str::from_utf8(&path)?);
 
 		let mut path = "/x/abcdef/../ghi/def/abc/../xyz/".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/x/ghi/def/xyz", std::str::from_utf8(&path)?);
 
 		let mut path = "/abcdefghji/../xyz".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/xyz", std::str::from_utf8(&path)?);
 
 		let mut path = "/../abcdefghji/../xyz".as_bytes().to_vec();
-		assert!(HttpServer::clean(&mut path).is_err());
+		assert!(clean(&mut path).is_err());
 
 		let mut path = "/abcdefghji/../xyz/../ok/1/2".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/ok/1/2", std::str::from_utf8(&path)?);
 
 		let mut path = "/abcdefghji/../xyz/.././ok/1/2".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/ok/1/2", std::str::from_utf8(&path)?);
 
 		let mut path = "/abcdefghji/../xyz/.././ok/1/2/".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/ok/1/2", std::str::from_utf8(&path)?);
 
 		let mut path = "/home/abc/.niohttpd/1".as_bytes().to_vec();
-		HttpServer::clean(&mut path)?;
+		clean(&mut path)?;
 		assert_eq!("/home/abc/.niohttpd/1", std::str::from_utf8(&path)?);
 
 		Ok(())

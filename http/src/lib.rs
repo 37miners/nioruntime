@@ -15,4 +15,4 @@
 mod cache;
 mod http;
 
-pub use crate::http::{HttpConfig, HttpHeaders, HttpServer};
+pub use crate::http::{HttpApiConfig, HttpConfig, HttpHeaders, HttpServer};

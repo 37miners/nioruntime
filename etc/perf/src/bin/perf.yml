@@ -98,3 +98,9 @@ args:
          short: a
          long: show_response
          takes_value: false
+    - sleep:
+          help: how long to sleep during API requests (for testing of async)
+          short: s
+          long: sleep
+          takes_value: true
+          value_name: sleep
