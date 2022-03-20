@@ -34,6 +34,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // unix specific
 #[cfg(unix)]
@@ -181,6 +182,7 @@ pub struct ConnectionData {
 	connection_info: ReadWriteConnection,
 	guarded_data: Arc<RwLock<GuardedData>>,
 	wakeup: Wakeup,
+	tid: usize,
 }
 
 impl ConnectionData {
@@ -188,6 +190,7 @@ impl ConnectionData {
 		connection_info: &ReadWriteConnection,
 		guarded_data: &Arc<RwLock<GuardedData>>,
 		wakeup: &Wakeup,
+		tid: usize,
 	) -> Self {
 		let connection_info = connection_info.clone();
 		let guarded_data = guarded_data.clone();
@@ -196,7 +199,12 @@ impl ConnectionData {
 			connection_info,
 			guarded_data,
 			wakeup,
+			tid,
 		}
+	}
+
+	pub fn tid(&self) -> usize {
+		self.tid
 	}
 
 	pub fn get_connection_id(&self) -> u128 {
@@ -387,6 +395,7 @@ pub struct EventHandlerConfig {
 	pub read_buffer_size: usize,
 	pub max_rwhandles: usize,
 	pub max_handle_numeric_value: usize,
+	pub housekeeper_frequency: isize,
 }
 
 impl Default for EventHandlerConfig {
@@ -395,23 +404,24 @@ impl Default for EventHandlerConfig {
 			threads: 6,
 			read_buffer_size: 10 * 1024,
 			max_rwhandles: 16_000,
-			// 100 fd overhead for unix, windows skips handles, but should not be used
-			// for high load
 			max_handle_numeric_value: 16_100,
+			housekeeper_frequency: 1_000,
 		}
 	}
 }
 
-pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic> {
+#[derive(Clone)]
+pub struct EventHandler<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep> {
 	config: EventHandlerConfig,
 	guarded_data: Arc<Vec<Arc<RwLock<GuardedData>>>>,
 	wakeup: Vec<Wakeup>,
-	callbacks: Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+	callbacks: Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 	stopped: Arc<RwLock<bool>>,
 	cur_connections: Arc<RwLock<usize>>,
 }
 
-impl<OnRead, OnAccept, OnClose, OnPanic> EventHandler<OnRead, OnAccept, OnClose, OnPanic>
+impl<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>
+	EventHandler<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>
 where
 	OnRead: Fn(
 			ConnectionData,
@@ -424,19 +434,33 @@ where
 		+ Clone
 		+ Sync
 		+ Unpin,
-	OnAccept: Fn(&ConnectionData, &mut ConnectionContext) -> Result<(), Error>
+	OnAccept: Fn(
+			&ConnectionData,
+			&mut ConnectionContext,
+			&mut Box<dyn Any + Send + Sync>,
+		) -> Result<(), Error>
 		+ Send
 		+ 'static
 		+ Clone
 		+ Sync
 		+ Unpin,
-	OnClose: Fn(&ConnectionData, &mut ConnectionContext) -> Result<(), Error>
+	OnClose: Fn(
+			&ConnectionData,
+			&mut ConnectionContext,
+			&mut Box<dyn Any + Send + Sync>,
+		) -> Result<(), Error>
 		+ Send
 		+ 'static
 		+ Clone
 		+ Sync
 		+ Unpin,
 	OnPanic: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnHousekeep: Fn(&mut Box<dyn Any + Send + Sync>) -> Result<(), Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
 {
 	pub fn new(config: EventHandlerConfig) -> Result<Self, Error> {
 		let mut guarded_data = vec![];
@@ -453,6 +477,7 @@ where
 				on_accept: None,
 				on_close: None,
 				on_panic: None,
+				on_housekeep: None,
 			},
 			guarded_data,
 			wakeup,
@@ -481,6 +506,11 @@ where
 		Ok(())
 	}
 
+	pub fn set_on_housekeep(&mut self, on_housekeep: OnHousekeep) -> Result<(), Error> {
+		self.callbacks.on_housekeep = Some(Box::pin(on_housekeep));
+		Ok(())
+	}
+
 	pub fn start(&self) -> Result<(), Error> {
 		self.check_callbacks()?;
 		self.do_start()
@@ -504,6 +534,15 @@ where
 		handles: Vec<Handle>,
 		tls_config: Option<TLSServerConfig>,
 	) -> Result<(), Error> {
+		for handle in &handles {
+			if *handle >= self.config.max_handle_numeric_value.try_into()? {
+				return Err(ErrorKind::MaxHandlesExceeded(format!(
+					"Max numeric handle exceeded. Limit = {}",
+					self.config.max_handle_numeric_value,
+				))
+				.into());
+			}
+		}
 		self.check_callbacks()?;
 
 		if handles.len() != self.config.threads.try_into()? {
@@ -556,56 +595,17 @@ where
 		handle: Handle,
 		tls_config: Option<TLSClientConfig>,
 	) -> Result<ConnectionData, Error> {
-		self.check_callbacks()?;
+		let evh_params = self.get_evh_params();
+		evh_params.add_handle(handle, tls_config, None)
+	}
 
-		let cap_exceeded = {
-			let mut cur_connections = lockw!(self.cur_connections)?;
-			let ret = *cur_connections >= self.config.max_rwhandles;
-			if !ret {
-				*cur_connections += 1;
-			}
-			ret
-		};
-
-		if cap_exceeded {
-			return Err(ErrorKind::MaxHandlesExceeded(format!(
-				"Max Handles exceeded. Limit = {}",
-				self.config.max_rwhandles,
-			))
-			.into());
+	pub fn get_evh_params(&self) -> EvhParams {
+		EvhParams {
+			cur_connections: self.cur_connections.clone(),
+			config: self.config.clone(),
+			guarded_data: self.guarded_data.clone(),
+			wakeup: self.wakeup.clone(),
 		}
-
-		let connection_info = match tls_config {
-			Some(tls_config) => {
-				let server_name: &str = &tls_config.server_name;
-				let config = make_config(tls_config.trusted_cert_full_chain_file)?;
-				let tls_client = Some(Arc::new(RwLock::new(ClientConnection::new(
-					config,
-					server_name.try_into()?,
-				)?)));
-				EventConnectionInfo::read_write_connection(handle, None, None, tls_client)
-			}
-			None => EventConnectionInfo::read_write_connection(handle, None, None, None),
-		};
-
-		// pick a random queue
-		let rand: usize = rand::random();
-		let guarded_data: Arc<RwLock<GuardedData>> =
-			self.guarded_data[rand % self.config.threads].clone();
-		let wakeup: Wakeup = self.wakeup[rand % self.config.threads].clone();
-
-		{
-			let mut guarded_data = lockw!(guarded_data)?;
-			guarded_data.nhandles.push(connection_info.clone());
-		}
-
-		wakeup.wakeup()?;
-
-		Ok(ConnectionData::new(
-			connection_info.as_read_write_connection()?,
-			&guarded_data,
-			&wakeup,
-		))
 	}
 
 	fn check_callbacks(&self) -> Result<(), Error> {
@@ -826,12 +826,36 @@ where
 		Ok(())
 	}
 
+	fn check_housekeeper(
+		config: &EventHandlerConfig,
+		ctx: &mut Context,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
+	) -> Result<(), Error> {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+		if now - ctx.housekeeper_last > config.housekeeper_frequency.try_into()? {
+			debug!("house keep: tid={},now={}", ctx.tid, now)?;
+			match &callbacks.on_housekeep {
+				Some(on_housekeeper) => match (on_housekeeper)(&mut ctx.user_data) {
+					Ok(_) => {}
+					Err(e) => error!("housekeeper callback generated error: {}", e)?,
+				},
+				None => {
+					error!("housekeeper not set")?;
+				}
+			}
+			ctx.housekeeper_last = now;
+		}
+
+		Ok(())
+	}
+
 	fn thread_loop(
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		events: &mut HashSet<Event>,
 		wakeup: &Wakeup,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
@@ -856,9 +880,10 @@ where
 			}
 			{
 				let (do_wakeup, _lock) = wakeup.pre_block()?;
-				Self::get_events(ctx, events, do_wakeup)?;
+				Self::get_events(config, ctx, events, do_wakeup)?;
 			}
 			wakeup.post_block()?;
+			Self::check_housekeeper(config, ctx, callbacks)?;
 			ctx.input_events.clear();
 
 			debug!("event count = {}", events.len())?;
@@ -919,6 +944,17 @@ where
 					context_map,
 					wakeup,
 				)?,
+				EventType::Error => Self::process_error_event(
+					event,
+					ctx,
+					config,
+					callbacks,
+					connection_id_map,
+					connection_handle_map,
+					handle_hash,
+					context_map,
+					wakeup,
+				)?,
 				EventType::Accept => {} // accepts are returned as read.
 			}
 			ctx.counter += 1;
@@ -960,11 +996,48 @@ where
 		Ok(false)
 	}
 
+	fn process_error_event(
+		event: &Event,
+		ctx: &mut Context,
+		config: &EventHandlerConfig,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
+		connection_id_map: &mut StaticHash<(), ()>,
+		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		handle_hash: &mut StaticHash<(), ()>,
+		context_map: &mut HashMap<u128, ConnectionContext>,
+		wakeup: &Wakeup,
+	) -> Result<(), Error> {
+		let connection_info = match connection_handle_map.get(&event.handle) {
+			Some(connection_info) => connection_info,
+			None => {
+				return Err(ErrorKind::HandleNotFoundError(format!(
+					"Connection handle was not found for event: {:?}",
+					event
+				))
+				.into())
+			}
+		};
+		Self::close_connection(
+			config,
+			connection_info.get_connection_id(),
+			ctx,
+			callbacks,
+			connection_id_map,
+			connection_handle_map,
+			handle_hash,
+			context_map,
+			wakeup,
+			false,
+		)?;
+
+		Ok(())
+	}
+
 	fn process_read_event(
 		event: &Event,
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
@@ -1051,6 +1124,7 @@ where
 		match x {
 			Some((id, _handle)) => {
 				Self::close_connection(
+					config,
 					id,
 					ctx,
 					callbacks,
@@ -1059,6 +1133,7 @@ where
 					handle_hash,
 					context_map,
 					wakeup,
+					true,
 				)?;
 			}
 			None => {}
@@ -1068,14 +1143,16 @@ where
 	}
 
 	fn close_connection(
+		_config: &EventHandlerConfig,
 		id: u128,
 		ctx: &mut Context,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
 		context_map: &mut HashMap<u128, ConnectionContext>,
 		wakeup: &Wakeup,
+		close_handle: bool,
 	) -> Result<(), Error> {
 		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
 		let connection_context = context_map.remove(&id);
@@ -1114,13 +1191,16 @@ where
 									let mut cur_connections = lockw!(ctx.cur_connections)?;
 									*cur_connections -= 1;
 								}
-								#[cfg(unix)]
-								unsafe {
-									libc::close(handle);
-								}
-								#[cfg(windows)]
-								unsafe {
-									ws2_32::closesocket(handle);
+
+								if close_handle {
+									#[cfg(unix)]
+									unsafe {
+										libc::close(handle);
+									}
+									#[cfg(windows)]
+									unsafe {
+										ws2_32::closesocket(handle);
+									}
 								}
 							}
 							match callbacks.on_close.as_ref() {
@@ -1130,8 +1210,10 @@ where
 											connection_info.get_read_write_connection_info()?,
 											&ctx.guarded_data,
 											&wakeup,
+											ctx.tid,
 										),
 										&mut connection_context,
+										&mut ctx.user_data,
 									)?,
 									None => error!("no context found for id = {}", id)?,
 								},
@@ -1159,7 +1241,7 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		wakeup: &Wakeup,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		tls_server_config: &Option<ServerConfig>,
 		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<bool, Error> {
@@ -1205,6 +1287,15 @@ where
 					}
 					return Ok(false);
 				}
+			}
+
+			// check max numeric value
+			if handle >= config.max_handle_numeric_value.try_into()? {
+				#[cfg(unix)]
+				{
+					unsafe { libc::close(handle) };
+				}
+				return Ok(false);
 			}
 
 			info!("Accepted handle = {} on tid={}", handle, ctx.tid)?;
@@ -1266,8 +1357,9 @@ where
 						connection_info.get_read_write_connection_info()?,
 						&ctx.guarded_data,
 						&wakeup,
+						ctx.tid,
 					);
-					match (on_accept)(&conn_data, &mut connection_context) {
+					match (on_accept)(&conn_data, &mut connection_context, &mut ctx.user_data) {
 						Ok(_) => {}
 						Err(e) => {
 							warn!("on_accept Callback resulted in error: {}", e)?;
@@ -1295,7 +1387,7 @@ where
 		connection_info: &ReadWriteConnection,
 		ctx: &mut Context,
 		wakeup: &Wakeup,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		config: &EventHandlerConfig,
 		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<isize, Error> {
@@ -1385,7 +1477,8 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
+			let connection_data =
+				&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
 			connection_data.do_write(&wbuf)?;
 		}
 
@@ -1430,7 +1523,8 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
+			let connection_data =
+				&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
 
 			connection_data.do_write(&wbuf)?;
 		}
@@ -1442,7 +1536,7 @@ where
 		connection_info: &ReadWriteConnection,
 		len: isize,
 		wakeup: &Wakeup,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		context_map: &mut HashMap<u128, ConnectionContext>,
@@ -1461,7 +1555,7 @@ where
 			match &callbacks.on_read {
 				Some(on_read) => {
 					let connection_data =
-						ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup);
+						ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
 					let connection_context =
 						context_map.get_mut(&connection_info.get_connection_id());
 					match connection_context {
@@ -1497,8 +1591,8 @@ where
 	fn process_write_event(
 		event: &Event,
 		ctx: &mut Context,
-		_config: &EventHandlerConfig,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		config: &EventHandlerConfig,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		connection_id_map: &mut StaticHash<(), ()>,
 		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
 		handle_hash: &mut StaticHash<(), ()>,
@@ -1565,6 +1659,7 @@ where
 
 		for rem in to_remove {
 			Self::close_connection(
+				config,
 				rem,
 				ctx,
 				callbacks,
@@ -1573,6 +1668,7 @@ where
 				handle_hash,
 				context_map,
 				wakeup,
+				true,
 			)?;
 		}
 
@@ -1604,6 +1700,7 @@ where
 
 	#[cfg(target_os = "windows")]
 	fn get_events(
+		config: &EventHandlerConfig,
 		ctx: &mut Context,
 		output_events: &mut HashSet<Event>,
 		wakeup: bool,
@@ -1613,6 +1710,7 @@ where
 		for evt in &ctx.input_events {
 			if evt.etype == EventType::Read || evt.etype == EventType::Accept {
 				let handle = evt.handle;
+
 				let op = if filter_set.remove(&handle) {
 					EPOLL_CTL_MOD
 				} else {
@@ -1676,7 +1774,7 @@ where
 				MAX_EVENTS,
 				match ctx.saturating_handles.len() > 0 || wakeup {
 					true => 0,
-					false => 30000000,
+					false => config.housekeeper_frequency,
 				},
 			)
 		};
@@ -1729,6 +1827,7 @@ where
 
 	#[cfg(any(target_os = "linux"))]
 	fn get_events(
+		config: &EventHandlerConfig,
 		ctx: &mut Context,
 		events: &mut HashSet<Event>,
 		wakeup: bool,
@@ -1738,6 +1837,8 @@ where
 			ctx.input_events.len(),
 			ctx.tid
 		)?;
+
+		events.clear();
 
 		let epollfd = ctx.selector;
 		for evt in &ctx.input_events {
@@ -1766,7 +1867,13 @@ where
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
 				match res {
 					Ok(_) => {}
-					Err(e) => error!("Error epoll_ctl2: {}, fd={}, op={:?}", e, fd, op)?,
+					Err(e) => {
+						events.insert(Event {
+							handle: fd,
+							etype: EventType::Error,
+						});
+						error!("Error epoll_ctl2: {}, fd={}, op={:?}", e, fd, op)?
+					}
 				}
 			} else if evt.etype == EventType::Write {
 				let fd = evt.handle;
@@ -1792,7 +1899,13 @@ where
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
 				match res {
 					Ok(_) => {}
-					Err(e) => error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op)?,
+					Err(e) => {
+						events.insert(Event {
+							handle: fd,
+							etype: EventType::Error,
+						});
+						error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op)?
+					}
 				}
 			} else {
 				return Err(
@@ -1806,11 +1919,9 @@ where
 			&mut ctx.epoll_events,
 			match ctx.saturating_handles.len() > 0 || wakeup {
 				true => 0,
-				false => 30000000,
+				false => config.housekeeper_frequency,
 			},
 		);
-
-		events.clear();
 
 		match results {
 			Ok(results) => {
@@ -1846,6 +1957,7 @@ where
 		target_os = "freebsd"
 	))]
 	fn get_events(
+		config: &EventHandlerConfig,
 		ctx: &mut Context,
 		events: &mut HashSet<Event>,
 		wakeup: bool,
@@ -1857,6 +1969,7 @@ where
 		)?;
 
 		let mut kevs = vec![];
+		// TODO: handle inserting an invalid fd
 		for event in &ctx.input_events {
 			debug!("pushing input event = {:?}", event)?;
 			match event.etype {
@@ -1887,6 +2000,7 @@ where
 						FilterFlag::empty(),
 					));
 				}
+				EventType::Error => {}
 			}
 		}
 
@@ -1910,7 +2024,7 @@ where
 				&Self::duration_to_timespec(Duration::from_millis(
 					match ctx.saturating_handles.len() > 0 || wakeup {
 						true => 0,
-						false => 30000000,
+						false => config.housekeeper_frequency.try_into()?,
 					},
 				)),
 			)
@@ -1979,7 +2093,7 @@ where
 		handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 		context_map: &mut HashMap<u128, ConnectionContext>,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 	) -> Result<bool, Error> {
 		let stop = {
 			let mut guarded_data = lockw!(ctx.guarded_data)?;
@@ -2044,7 +2158,7 @@ where
 		_handle_hash: &mut StaticHash<(), ()>,
 		wakeup: &Wakeup,
 		context_map: &mut HashMap<u128, ConnectionContext>,
-		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic>,
+		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
@@ -2075,6 +2189,7 @@ where
 												item,
 												&ctx.guarded_data,
 												&wakeup,
+												ctx.tid,
 											);
 											let connection_context =
 												context_map.get_mut(&item.get_connection_id());
@@ -2111,7 +2226,7 @@ where
 							}
 						},
 						None => {
-							warn!("Handle not found for connection_id!")?;
+							warn!("Handle not found for connection_id: {}", connection_id)?;
 						}
 					}
 				}
@@ -2495,11 +2610,13 @@ impl EventConnectionInfo {
 	}
 }
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 enum EventType {
 	Accept,
 	Read,
 	Write,
+	Error,
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -2509,7 +2626,7 @@ struct Event {
 }
 
 #[derive(Debug, Clone)]
-struct Wakeup {
+pub struct Wakeup {
 	wakeup_handle_read: Handle,
 	wakeup_handle_write: Handle,
 	needed: Arc<RwLock<bool>>,
@@ -2622,7 +2739,7 @@ impl Wakeup {
 }
 
 #[derive(Debug)]
-struct GuardedData {
+pub struct GuardedData {
 	write_queue: Vec<u128>,
 	nhandles: Vec<EventConnectionInfo>,
 	stop: bool,
@@ -2657,6 +2774,7 @@ struct Context {
 	counter: usize, // used for handling panics
 	saturating_handles: HashSet<Handle>,
 	cur_connections: Arc<RwLock<usize>>,
+	housekeeper_last: u128,
 	user_data: Box<dyn Any + Send + Sync>,
 }
 
@@ -2702,17 +2820,102 @@ impl Context {
 			buffer,
 			saturating_handles: HashSet::new(),
 			cur_connections,
+			housekeeper_last: 0,
 			user_data: Box::new(0),
 		})
 	}
 }
 
 #[derive(Clone)]
-struct Callbacks<OnRead, OnAccept, OnClose, OnPanic> {
+struct Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep> {
 	on_read: Option<Pin<Box<OnRead>>>,
 	on_accept: Option<Pin<Box<OnAccept>>>,
 	on_close: Option<Pin<Box<OnClose>>>,
 	on_panic: Option<Pin<Box<OnPanic>>>,
+	on_housekeep: Option<Pin<Box<OnHousekeep>>>,
+}
+
+#[derive(Clone)]
+pub struct EvhParams {
+	wakeup: Vec<Wakeup>,
+	cur_connections: Arc<RwLock<usize>>,
+	guarded_data: Arc<Vec<Arc<RwLock<GuardedData>>>>,
+	config: EventHandlerConfig,
+}
+
+impl EvhParams {
+	pub fn add_handle(
+		&self,
+		handle: Handle,
+		tls_config: Option<TLSClientConfig>,
+		tid: Option<usize>,
+	) -> Result<ConnectionData, Error> {
+		if handle >= self.config.max_handle_numeric_value.try_into()? {
+			return Err(ErrorKind::MaxHandlesExceeded(format!(
+				"Max numeric handle exceeded. Limit = {}",
+				self.config.max_handle_numeric_value,
+			))
+			.into());
+		}
+
+		let cur_connections = &self.cur_connections;
+		let config = &self.config;
+		let guarded_data = &self.guarded_data;
+		let wakeup = &self.wakeup;
+
+		let cap_exceeded = {
+			let mut cur_connections = lockw!(cur_connections)?;
+			let ret = *cur_connections >= config.max_rwhandles;
+			if !ret {
+				*cur_connections += 1;
+			}
+			ret
+		};
+
+		if cap_exceeded {
+			return Err(ErrorKind::MaxHandlesExceeded(format!(
+				"Max Handles exceeded. Limit = {}",
+				config.max_rwhandles,
+			))
+			.into());
+		}
+
+		let connection_info = match tls_config {
+			Some(tls_config) => {
+				let server_name: &str = &tls_config.server_name;
+				let config = make_config(tls_config.trusted_cert_full_chain_file)?;
+				let tls_client = Some(Arc::new(RwLock::new(ClientConnection::new(
+					config,
+					server_name.try_into()?,
+				)?)));
+				EventConnectionInfo::read_write_connection(handle, None, None, tls_client)
+			}
+			None => EventConnectionInfo::read_write_connection(handle, None, None, None),
+		};
+
+		// pick a random queue or the one specified
+		let rand: usize = rand::random();
+		let tid = match tid {
+			Some(tid) => tid,
+			None => rand % config.threads,
+		};
+		let guarded_data: Arc<RwLock<GuardedData>> = guarded_data[tid].clone();
+		let wakeup: Wakeup = wakeup[tid].clone();
+
+		{
+			let mut guarded_data = lockw!(guarded_data)?;
+			guarded_data.nhandles.push(connection_info.clone());
+		}
+
+		wakeup.wakeup()?;
+
+		Ok(ConnectionData::new(
+			connection_info.as_read_write_connection()?,
+			&guarded_data,
+			&wakeup,
+			tid,
+		))
+	}
 }
 
 #[cfg(test)]
@@ -2807,7 +3010,7 @@ mod tests {
 		let cid_read = Arc::new(RwLock::new(0));
 		let cid_read_clone = cid_read.clone();
 
-		evh.set_on_accept(move |conn_data, _| {
+		evh.set_on_accept(move |conn_data, _, _| {
 			{
 				let mut cid = cid_accept.write().unwrap();
 				*cid = conn_data.get_connection_id();
@@ -2818,7 +3021,7 @@ mod tests {
 			}
 			Ok(())
 		})?;
-		evh.set_on_close(move |_conn_data, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf, _, _| {
@@ -2835,6 +3038,8 @@ mod tests {
 			conn_data.write(&[5, 6, 7, 8, 9])?;
 			Ok(())
 		})?;
+
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
 		let mut stream = TcpStream::connect(addr)?;
@@ -2900,8 +3105,8 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |_conn_data, _| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let stream = TcpStream::connect(addr)?;
@@ -2927,6 +3132,9 @@ mod tests {
 			}
 			Ok(())
 		})?;
+
+		evh.set_on_housekeep(move |_| Ok(()))?;
+
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
 		let conn_info = evh.add_handle(handle, None)?;
@@ -2981,11 +3189,11 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |conn_data, _| {
+		evh.set_on_accept(move |conn_data, _, _| {
 			trace!("on accept for {}", conn_data.get_handle())?;
 			Ok(())
 		})?;
-		evh.set_on_close(move |conn_data, _| {
+		evh.set_on_close(move |conn_data, _, _| {
 			trace!("on close conn={}", conn_data.get_handle())?;
 			Ok(())
 		})?;
@@ -3002,6 +3210,7 @@ mod tests {
 		let client_on_read_count_clone = client_on_read_count.clone();
 		let server_on_read_count_clone = server_on_read_count.clone();
 
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			trace!(
 				"callback on {} with buf={:?}",
@@ -3089,8 +3298,8 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |conn_data, _| {
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |conn_data, _, _| {
 			warn!("connection closed: {:?}", conn_data.get_connection_id())?;
 			Ok(())
 		})?;
@@ -3121,6 +3330,7 @@ mod tests {
 		let client_buffer = Arc::new(RwLock::new(cbuf));
 		let server_buffer = Arc::new(RwLock::new(sbuf));
 
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			let msg = &msg_clone;
 
@@ -3200,10 +3410,11 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |_conn_data, _| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 		evh.set_on_read(move |_conn_data, _buf, _, _| Ok(()))?;
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.start()?;
 
 		evh.stop()?;
@@ -3260,13 +3471,14 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |_conn_data, _| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let resp_len = Arc::new(RwLock::new(0));
 		let resp_len_clone = resp_len.clone();
 
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.set_on_read(move |_conn_data, buf, _, _| {
 			let mut resp_len = lockw!(resp_len_clone)?;
 			*resp_len += buf.len();
@@ -3365,8 +3577,8 @@ mod tests {
 		let on_close_counter_clone = on_close_counter.clone();
 		let on_read_counter_clone = on_read_counter.clone();
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |_conn_data, _| {
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| {
 			{
 				(*(lockw!(on_close_counter_clone)?)) += 1;
 			}
@@ -3374,6 +3586,7 @@ mod tests {
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
+		evh.set_on_housekeep(move |_| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			{
 				(*(lockw!(on_read_counter_clone)?)) += 1;
@@ -3453,8 +3666,8 @@ mod tests {
 		handles.push(listener.as_raw_fd());
 		listeners.push(listener);
 
-		evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-		evh.set_on_close(move |_conn_data, _| Ok(()))?;
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 
 		let on_panic_counter = Arc::new(RwLock::new(0));
 		let on_panic_counter_clone = on_panic_counter.clone();
@@ -3464,6 +3677,8 @@ mod tests {
 			*on_panic_counter += 1;
 			Ok(())
 		})?;
+
+		evh.set_on_housekeep(move |_| Ok(()))?;
 
 		let counter = Arc::new(RwLock::new(0));
 		let complete_count = Arc::new(RwLock::new(0));

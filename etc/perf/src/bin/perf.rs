@@ -23,11 +23,12 @@ use colored::Colorize;
 use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
-use nioruntime_http::{HttpApiConfig, HttpConfig, HttpServer};
+use nioruntime_http::{HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::{Read, Write};
@@ -327,6 +328,7 @@ fn main() -> Result<(), Error> {
 		show_line_num: false,
 		show_log_level: false,
 		show_bt: false,
+		//file_path: Some("/tmp/mainlog.log".to_string()),
 		..Default::default()
 	})?;
 
@@ -389,9 +391,71 @@ fn main() -> Result<(), Error> {
 		};
 
 		if http {
+			let mut mappings = HashMap::new();
+			let mut extensions = HashMap::new();
+
+			extensions.insert(
+				"php".as_bytes().to_vec(),
+				ProxyEntry {
+					sock_addrs: vec![
+						SocketAddr::from_str("127.0.0.1:80").unwrap(),
+						SocketAddr::from_str("127.0.0.1:90").unwrap(),
+					],
+					max_connections_per_thread: 10,
+				},
+			);
+
+			extensions.insert(
+				"php2".as_bytes().to_vec(),
+				ProxyEntry {
+					sock_addrs: vec![
+						SocketAddr::from_str("127.0.0.1:80").unwrap(),
+						//SocketAddr::from_str("127.0.0.1:90").unwrap()
+					],
+					max_connections_per_thread: 10,
+				},
+			);
+
+			extensions.insert(
+				"php3".as_bytes().to_vec(),
+				ProxyEntry {
+					sock_addrs: vec![
+						//SocketAddr::from_str("127.0.0.1:80").unwrap(),
+						SocketAddr::from_str("127.0.0.1:90").unwrap(),
+					],
+					max_connections_per_thread: 10,
+				},
+			);
+
+			mappings.insert(
+				"/proxytest1".as_bytes().to_vec(),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap()),
+			);
+
+			mappings.insert(
+				"/proxytest2".as_bytes().to_vec(),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap()),
+			);
+
+			mappings.insert(
+				"/proxytest1.html".as_bytes().to_vec(),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap()),
+			);
+
+			mappings.insert(
+				"/proxytest2.html".as_bytes().to_vec(),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap()),
+			);
+
 			let config = HttpConfig {
+				connect_timeout: 5000,
+				idle_timeout: 15000,
 				addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
 				threads,
+				proxy_config: ProxyConfig {
+					extensions,
+					mappings,
+				},
 				..Default::default()
 			};
 
@@ -436,8 +500,8 @@ fn main() -> Result<(), Error> {
 			let (handles, _listeners) =
 				get_handles(evh_config.threads, &format!("127.0.0.1:{}", port)[..])?;
 
-			evh.set_on_accept(move |_conn_data, _| Ok(()))?;
-			evh.set_on_close(move |conn_data, _| {
+			evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+			evh.set_on_close(move |conn_data, _, _| {
 				trace!("on close for id = {}", conn_data.get_connection_id())?;
 				Ok(())
 			})?;
@@ -447,6 +511,9 @@ fn main() -> Result<(), Error> {
 				conn_data.write(buf)?;
 				Ok(())
 			})?;
+
+			evh.set_on_housekeep(move |_user_data| Ok(()))?;
+
 			evh.start()?;
 			evh.add_listener_handles(handles, tls_config)?;
 			std::thread::sleep(std::time::Duration::from_millis(3000));

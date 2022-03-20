@@ -15,6 +15,6 @@
 mod eventhandler;
 
 pub use crate::eventhandler::{
-	ConnectionContext, ConnectionData, EventHandler, EventHandlerConfig, TLSClientConfig,
-	TLSServerConfig,
+	ConnectionContext, ConnectionData, EventHandler, EventHandlerConfig, EvhParams,
+	TLSClientConfig, TLSServerConfig,
 };

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod byte_utils;
 mod hex;
 mod macros;
 pub mod ser;
@@ -26,4 +27,5 @@ use nioruntime_deps::rand;
 pub use nioruntime_deps::serde::Serialize;
 pub use nioruntime_deps::serde_derive;
 
+pub use crate::byte_utils::{bytes_eq, bytes_find, bytes_parse_number_header};
 pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
