@@ -188,6 +188,16 @@ Connection: close\r\n\
 \r\n\
 Bad Gateway.\r\n";
 
+const HTTP_ERROR_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Content-Length: 22\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Connection: close\r\n\
+\r\n\
+Service Unavailable.\r\n";
+
 const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 Internal Server Error\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
@@ -229,6 +239,7 @@ struct ProxyInfo {
 	response_conn_data: Option<ConnectionData>,
 	buffer: Vec<u8>,
 	sock_addr: SocketAddr,
+	proxy_entry: ProxyEntry,
 }
 
 impl std::hash::Hash for ProxyInfo {
@@ -241,7 +252,9 @@ impl std::hash::Hash for ProxyInfo {
 
 impl PartialEq for ProxyInfo {
 	fn eq(&self, other: &ProxyInfo) -> bool {
-		self.handle == other.handle && self.sock_addr == other.sock_addr
+		self.handle == other.handle
+			&& self.sock_addr == other.sock_addr
+			&& self.proxy_entry == other.proxy_entry
 	}
 }
 
@@ -255,7 +268,18 @@ impl Clone for ProxyInfo {
 			buffer: self.buffer.clone(),
 			sock_addr: self.sock_addr.clone(),
 			proxy_conn: self.proxy_conn.clone(),
+			proxy_entry: self.proxy_entry.clone(),
 		}
+	}
+}
+
+pub struct ProxyState {
+	pub cur_connections: usize,
+}
+
+impl ProxyState {
+	fn new() -> Self {
+		Self { cur_connections: 0 }
 	}
 }
 
@@ -269,7 +293,8 @@ struct ThreadContext {
 	async_connections: Arc<RwLock<HashSet<u128>>>,
 	active_connections: HashMap<u128, ConnectionInfo>,
 	proxy_connections: HashMap<u128, ProxyInfo>,
-	idle_proxy_connections: HashMap<SocketAddr, HashSet<ProxyInfo>>,
+	idle_proxy_connections: HashMap<ProxyEntry, HashSet<ProxyInfo>>,
+	proxy_state: HashMap<ProxyEntry, ProxyState>,
 }
 
 impl ThreadContext {
@@ -293,6 +318,15 @@ impl ThreadContext {
 		let mut value_buf = vec![];
 		key_buf.resize(config.max_header_name_len, 0u8);
 		value_buf.resize(config.max_header_value_len, 0u8);
+
+		let mut proxy_state = HashMap::new();
+		for (_k, v) in &config.proxy_config.mappings {
+			proxy_state.insert(v.clone(), ProxyState::new());
+		}
+		for (_k, v) in &config.proxy_config.extensions {
+			proxy_state.insert(v.clone(), ProxyState::new());
+		}
+
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
 			cache_hits: StaticHash::new(cache_hits_conf)?,
@@ -304,6 +338,7 @@ impl ThreadContext {
 			active_connections: HashMap::new(),
 			proxy_connections: HashMap::new(),
 			idle_proxy_connections: HashMap::new(),
+			proxy_state,
 		})
 	}
 }
@@ -695,17 +730,41 @@ impl<'a> HttpHeaders<'a> {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ProxyEntry {
 	pub sock_addrs: Vec<SocketAddr>,
 	pub max_connections_per_thread: usize,
+	nonce: u128,
 }
 
 impl ProxyEntry {
 	pub fn from_socket_addr(sock_addr: SocketAddr) -> Self {
 		Self {
 			sock_addrs: vec![sock_addr],
-			max_connections_per_thread: 10,
+			max_connections_per_thread: usize::MAX,
+			nonce: rand::random(),
+		}
+	}
+
+	pub fn from_socket_addr_with_limit(
+		sock_addr: SocketAddr,
+		max_connections_per_thread: usize,
+	) -> Self {
+		Self {
+			sock_addrs: vec![sock_addr],
+			max_connections_per_thread,
+			nonce: rand::random(),
+		}
+	}
+
+	pub fn multi_socket_addr(
+		sock_addrs: Vec<SocketAddr>,
+		max_connections_per_thread: usize,
+	) -> Self {
+		Self {
+			sock_addrs,
+			max_connections_per_thread,
+			nonce: rand::random(),
 		}
 	}
 }
@@ -1091,12 +1150,6 @@ where
 			evh.add_listener_handles(handles, None)?;
 		}
 
-		// start one second thread
-		std::thread::spawn(move || -> Result<(), Error> {
-			Self::one_second()?;
-			Ok(())
-		});
-
 		info!("started")?;
 
 		Ok(())
@@ -1115,12 +1168,6 @@ where
 		let mut self_config = lockw!(self.api_config)?;
 		*self_config = api_config;
 		Ok(())
-	}
-
-	fn one_second() -> Result<(), Error> {
-		loop {
-			std::thread::sleep(std::time::Duration::from_secs(1));
-		}
 	}
 
 	fn init_user_data(
@@ -1258,14 +1305,16 @@ where
 	fn process_proxy_outbound(
 		inbound: &ConnectionData,
 		_headers: &HttpHeaders,
-		sock_addr: &SocketAddr,
+		//sock_addr: &SocketAddr,
+		proxy_entry: &ProxyEntry,
 		buffer: &[u8],
 		evh_params: &EvhParams,
 		proxy_connections: &mut HashMap<u128, ProxyInfo>,
 		active_connections: &mut HashMap<u128, ConnectionInfo>,
-		idle_proxy_connections: &mut HashMap<SocketAddr, HashSet<ProxyInfo>>,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashSet<ProxyInfo>>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 	) -> Result<(), Error> {
-		let proxy_info = match idle_proxy_connections.get_mut(sock_addr) {
+		let proxy_info = match idle_proxy_connections.get_mut(proxy_entry) {
 			Some(hashset) => match hashset.iter().next() {
 				Some(proxy_info) => Some(proxy_info.clone()),
 				None => None,
@@ -1282,7 +1331,7 @@ where
 					None => debug!("no proxy found")?,
 				}
 
-				match idle_proxy_connections.get_mut(sock_addr) {
+				match idle_proxy_connections.get_mut(proxy_entry) {
 					Some(hashset) => {
 						hashset.remove(&proxy_info);
 					}
@@ -1292,12 +1341,43 @@ where
 				proxy_info.proxy_conn
 			}
 			None => {
+				let state = proxy_state.get_mut(proxy_entry);
+				let state = match state {
+					Some(state) => {
+						if state.cur_connections >= proxy_entry.max_connections_per_thread {
+							inbound.write(HTTP_ERROR_503)?;
+							return Ok(());
+						}
+						state
+					}
+					None => {
+						return Err(ErrorKind::InternalError(format!(
+							"no proxy state for sock_addr = {:?}",
+							proxy_entry
+						))
+						.into());
+					}
+				};
 				let tid = inbound.tid();
-				//let tcp_stream = TcpStream::connect(sock_addr.to_string())?;
-				//tcp_stream.set_nonblocking(true)?;
-				//let handle = tcp_stream.as_raw_fd();
-				let handle = Self::socket_connect(sock_addr)?;
-				let conn_data = evh_params.add_handle(handle, None, Some(tid))?;
+				// choose a random socket_addr
+				let rand_entry: usize = rand::random();
+				let sock_addr = proxy_entry.sock_addrs[rand_entry % proxy_entry.sock_addrs.len()];
+
+				let (handle, conn_data) = match Self::connect_outbound(&sock_addr, tid, evh_params)
+				{
+					Ok((handle, conn_data)) => {
+						state.cur_connections += 1;
+						(handle, conn_data)
+					}
+					Err(e) => {
+						return Err(ErrorKind::IOError(format!(
+							"Error connecting to proxy: {}",
+							e
+						))
+						.into());
+					}
+				};
+
 				debug!(
 					"proxy added handle = {}, conn_id = {}",
 					handle,
@@ -1310,10 +1390,12 @@ where
 						handle,
 						response_conn_data: Some(inbound.clone()),
 						buffer: vec![],
-						sock_addr: *sock_addr,
+						sock_addr,
 						proxy_conn: conn_data.clone(),
+						proxy_entry: proxy_entry.clone(),
 					},
 				);
+
 				active_connections.insert(
 					conn_data.get_connection_id(),
 					ConnectionInfo::new(conn_data.clone()),
@@ -1328,11 +1410,21 @@ where
 		Ok(())
 	}
 
+	fn connect_outbound(
+		sock_addr: &SocketAddr,
+		tid: usize,
+		evh_params: &EvhParams,
+	) -> Result<(Handle, ConnectionData), Error> {
+		let handle = Self::socket_connect(sock_addr)?;
+		let conn_data = evh_params.add_handle(handle, None, Some(tid))?;
+		Ok((handle, conn_data))
+	}
+
 	fn process_proxy_inbound(
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		proxy_connections: &mut HashMap<u128, ProxyInfo>,
-		idle_proxy_connections: &mut HashMap<SocketAddr, HashSet<ProxyInfo>>,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashSet<ProxyInfo>>,
 	) -> Result<(), Error> {
 		let proxy_info = proxy_connections.get_mut(&conn_data.get_connection_id());
 		match proxy_info {
@@ -1363,7 +1455,7 @@ where
 				if is_complete && !is_close {
 					// put this connection into the idle pool
 					proxy_info.response_conn_data = None;
-					let added = match idle_proxy_connections.get_mut(&proxy_info.sock_addr) {
+					let added = match idle_proxy_connections.get_mut(&proxy_info.proxy_entry) {
 						Some(conns) => {
 							conns.insert(proxy_info.clone());
 							true
@@ -1374,7 +1466,7 @@ where
 					if !added {
 						let mut nhashset = HashSet::new();
 						nhashset.insert(proxy_info.clone());
-						idle_proxy_connections.insert(proxy_info.sock_addr, nhashset);
+						idle_proxy_connections.insert(proxy_info.proxy_entry.clone(), nhashset);
 					}
 				} else if !is_close {
 					proxy_info.buffer.extend_from_slice(nbuf);
@@ -1588,31 +1680,31 @@ where
 				let mut key = None;
 
 				let was_proxy = {
-					let mut sock_addr = None;
+					let mut proxy_entry = None;
 					match config.proxy_config.extensions.get(headers.extension()) {
-						Some(addr) => sock_addr = Some(addr),
+						Some(entry) => proxy_entry = Some(entry),
 						None => {}
 					}
 
-					if sock_addr.is_none() {
+					if proxy_entry.is_none() {
 						match config.proxy_config.mappings.get(headers.uri) {
-							Some(addr) => sock_addr = Some(addr),
+							Some(entry) => proxy_entry = Some(entry),
 							None => {}
 						}
 					}
 
-					match sock_addr {
-						Some(sock_addr) => {
+					match proxy_entry {
+						Some(proxy_entry) => {
 							match Self::process_proxy_outbound(
 								conn_data,
 								&headers,
-								&sock_addr.sock_addrs
-									[rand::random::<usize>() % sock_addr.sock_addrs.len()],
+								&proxy_entry,
 								buffer,
 								evh_params,
 								&mut thread_context.proxy_connections,
 								&mut thread_context.active_connections,
 								&mut thread_context.idle_proxy_connections,
+								&mut thread_context.proxy_state,
 							) {
 								Ok(_) => {}
 								Err(e) => {
@@ -2440,10 +2532,18 @@ where
 			Some(proxy_info) => {
 				match thread_context
 					.idle_proxy_connections
-					.get_mut(&proxy_info.sock_addr)
+					.get_mut(&proxy_info.proxy_entry)
 				{
 					Some(hashset) => {
 						hashset.remove(&proxy_info);
+					}
+					None => {}
+				}
+
+				let state = thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
+				match state {
+					Some(state) => {
+						state.cur_connections -= 1;
 					}
 					None => {}
 				}

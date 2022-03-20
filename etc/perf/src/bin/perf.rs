@@ -396,35 +396,37 @@ fn main() -> Result<(), Error> {
 
 			extensions.insert(
 				"php".as_bytes().to_vec(),
-				ProxyEntry {
-					sock_addrs: vec![
+				ProxyEntry::multi_socket_addr(
+					vec![
 						SocketAddr::from_str("127.0.0.1:80").unwrap(),
 						SocketAddr::from_str("127.0.0.1:90").unwrap(),
 					],
-					max_connections_per_thread: 10,
-				},
+					10,
+				),
 			);
 
 			extensions.insert(
 				"php2".as_bytes().to_vec(),
-				ProxyEntry {
-					sock_addrs: vec![
-						SocketAddr::from_str("127.0.0.1:80").unwrap(),
-						//SocketAddr::from_str("127.0.0.1:90").unwrap()
-					],
-					max_connections_per_thread: 10,
-				},
+				ProxyEntry::multi_socket_addr(
+					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
+					usize::MAX,
+				),
 			);
 
 			extensions.insert(
 				"php3".as_bytes().to_vec(),
-				ProxyEntry {
-					sock_addrs: vec![
-						//SocketAddr::from_str("127.0.0.1:80").unwrap(),
-						SocketAddr::from_str("127.0.0.1:90").unwrap(),
-					],
-					max_connections_per_thread: 10,
-				},
+				ProxyEntry::multi_socket_addr(
+					vec![SocketAddr::from_str("127.0.0.1:90").unwrap()],
+					10,
+				),
+			);
+
+			extensions.insert(
+				"php4".as_bytes().to_vec(),
+				ProxyEntry::multi_socket_addr(
+					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
+					0,
+				),
 			);
 
 			mappings.insert(
