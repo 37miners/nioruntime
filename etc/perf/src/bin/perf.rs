@@ -23,7 +23,9 @@ use colored::Colorize;
 use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
-use nioruntime_http::{HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry};
+use nioruntime_http::{
+	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry,
+};
 use nioruntime_log::*;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
@@ -401,7 +403,12 @@ fn main() -> Result<(), Error> {
 						SocketAddr::from_str("127.0.0.1:80").unwrap(),
 						SocketAddr::from_str("127.0.0.1:90").unwrap(),
 					],
-					10,
+					10000000,
+					Some(HealthCheck {
+						check_secs: 3,
+						path: "/50x.html".to_string(),
+						expect_text: "status: ok".to_string(),
+					}),
 				),
 			);
 
@@ -410,6 +417,7 @@ fn main() -> Result<(), Error> {
 				ProxyEntry::multi_socket_addr(
 					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
 					usize::MAX,
+					None,
 				),
 			);
 
@@ -418,6 +426,7 @@ fn main() -> Result<(), Error> {
 				ProxyEntry::multi_socket_addr(
 					vec![SocketAddr::from_str("127.0.0.1:90").unwrap()],
 					10,
+					None,
 				),
 			);
 
@@ -426,27 +435,28 @@ fn main() -> Result<(), Error> {
 				ProxyEntry::multi_socket_addr(
 					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
 					0,
+					None,
 				),
 			);
 
 			mappings.insert(
 				"/proxytest1".as_bytes().to_vec(),
-				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap()),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap(), None),
 			);
 
 			mappings.insert(
 				"/proxytest2".as_bytes().to_vec(),
-				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap()),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap(), None),
 			);
 
 			mappings.insert(
 				"/proxytest1.html".as_bytes().to_vec(),
-				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap()),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:80").unwrap(), None),
 			);
 
 			mappings.insert(
 				"/proxytest2.html".as_bytes().to_vec(),
-				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap()),
+				ProxyEntry::from_socket_addr(SocketAddr::from_str("127.0.0.1:90").unwrap(), None),
 			);
 
 			let config = HttpConfig {
@@ -514,7 +524,7 @@ fn main() -> Result<(), Error> {
 				Ok(())
 			})?;
 
-			evh.set_on_housekeep(move |_user_data| Ok(()))?;
+			evh.set_on_housekeep(move |_user_data, _| Ok(()))?;
 
 			evh.start()?;
 			evh.add_listener_handles(handles, tls_config)?;

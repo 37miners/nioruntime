@@ -455,7 +455,7 @@ where
 		+ Sync
 		+ Unpin,
 	OnPanic: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnHousekeep: Fn(&mut Box<dyn Any + Send + Sync>) -> Result<(), Error>
+	OnHousekeep: Fn(&mut Box<dyn Any + Send + Sync>, usize) -> Result<(), Error>
 		+ Send
 		+ 'static
 		+ Clone
@@ -836,7 +836,7 @@ where
 		if now - ctx.housekeeper_last > config.housekeeper_frequency.try_into()? {
 			debug!("house keep: tid={},now={}", ctx.tid, now)?;
 			match &callbacks.on_housekeep {
-				Some(on_housekeeper) => match (on_housekeeper)(&mut ctx.user_data) {
+				Some(on_housekeeper) => match (on_housekeeper)(&mut ctx.user_data, ctx.tid) {
 					Ok(_) => {}
 					Err(e) => error!("housekeeper callback generated error: {}", e)?,
 				},
@@ -3039,7 +3039,7 @@ mod tests {
 			Ok(())
 		})?;
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
 		let mut stream = TcpStream::connect(addr)?;
@@ -3133,7 +3133,7 @@ mod tests {
 			Ok(())
 		})?;
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
@@ -3210,7 +3210,7 @@ mod tests {
 		let client_on_read_count_clone = client_on_read_count.clone();
 		let server_on_read_count_clone = server_on_read_count.clone();
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			trace!(
 				"callback on {} with buf={:?}",
@@ -3330,7 +3330,7 @@ mod tests {
 		let client_buffer = Arc::new(RwLock::new(cbuf));
 		let server_buffer = Arc::new(RwLock::new(sbuf));
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			let msg = &msg_clone;
 
@@ -3414,7 +3414,7 @@ mod tests {
 		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 		evh.set_on_read(move |_conn_data, _buf, _, _| Ok(()))?;
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.start()?;
 
 		evh.stop()?;
@@ -3478,7 +3478,7 @@ mod tests {
 		let resp_len = Arc::new(RwLock::new(0));
 		let resp_len_clone = resp_len.clone();
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.set_on_read(move |_conn_data, buf, _, _| {
 			let mut resp_len = lockw!(resp_len_clone)?;
 			*resp_len += buf.len();
@@ -3586,7 +3586,7 @@ mod tests {
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			{
 				(*(lockw!(on_read_counter_clone)?)) += 1;
@@ -3678,7 +3678,7 @@ mod tests {
 			Ok(())
 		})?;
 
-		evh.set_on_housekeep(move |_| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
 
 		let counter = Arc::new(RwLock::new(0));
 		let complete_count = Arc::new(RwLock::new(0));

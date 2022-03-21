@@ -16,5 +16,5 @@ mod cache;
 mod http;
 
 pub use crate::http::{
-	HttpApiConfig, HttpConfig, HttpHeaders, HttpServer, ProxyConfig, ProxyEntry,
+	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, HttpServer, ProxyConfig, ProxyEntry,
 };

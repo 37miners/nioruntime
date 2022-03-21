@@ -71,6 +71,14 @@ lazy_static! {
 		"\r\nETag: \"".as_bytes().to_vec(),
 		"\"\r\nAccept-Ranges: bytes\r\n\r\n".as_bytes().to_vec(),
 	];
+	static ref HEALTH_CHECK_VEC: Vec<Vec<u8>> = vec![
+		"GET ".as_bytes().to_vec(),
+		" HTTP/1.1\r\n\
+Host: localhost\r\n\
+Connection: close\r\n\r\n"
+			.as_bytes()
+			.to_vec(),
+	];
 }
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -273,13 +281,27 @@ impl Clone for ProxyInfo {
 	}
 }
 
+#[derive(Debug)]
 pub struct ProxyState {
 	pub cur_connections: usize,
+	pub healthy_sockets: Vec<SocketAddr>,
+	pub last_health_check: u128,
+	pub last_healthy_reply: HashMap<SocketAddr, u128>,
 }
 
 impl ProxyState {
-	fn new() -> Self {
-		Self { cur_connections: 0 }
+	fn new(proxy_entry: ProxyEntry) -> Result<Self, Error> {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+		let mut last_healthy_reply = HashMap::new();
+		for sock_addr in proxy_entry.get_sock_addrs() {
+			last_healthy_reply.insert(sock_addr.clone(), now);
+		}
+		Ok(Self {
+			cur_connections: 0,
+			healthy_sockets: proxy_entry.get_sock_addrs().to_vec(),
+			last_health_check: 0,
+			last_healthy_reply,
+		})
 	}
 }
 
@@ -295,6 +317,7 @@ struct ThreadContext {
 	proxy_connections: HashMap<u128, ProxyInfo>,
 	idle_proxy_connections: HashMap<ProxyEntry, HashSet<ProxyInfo>>,
 	proxy_state: HashMap<ProxyEntry, ProxyState>,
+	health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
 }
 
 impl ThreadContext {
@@ -321,11 +344,13 @@ impl ThreadContext {
 
 		let mut proxy_state = HashMap::new();
 		for (_k, v) in &config.proxy_config.mappings {
-			proxy_state.insert(v.clone(), ProxyState::new());
+			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
 		}
 		for (_k, v) in &config.proxy_config.extensions {
-			proxy_state.insert(v.clone(), ProxyState::new());
+			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
 		}
+
+		let health_check_connections = HashMap::new();
 
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
@@ -339,6 +364,7 @@ impl ThreadContext {
 			proxy_connections: HashMap::new(),
 			idle_proxy_connections: HashMap::new(),
 			proxy_state,
+			health_check_connections,
 		})
 	}
 }
@@ -732,16 +758,18 @@ impl<'a> HttpHeaders<'a> {
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ProxyEntry {
-	pub sock_addrs: Vec<SocketAddr>,
-	pub max_connections_per_thread: usize,
+	sock_addrs: Vec<SocketAddr>,
+	max_connections_per_thread: usize,
+	health_check: Option<HealthCheck>,
 	nonce: u128,
 }
 
 impl ProxyEntry {
-	pub fn from_socket_addr(sock_addr: SocketAddr) -> Self {
+	pub fn from_socket_addr(sock_addr: SocketAddr, health_check: Option<HealthCheck>) -> Self {
 		Self {
 			sock_addrs: vec![sock_addr],
 			max_connections_per_thread: usize::MAX,
+			health_check,
 			nonce: rand::random(),
 		}
 	}
@@ -749,10 +777,12 @@ impl ProxyEntry {
 	pub fn from_socket_addr_with_limit(
 		sock_addr: SocketAddr,
 		max_connections_per_thread: usize,
+		health_check: Option<HealthCheck>,
 	) -> Self {
 		Self {
 			sock_addrs: vec![sock_addr],
 			max_connections_per_thread,
+			health_check,
 			nonce: rand::random(),
 		}
 	}
@@ -760,13 +790,26 @@ impl ProxyEntry {
 	pub fn multi_socket_addr(
 		sock_addrs: Vec<SocketAddr>,
 		max_connections_per_thread: usize,
+		health_check: Option<HealthCheck>,
 	) -> Self {
 		Self {
 			sock_addrs,
 			max_connections_per_thread,
+			health_check,
 			nonce: rand::random(),
 		}
 	}
+
+	fn get_sock_addrs(&self) -> &Vec<SocketAddr> {
+		&self.sock_addrs
+	}
+}
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+pub struct HealthCheck {
+	pub path: String,
+	pub check_secs: u128,
+	pub expect_text: String,
 }
 
 #[derive(Clone)]
@@ -1092,6 +1135,7 @@ where
 		})?;
 
 		let evh_params = evh.get_evh_params();
+		let evh_params_clone = evh_params.clone();
 
 		let config1 = self.config.clone();
 		let config2 = self.config.clone();
@@ -1127,7 +1171,9 @@ where
 			Self::process_on_close(conn_data, ctx, &config3, user_data)
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
-		evh.set_on_housekeep(move |user_data| Self::process_on_housekeeper(&config4, user_data))?;
+		evh.set_on_housekeep(move |user_data, tid| {
+			Self::process_on_housekeeper(&config4, user_data, &evh_params_clone, tid)
+		})?;
 
 		evh.start()?;
 
@@ -1292,7 +1338,7 @@ where
 				unsafe {
 					ws2_32::closesocket(handle);
 				}
-				warn!("error connecting to {}: {}", sock_addr, e)?;
+				debug!("error connecting to {}: {}", sock_addr, e)?;
 				return Err(ErrorKind::IOError(format!("connect generated error: {}", e)).into());
 			}
 		};
@@ -1305,7 +1351,6 @@ where
 	fn process_proxy_outbound(
 		inbound: &ConnectionData,
 		_headers: &HttpHeaders,
-		//sock_addr: &SocketAddr,
 		proxy_entry: &ProxyEntry,
 		buffer: &[u8],
 		evh_params: &EvhParams,
@@ -1344,7 +1389,9 @@ where
 				let state = proxy_state.get_mut(proxy_entry);
 				let state = match state {
 					Some(state) => {
-						if state.cur_connections >= proxy_entry.max_connections_per_thread {
+						if state.healthy_sockets.len() == 0
+							|| state.cur_connections >= proxy_entry.max_connections_per_thread
+						{
 							inbound.write(HTTP_ERROR_503)?;
 							return Ok(());
 						}
@@ -1359,9 +1406,9 @@ where
 					}
 				};
 				let tid = inbound.tid();
-				// choose a random socket_addr
+				// choose a random socket_addr from the healthy sockets
 				let rand_entry: usize = rand::random();
-				let sock_addr = proxy_entry.sock_addrs[rand_entry % proxy_entry.sock_addrs.len()];
+				let sock_addr = state.healthy_sockets[rand_entry % state.healthy_sockets.len()];
 
 				let (handle, conn_data) = match Self::connect_outbound(&sock_addr, tid, evh_params)
 				{
@@ -1480,6 +1527,51 @@ where
 		Ok(())
 	}
 
+	fn process_health_check_response(
+		conn_data: &ConnectionData,
+		nbuf: &[u8],
+		health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+	) -> Result<(), Error> {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+		let proxy_entry = health_check_connections.get(&conn_data.get_connection_id());
+
+		match proxy_entry {
+			Some((proxy_entry, sock_addr)) => {
+				match &proxy_entry.health_check {
+					Some(health_check) => {
+						// TODO: check cross boundry reply (unlikely, but possible)
+						if bytes_find(nbuf, health_check.expect_text.as_bytes()).is_some() {
+							match proxy_state.get_mut(proxy_entry) {
+								Some(state) => {
+									let last = state.last_healthy_reply.get_mut(sock_addr);
+									match last {
+										Some(last) => *last = now,
+										None => {
+											warn!("no last for our sockaddr: {:?}", sock_addr)?;
+										}
+									}
+								}
+								None => {
+									warn!("unexpected none")?;
+								}
+							}
+							conn_data.close()?;
+						}
+					}
+					None => {
+						warn!("unexepected none2")?;
+					}
+				}
+			}
+			None => {
+				warn!("unexpected none3")?;
+			}
+		}
+
+		Ok(())
+	}
+
 	fn process_on_read(
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
@@ -1508,6 +1600,19 @@ where
 			conn_data.get_accept_handle(),
 			buffer_len,
 		)?;
+
+		match thread_context.health_check_connections.get(&connection_id) {
+			Some(_x) => {
+				Self::process_health_check_response(
+					conn_data,
+					nbuf,
+					&mut thread_context.health_check_connections,
+					&mut thread_context.proxy_state,
+				)?;
+				return Ok(());
+			}
+			None => {}
+		}
 
 		match thread_context.proxy_connections.get(&connection_id) {
 			Some(_proxy_info) => {
@@ -1708,7 +1813,7 @@ where
 							) {
 								Ok(_) => {}
 								Err(e) => {
-									warn!("Error while communicating with proxy: {}", e.kind(),)?;
+									debug!("Error while communicating with proxy: {}", e.kind(),)?;
 									conn_data.write(HTTP_ERROR_502)?;
 								}
 							}
@@ -2554,15 +2659,113 @@ where
 		Ok(())
 	}
 
+	fn check(
+		sock_addr: &SocketAddr,
+		tid: usize,
+		evh_params: &EvhParams,
+		health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
+		active_connections: &mut HashMap<u128, ConnectionInfo>,
+		proxy_entry: &ProxyEntry,
+	) -> Result<bool, Error> {
+		let (_handle, conn_data) = Self::connect_outbound(sock_addr, tid, evh_params)?;
+		let mut health_check = HEALTH_CHECK_VEC[0].clone();
+		health_check.extend_from_slice(b"/50x.html");
+		health_check.extend_from_slice(&HEALTH_CHECK_VEC[1]);
+		health_check_connections.insert(
+			conn_data.get_connection_id(),
+			(proxy_entry.clone(), sock_addr.clone()),
+		);
+		conn_data.write(&health_check)?;
+
+		active_connections.insert(
+			conn_data.get_connection_id(),
+			ConnectionInfo::new(conn_data.clone()),
+		);
+
+		Ok(true)
+	}
+
+	fn process_health_check(
+		thread_context: &mut ThreadContext,
+		_config: &HttpConfig,
+		evh_params: &EvhParams,
+		tid: usize,
+	) -> Result<(), Error> {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+		let mut update_vec = vec![];
+		for (k, v) in &thread_context.proxy_state {
+			match &k.health_check {
+				Some(hc) => {
+					if now.saturating_sub(v.last_health_check) > hc.check_secs * 1_000 {
+						let mut healthy_sockets = vec![];
+						for addr in &k.sock_addrs {
+							let res = Self::check(
+								addr,
+								tid,
+								evh_params,
+								&mut thread_context.health_check_connections,
+								&mut thread_context.active_connections,
+								k,
+							);
+
+							match res {
+								Ok(res) => {
+									if res {
+										match thread_context.proxy_state.get(k) {
+											Some(state) => {
+												let last = state.last_healthy_reply.get(addr);
+												match last {
+													Some(last) => {
+														if now.saturating_sub(*last)
+															< hc.check_secs * 2_000
+														{
+															healthy_sockets.push(addr.clone());
+														}
+													}
+													None => {}
+												}
+											}
+											None => {}
+										}
+									}
+								}
+								_ => {}
+							}
+						}
+						update_vec.push((k.to_owned(), healthy_sockets));
+					}
+				}
+				None => {} // no health check specified
+			}
+		}
+
+		for (k, healthy_sockets) in &update_vec {
+			let v = thread_context.proxy_state.get_mut(k);
+			match v {
+				Some(v) => {
+					v.last_health_check = now;
+					v.healthy_sockets = healthy_sockets.clone();
+				}
+				None => warn!("expected to find a value for k={:?}", k)?,
+			}
+		}
+
+		Ok(())
+	}
+
 	fn process_on_housekeeper(
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
+		evh_params: &EvhParams,
+		tid: usize,
 	) -> Result<(), Error> {
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
 		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 
 		debug!("housekeeping thread called")?;
+
+		Self::process_health_check(thread_context, config, evh_params, tid)?;
 
 		for (_id, connection) in &thread_context.active_connections {
 			if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
