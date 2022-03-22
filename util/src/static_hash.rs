@@ -493,34 +493,6 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 		return None;
 	}
 
-	/*
-					if self.last == u64::MAX {
-							self.last = entry.try_into()?;
-							self.pos = self.last;
-					}
-
-					// set next entry to the current first
-					let offset = self.get_iterator_next_offset(entry);
-					let ebytes = self.first.to_be_bytes();
-					self.data[offset..offset + 8].clone_from_slice(&ebytes);
-
-					// set the prev pointer to u64::MAX (end of chain)
-					let offset = self.get_iterator_prev_offset(entry);
-					let ebytes = u64::MAX.to_be_bytes();
-					self.data[offset..offset + 8].clone_from_slice(&ebytes);
-
-					// update the prev pointer of the current first to point to
-					// the new entry
-					if self.first != u64::MAX {
-							let offset = self.get_iterator_prev_offset(self.first.try_into()?);
-							let ebytes = entry.to_be_bytes();
-							self.data[offset..offset + 8].clone_from_slice(&ebytes);
-					}
-
-					// set first to this new entry
-					self.first = entry.try_into()?;
-	*/
-
 	/// Bring an entry to the front of queue returned by the iterator. This is used by caches
 	/// since get is immutable and may not be called on every request.
 	pub fn bring_to_front(&mut self, key: &[u8]) -> Result<bool, Error> {

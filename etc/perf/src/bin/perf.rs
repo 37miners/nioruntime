@@ -24,7 +24,8 @@ use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_http::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry,
+	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry, ProxyRotation,
+	Upstream,
 };
 use nioruntime_log::*;
 use nioruntime_util::lockw;
@@ -400,8 +401,8 @@ fn main() -> Result<(), Error> {
 				"php".as_bytes().to_vec(),
 				ProxyEntry::multi_socket_addr(
 					vec![
-						SocketAddr::from_str("127.0.0.1:80").unwrap(),
-						SocketAddr::from_str("127.0.0.1:90").unwrap(),
+						Upstream::new(SocketAddr::from_str("127.0.0.1:90").unwrap(), 1),
+						Upstream::new(SocketAddr::from_str("127.0.0.1:80").unwrap(), 1),
 					],
 					10000000,
 					Some(HealthCheck {
@@ -409,33 +410,46 @@ fn main() -> Result<(), Error> {
 						path: "/50x.html".to_string(),
 						expect_text: "status: ok".to_string(),
 					}),
+					ProxyRotation::StickyIp,
 				),
 			);
 
 			extensions.insert(
 				"php2".as_bytes().to_vec(),
 				ProxyEntry::multi_socket_addr(
-					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
+					vec![Upstream::new(
+						SocketAddr::from_str("127.0.0.1:80").unwrap(),
+						1,
+					)],
 					usize::MAX,
 					None,
+					ProxyRotation::Random,
 				),
 			);
 
 			extensions.insert(
 				"php3".as_bytes().to_vec(),
 				ProxyEntry::multi_socket_addr(
-					vec![SocketAddr::from_str("127.0.0.1:90").unwrap()],
+					vec![Upstream::new(
+						SocketAddr::from_str("127.0.0.1:90").unwrap(),
+						1,
+					)],
 					10,
 					None,
+					ProxyRotation::Random,
 				),
 			);
 
 			extensions.insert(
 				"php4".as_bytes().to_vec(),
 				ProxyEntry::multi_socket_addr(
-					vec![SocketAddr::from_str("127.0.0.1:80").unwrap()],
+					vec![Upstream::new(
+						SocketAddr::from_str("127.0.0.1:80").unwrap(),
+						1,
+					)],
 					0,
 					None,
+					ProxyRotation::Random,
 				),
 			);
 
@@ -462,7 +476,7 @@ fn main() -> Result<(), Error> {
 			let config = HttpConfig {
 				connect_timeout: 5000,
 				idle_timeout: 15000,
-				addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+				addrs: vec![SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?],
 				threads,
 				proxy_config: ProxyConfig {
 					extensions,

@@ -293,12 +293,16 @@ impl ProxyState {
 	fn new(proxy_entry: ProxyEntry) -> Result<Self, Error> {
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 		let mut last_healthy_reply = HashMap::new();
-		for sock_addr in proxy_entry.get_sock_addrs() {
-			last_healthy_reply.insert(sock_addr.clone(), now);
+		let mut healthy_sockets = vec![];
+		for upstream in proxy_entry.get_upstream() {
+			last_healthy_reply.insert(upstream.sock_addr.clone(), now);
+			for _ in 0..upstream.weight {
+				healthy_sockets.push(upstream.sock_addr.clone());
+			}
 		}
 		Ok(Self {
 			cur_connections: 0,
-			healthy_sockets: proxy_entry.get_sock_addrs().to_vec(),
+			healthy_sockets,
 			last_health_check: 0,
 			last_healthy_reply,
 		})
@@ -315,7 +319,7 @@ struct ThreadContext {
 	async_connections: Arc<RwLock<HashSet<u128>>>,
 	active_connections: HashMap<u128, ConnectionInfo>,
 	proxy_connections: HashMap<u128, ProxyInfo>,
-	idle_proxy_connections: HashMap<ProxyEntry, HashSet<ProxyInfo>>,
+	idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	proxy_state: HashMap<ProxyEntry, ProxyState>,
 	health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
 }
@@ -343,11 +347,14 @@ impl ThreadContext {
 		value_buf.resize(config.max_header_value_len, 0u8);
 
 		let mut proxy_state = HashMap::new();
+		let mut idle_proxy_connections = HashMap::new();
 		for (_k, v) in &config.proxy_config.mappings {
 			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
+			idle_proxy_connections.insert(v.clone(), HashMap::new());
 		}
 		for (_k, v) in &config.proxy_config.extensions {
 			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
+			idle_proxy_connections.insert(v.clone(), HashMap::new());
 		}
 
 		let health_check_connections = HashMap::new();
@@ -362,7 +369,7 @@ impl ThreadContext {
 			async_connections: Arc::new(RwLock::new(HashSet::new())),
 			active_connections: HashMap::new(),
 			proxy_connections: HashMap::new(),
-			idle_proxy_connections: HashMap::new(),
+			idle_proxy_connections,
 			proxy_state,
 			health_check_connections,
 		})
@@ -490,7 +497,7 @@ impl<'a> HttpHeaders<'a> {
 		&self.uri
 	}
 
-	pub fn get_header_value(&self, name: String) -> Result<Option<String>, Error> {
+	pub fn get_header_value(&self, name: String) -> Result<Option<Vec<String>>, Error> {
 		let mut name_bytes = name.as_bytes().to_vec();
 		let key_len = self.header_map.config().key_len;
 		for _ in name_bytes.len()..key_len {
@@ -498,8 +505,23 @@ impl<'a> HttpHeaders<'a> {
 		}
 		match self.header_map.get_raw(&name_bytes) {
 			Some(value) => {
-				let len = u32::from_be_bytes(value[0..4].try_into().unwrap()) as usize;
-				Ok(Some(std::str::from_utf8(&value[4..4 + len])?.to_string()))
+				let mut ret = vec![];
+				let mut offset = 0;
+				loop {
+					if offset + 4 >= value.len() {
+						break;
+					}
+					let len = u32::from_be_bytes(value[offset..offset + 4].try_into()?) as usize;
+					if len == 0 {
+						break;
+					}
+					ret.push(
+						std::str::from_utf8(&value[offset + 4..offset + 4 + len])?.to_string(),
+					);
+					offset += 4 + len;
+				}
+
+				Ok(Some(ret))
 			}
 			None => Ok(None),
 		}
@@ -729,7 +751,24 @@ impl<'a> HttpHeaders<'a> {
 				if bytes_eq(&key_buf[0..key_offset], RANGE_BYTES) {
 					range = true;
 				}
-				header_map.insert_raw(&key_buf, &value_buf)?;
+				match header_map.get_raw(&key_buf) {
+					Some(value) => {
+						if value.len() + 4 + value_offset > config.max_header_value_len {
+							return Err(ErrorKind::HttpError431(
+								"Request Header Fields Too Large".into(),
+							)
+							.into());
+						}
+						value_buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+						value_buf.extend_from_slice(value);
+						header_map
+							.insert_raw(&key_buf, &value_buf[0..config.max_header_value_len])?;
+						value_buf.resize(config.max_header_value_len, 0u8);
+					}
+					None => {
+						header_map.insert_raw(&key_buf, &value_buf)?;
+					}
+				}
 
 				for j in 0..key_offset {
 					key_buf[j] = 0;
@@ -757,20 +796,49 @@ impl<'a> HttpHeaders<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
+pub struct Upstream {
+	sock_addr: SocketAddr,
+	weight: usize,
+}
+
+impl Upstream {
+	pub fn new(sock_addr: SocketAddr, weight: usize) -> Self {
+		Self { sock_addr, weight }
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyRotation {
+	Random,
+	StickyIp,
+	StickyCookie(String),
+	LeastLatency,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyEntry {
-	sock_addrs: Vec<SocketAddr>,
+	upstream: Vec<Upstream>,
 	max_connections_per_thread: usize,
 	health_check: Option<HealthCheck>,
 	nonce: u128,
+	proxy_rotation: ProxyRotation,
+}
+
+impl std::hash::Hash for ProxyEntry {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		self.nonce.hash(state);
+	}
 }
 
 impl ProxyEntry {
 	pub fn from_socket_addr(sock_addr: SocketAddr, health_check: Option<HealthCheck>) -> Self {
+		let proxy_rotation = ProxyRotation::Random;
 		Self {
-			sock_addrs: vec![sock_addr],
+			upstream: vec![Upstream::new(sock_addr, 1)],
 			max_connections_per_thread: usize::MAX,
 			health_check,
 			nonce: rand::random(),
+			proxy_rotation,
 		}
 	}
 
@@ -779,29 +847,33 @@ impl ProxyEntry {
 		max_connections_per_thread: usize,
 		health_check: Option<HealthCheck>,
 	) -> Self {
+		let proxy_rotation = ProxyRotation::Random;
 		Self {
-			sock_addrs: vec![sock_addr],
+			upstream: vec![Upstream::new(sock_addr, 1)],
 			max_connections_per_thread,
 			health_check,
 			nonce: rand::random(),
+			proxy_rotation,
 		}
 	}
 
 	pub fn multi_socket_addr(
-		sock_addrs: Vec<SocketAddr>,
+		upstream: Vec<Upstream>,
 		max_connections_per_thread: usize,
 		health_check: Option<HealthCheck>,
+		proxy_rotation: ProxyRotation,
 	) -> Self {
 		Self {
-			sock_addrs,
+			upstream,
 			max_connections_per_thread,
 			health_check,
 			nonce: rand::random(),
+			proxy_rotation,
 		}
 	}
 
-	fn get_sock_addrs(&self) -> &Vec<SocketAddr> {
-		&self.sock_addrs
+	fn get_upstream(&self) -> &Vec<Upstream> {
+		&self.upstream
 	}
 }
 
@@ -1292,7 +1364,9 @@ where
 									};
 									(complete, close)
 								}
-								None => (false, false), // TODO: how do we handle this?
+								None => {
+									(false, false) // TODO: how do we handle this?
+								}
 							}
 						} else {
 							// no content, just headers
@@ -1356,14 +1430,67 @@ where
 		evh_params: &EvhParams,
 		proxy_connections: &mut HashMap<u128, ProxyInfo>,
 		active_connections: &mut HashMap<u128, ConnectionInfo>,
-		idle_proxy_connections: &mut HashMap<ProxyEntry, HashSet<ProxyInfo>>,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+		remote_peer: &Option<SocketAddr>,
 	) -> Result<(), Error> {
-		let proxy_info = match idle_proxy_connections.get_mut(proxy_entry) {
-			Some(hashset) => match hashset.iter().next() {
-				Some(proxy_info) => Some(proxy_info.clone()),
-				None => None,
-			},
+		// select a random health socket
+		let state = proxy_state.get(proxy_entry);
+		let healthy_sock_addr = match state {
+			Some(state) => {
+				let len = state.healthy_sockets.len();
+				if len == 0 {
+					// 503 service unavailable
+					inbound.write(HTTP_ERROR_503)?;
+					return Ok(());
+				} else {
+					let entry = match &proxy_entry.proxy_rotation {
+						ProxyRotation::Random => {
+							let rand: usize = rand::random();
+							rand % len
+						}
+						ProxyRotation::LeastLatency => {
+							0 // TODO: implement
+						}
+						ProxyRotation::StickyIp => match remote_peer {
+							Some(remote_peer) => {
+								let mut sha256 = Sha256::new();
+								sha256.write(&remote_peer.ip().to_string().as_bytes())?;
+								let hash = sha256.finalize();
+								u32::from_be_bytes(hash.to_vec()[..4].try_into()?) as usize % len
+							}
+							None => 0,
+						},
+						ProxyRotation::StickyCookie(_cookie) => {
+							0 // TODO: implement
+						}
+					};
+
+					state.healthy_sockets[entry]
+				}
+			}
+			None => {
+				return Err(ErrorKind::InternalError(format!(
+					"no state found for proxy: {:?}",
+					proxy_entry
+				))
+				.into());
+			}
+		};
+
+		let map = idle_proxy_connections.get_mut(proxy_entry).unwrap();
+		let proxy_info = match map.get_mut(&healthy_sock_addr) {
+			Some(hashset) => {
+				let proxy_info = hashset.iter().last();
+				match proxy_info {
+					Some(proxy_info) => {
+						let proxy_info = proxy_info.to_owned();
+						hashset.retain(|k| k != &proxy_info);
+						Some(proxy_info)
+					}
+					None => None,
+				}
+			}
 			None => None,
 		};
 
@@ -1373,57 +1500,36 @@ where
 					Some(proxy_info) => {
 						proxy_info.response_conn_data = Some(inbound.clone());
 					}
-					None => debug!("no proxy found")?,
-				}
-
-				match idle_proxy_connections.get_mut(proxy_entry) {
-					Some(hashset) => {
-						hashset.remove(&proxy_info);
+					None => {
+						return Err(
+							ErrorKind::InternalError("proxy connection not found".into()).into(),
+						)
 					}
-					None => {}
 				}
-
-				proxy_info.proxy_conn
+				proxy_info.proxy_conn.clone()
 			}
 			None => {
+				let tid = inbound.tid();
 				let state = proxy_state.get_mut(proxy_entry);
 				let state = match state {
-					Some(state) => {
-						if state.healthy_sockets.len() == 0
-							|| state.cur_connections >= proxy_entry.max_connections_per_thread
-						{
-							inbound.write(HTTP_ERROR_503)?;
-							return Ok(());
-						}
-						state
-					}
-					None => {
-						return Err(ErrorKind::InternalError(format!(
-							"no proxy state for sock_addr = {:?}",
-							proxy_entry
-						))
-						.into());
-					}
+					Some(state) => state,
+					None => return Err(ErrorKind::InternalError("No state found".into()).into()),
 				};
-				let tid = inbound.tid();
-				// choose a random socket_addr from the healthy sockets
-				let rand_entry: usize = rand::random();
-				let sock_addr = state.healthy_sockets[rand_entry % state.healthy_sockets.len()];
 
-				let (handle, conn_data) = match Self::connect_outbound(&sock_addr, tid, evh_params)
-				{
-					Ok((handle, conn_data)) => {
-						state.cur_connections += 1;
-						(handle, conn_data)
-					}
-					Err(e) => {
-						return Err(ErrorKind::IOError(format!(
-							"Error connecting to proxy: {}",
-							e
-						))
-						.into());
-					}
-				};
+				let (handle, conn_data) =
+					match Self::connect_outbound(&healthy_sock_addr, tid, evh_params) {
+						Ok((handle, conn_data)) => {
+							state.cur_connections += 1;
+							(handle, conn_data)
+						}
+						Err(e) => {
+							return Err(ErrorKind::IOError(format!(
+								"Error connecting to proxy: {}",
+								e
+							))
+							.into());
+						}
+					};
 
 				debug!(
 					"proxy added handle = {}, conn_id = {}",
@@ -1437,7 +1543,7 @@ where
 						handle,
 						response_conn_data: Some(inbound.clone()),
 						buffer: vec![],
-						sock_addr,
+						sock_addr: healthy_sock_addr,
 						proxy_conn: conn_data.clone(),
 						proxy_entry: proxy_entry.clone(),
 					},
@@ -1471,7 +1577,7 @@ where
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		proxy_connections: &mut HashMap<u128, ProxyInfo>,
-		idle_proxy_connections: &mut HashMap<ProxyEntry, HashSet<ProxyInfo>>,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	) -> Result<(), Error> {
 		let proxy_info = proxy_connections.get_mut(&conn_data.get_connection_id());
 		match proxy_info {
@@ -1484,7 +1590,8 @@ where
 					}
 					(ret, close)
 				} else {
-					Self::check_complete(nbuf)
+					let ret = Self::check_complete(nbuf);
+					ret
 				};
 
 				// we write whether we're done or not
@@ -1496,24 +1603,40 @@ where
 						}
 					},
 					None => {
-						warn!("no proxy")?;
+						warn!(
+							"no proxy for id = {}, nbuf='{}'",
+							conn_data.get_connection_id(),
+							std::str::from_utf8(nbuf)?
+						)?;
 					}
 				}
 				if is_complete && !is_close {
 					// put this connection into the idle pool
 					proxy_info.response_conn_data = None;
 					let added = match idle_proxy_connections.get_mut(&proxy_info.proxy_entry) {
-						Some(conns) => {
-							conns.insert(proxy_info.clone());
-							true
-						}
+						Some(conns) => match conns.get_mut(&proxy_info.sock_addr) {
+							Some(ref mut conns) => {
+								conns.insert(proxy_info.clone());
+								true
+							}
+							None => false,
+						},
 						None => false,
 					};
 
 					if !added {
 						let mut nhashset = HashSet::new();
 						nhashset.insert(proxy_info.clone());
-						idle_proxy_connections.insert(proxy_info.proxy_entry.clone(), nhashset);
+						match idle_proxy_connections.get_mut(&proxy_info.proxy_entry.clone()) {
+							Some(map) => {
+								map.insert(proxy_info.sock_addr, nhashset);
+							}
+							None => {
+								let mut map = HashMap::new();
+								map.insert(proxy_info.sock_addr, nhashset);
+								idle_proxy_connections.insert(proxy_info.proxy_entry.clone(), map);
+							}
+						}
 					}
 				} else if !is_close {
 					proxy_info.buffer.extend_from_slice(nbuf);
@@ -1589,6 +1712,7 @@ where
 		Self::process_async(ctx, thread_context, conn_data)?;
 		Self::update_conn_info(thread_context, conn_data, now)?;
 
+		let remote_peer = &ctx.remote_peer.clone();
 		let buffer = ctx.get_buffer();
 		let buffer_len = buffer.len();
 		let connection_id = conn_data.get_connection_id();
@@ -1648,6 +1772,7 @@ where
 					api_handler,
 					evh_params,
 					now,
+					remote_peer,
 				)?;
 				if amt == 0 {
 					break;
@@ -1684,6 +1809,7 @@ where
 					api_handler,
 					evh_params,
 					now,
+					remote_peer,
 				)?;
 				if amt == 0 {
 					Self::append_buffer(&pbuf, buffer)?;
@@ -1718,6 +1844,7 @@ where
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		evh_params: &EvhParams,
 		now: SystemTime,
+		remote_peer: &Option<SocketAddr>,
 	) -> Result<usize, Error> {
 		let mime_map = &thread_context.mime_map;
 		let async_connections = &thread_context.async_connections;
@@ -1760,21 +1887,27 @@ where
 					let range = headers.get_header_value("Range".to_string())?;
 					match range {
 						Some(range) => {
-							let start_index = range.find("=");
-							match start_index {
-								Some(start_index) => {
-									let dash_index = range.find("-");
-									match dash_index {
-										Some(dash_index) => {
-											let end = range.len();
-											let start_str = &range[(start_index + 1)..dash_index];
-											let end_str = &range[(dash_index + 1)..end];
-											Some((start_str.parse()?, end_str.parse()?))
+							if range.len() < 1 {
+								None
+							} else {
+								let range = &range[0];
+								let start_index = range.find("=");
+								match start_index {
+									Some(start_index) => {
+										let dash_index = range.find("-");
+										match dash_index {
+											Some(dash_index) => {
+												let end = range.len();
+												let start_str =
+													&range[(start_index + 1)..dash_index];
+												let end_str = &range[(dash_index + 1)..end];
+												Some((start_str.parse()?, end_str.parse()?))
+											}
+											None => None,
 										}
-										None => None,
 									}
+									None => None,
 								}
-								None => None,
 							}
 						}
 						None => None,
@@ -1810,6 +1943,7 @@ where
 								&mut thread_context.active_connections,
 								&mut thread_context.idle_proxy_connections,
 								&mut thread_context.proxy_state,
+								remote_peer,
 							) {
 								Ok(_) => {}
 								Err(e) => {
@@ -2633,15 +2767,22 @@ where
 
 		thread_context.active_connections.remove(&connection_id);
 
+		thread_context
+			.health_check_connections
+			.remove(&connection_id);
+
 		match thread_context.proxy_connections.remove(&connection_id) {
 			Some(proxy_info) => {
 				match thread_context
 					.idle_proxy_connections
 					.get_mut(&proxy_info.proxy_entry)
 				{
-					Some(hashset) => {
-						hashset.remove(&proxy_info);
-					}
+					Some(map) => match map.get_mut(&proxy_info.sock_addr) {
+						Some(hashset) => {
+							hashset.remove(&proxy_info);
+						}
+						None => {}
+					},
 					None => {}
 				}
 
@@ -2654,6 +2795,18 @@ where
 				}
 			}
 			None => {}
+		}
+
+		// async connections should be removed by user, but if left to this point, we remove.
+		// we don't want to block in the general case, so we try a read lock first.
+		let found = {
+			let async_connections = lockr!(thread_context.async_connections)?;
+			async_connections.get(&connection_id).is_some()
+		};
+
+		if found {
+			let mut async_connections = lockw!(thread_context.async_connections)?;
+			async_connections.remove(&connection_id);
 		}
 
 		Ok(())
@@ -2698,9 +2851,9 @@ where
 				Some(hc) => {
 					if now.saturating_sub(v.last_health_check) > hc.check_secs * 1_000 {
 						let mut healthy_sockets = vec![];
-						for addr in &k.sock_addrs {
+						for upstream in &k.upstream {
 							let res = Self::check(
-								addr,
+								&upstream.sock_addr,
 								tid,
 								evh_params,
 								&mut thread_context.health_check_connections,
@@ -2713,13 +2866,19 @@ where
 									if res {
 										match thread_context.proxy_state.get(k) {
 											Some(state) => {
-												let last = state.last_healthy_reply.get(addr);
+												let last = state
+													.last_healthy_reply
+													.get(&upstream.sock_addr);
 												match last {
 													Some(last) => {
 														if now.saturating_sub(*last)
 															< hc.check_secs * 2_000
 														{
-															healthy_sockets.push(addr.clone());
+															for _ in 0..upstream.weight {
+																healthy_sockets.push(
+																	upstream.sock_addr.clone(),
+																);
+															}
 														}
 													}
 													None => {}

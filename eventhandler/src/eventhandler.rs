@@ -32,13 +32,17 @@ use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // unix specific
 #[cfg(unix)]
 use nioruntime_deps::libc::fcntl;
+#[cfg(unix)]
+use nioruntime_deps::nix::sys::socket::getpeername;
 #[cfg(unix)]
 use std::os::unix::prelude::RawFd;
 
@@ -119,6 +123,7 @@ const _FLAG_IS_TLS_CLIENT: u8 = 0x1 << 3;
 pub struct ConnectionContext {
 	pub buffer: Vec<u8>,
 	pub is_async_complete: bool,
+	pub remote_peer: Option<SocketAddr>,
 }
 
 impl ConnectionContext {
@@ -126,6 +131,7 @@ impl ConnectionContext {
 		Self {
 			buffer: vec![],
 			is_async_complete: false,
+			remote_peer: None,
 		}
 	}
 
@@ -1350,6 +1356,12 @@ where
 			);
 
 			let mut connection_context = ConnectionContext::new();
+
+			#[cfg(unix)]
+			let remote_peer = Some(SocketAddr::from_str(&getpeername(handle)?.to_string())?);
+			#[cfg(windows)]
+			let remote_peer: Option<SocketAddr> = None; // TODO: make work for windows
+			connection_context.remote_peer = remote_peer;
 
 			match &callbacks.on_accept {
 				Some(on_accept) => {

@@ -17,4 +17,5 @@ mod http;
 
 pub use crate::http::{
 	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, HttpServer, ProxyConfig, ProxyEntry,
+	ProxyRotation, Upstream,
 };

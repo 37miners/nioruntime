@@ -63,6 +63,10 @@ pub fn bytes_to_usize(bytes: &[u8]) -> Result<usize, Error> {
 	let mut ret = 0;
 	let mut mul = 1;
 	let mut itt = 0;
+	for _ in 0..(bytes_len.saturating_sub(1)) {
+		mul *= 10;
+	}
+
 	loop {
 		if bytes_len == 0 {
 			break;
@@ -76,11 +80,10 @@ pub fn bytes_to_usize(bytes: &[u8]) -> Result<usize, Error> {
 			))
 			.into());
 		}
-
-		ret += mul * bytes[itt] as usize - ('0' as usize);
+		ret += mul * (bytes[itt] as usize - ('0' as usize));
 
 		itt += 1;
-		mul *= 10;
+		mul /= 10;
 	}
 
 	Ok(ret)
