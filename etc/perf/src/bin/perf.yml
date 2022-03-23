@@ -82,25 +82,37 @@ args:
         long: http
         takes_value: false
     - port:
-         help: tcp port to bind/connect to. Default is 8092.
-         short: y
-         long: port
-         takes_value: true
-         value_name: port
+        help: tcp port to bind/connect to. Default is 8092.
+        short: y
+        long: port
+        takes_value: true
+        value_name: port
     - path:
-         help: the http path to request. Default is '/'.
-         short: w
-         long: path
-         takes_value: true
-         value_name: path
+        help: the http path to request. Default is '/'.
+        short: w
+        long: path
+        takes_value: true
+        value_name: path
     - show_response:
-         help: show the response of each request in the log (stdin).
-         short: a
-         long: show_response
-         takes_value: false
+        help: show the response of each request in the log (stdin).
+        short: a
+        long: show_response
+        takes_value: false
     - sleep:
-          help: how long to sleep during API requests (for testing of async)
-          short: s
-          long: sleep
-          takes_value: true
-          value_name: sleep
+        help: how long to sleep during API requests (for testing of async)
+        short: s
+        long: sleep
+        takes_value: true
+        value_name: sleep
+    - show_headers:
+        help: show request headers
+        short: d
+        long: show_headers
+        takes_value: false
+    - header:
+        help: include a header in the request
+        short: he
+        long: header
+        takes_value: true
+        value_name: header
+        

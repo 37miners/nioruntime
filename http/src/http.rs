@@ -38,16 +38,19 @@ use nioruntime_util::{lockr, lockw};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::fmt::{Display, Formatter};
 use std::fs::{metadata, File, Metadata};
 use std::hash::Hasher;
 use std::io::{Read, Write};
 use std::mem;
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::from_utf8;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -248,6 +251,7 @@ struct ProxyInfo {
 	buffer: Vec<u8>,
 	sock_addr: SocketAddr,
 	proxy_entry: ProxyEntry,
+	request_start_time: u128,
 }
 
 impl std::hash::Hash for ProxyInfo {
@@ -277,6 +281,7 @@ impl Clone for ProxyInfo {
 			sock_addr: self.sock_addr.clone(),
 			proxy_conn: self.proxy_conn.clone(),
 			proxy_entry: self.proxy_entry.clone(),
+			request_start_time: self.request_start_time,
 		}
 	}
 }
@@ -287,6 +292,7 @@ pub struct ProxyState {
 	pub healthy_sockets: Vec<SocketAddr>,
 	pub last_health_check: u128,
 	pub last_healthy_reply: HashMap<SocketAddr, u128>,
+	last_lat_micros: HashMap<SocketAddr, (usize, Vec<u128>, usize)>,
 }
 
 impl ProxyState {
@@ -294,17 +300,25 @@ impl ProxyState {
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 		let mut last_healthy_reply = HashMap::new();
 		let mut healthy_sockets = vec![];
+		let mut last_lat_micros = HashMap::new();
+		let mut index = 0;
 		for upstream in proxy_entry.get_upstream() {
 			last_healthy_reply.insert(upstream.sock_addr.clone(), now);
 			for _ in 0..upstream.weight {
 				healthy_sockets.push(upstream.sock_addr.clone());
 			}
+			let mut last_lat = vec![];
+			last_lat.resize(proxy_entry.last_lat_count, 0u128);
+			last_lat_micros.insert(upstream.sock_addr.clone(), (0, last_lat, index));
+			index += 1;
 		}
+
 		Ok(Self {
 			cur_connections: 0,
 			healthy_sockets,
 			last_health_check: 0,
 			last_healthy_reply,
+			last_lat_micros,
 		})
 	}
 }
@@ -409,6 +423,40 @@ pub struct HttpHeaders<'a> {
 	range: bool,
 }
 
+impl<'a> Display for HttpHeaders<'a> {
+	fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+		write!(f, "method:  '{:?}'\n", self.get_method())?;
+		write!(f, "version: '{:?}'\n", self.get_version())?;
+		write!(
+			f,
+			"uri:     '{}'\n",
+			std::str::from_utf8(self.get_uri()).unwrap_or("[non-utf8-string]")
+		)?;
+		write!(
+			f,
+			"query:   '{}'\n",
+			std::str::from_utf8(self.get_query()).unwrap_or("[non-utf8-string]")
+		)?;
+		write!(f, "\nHTTP Headers:\n")?;
+		for name in self.get_header_names().map_err(|_e| std::fmt::Error)? {
+			let values = self.get_header_value(&name).map_err(|_e| std::fmt::Error)?;
+			match values {
+				Some(values) => {
+					for value in values {
+						let mut spacing = "".to_string();
+						for _ in name.len()..20 {
+							spacing = format!("{} ", spacing);
+						}
+						write!(f, "{}:{} '{}'\n", name, spacing, value)?;
+					}
+				}
+				None => {}
+			}
+		}
+		Ok(())
+	}
+}
+
 impl<'a> HttpHeaders<'a> {
 	fn new(
 		buffer: &'a [u8],
@@ -497,7 +545,7 @@ impl<'a> HttpHeaders<'a> {
 		&self.uri
 	}
 
-	pub fn get_header_value(&self, name: String) -> Result<Option<Vec<String>>, Error> {
+	pub fn get_header_value(&self, name: &String) -> Result<Option<Vec<String>>, Error> {
 		let mut name_bytes = name.as_bytes().to_vec();
 		let key_len = self.header_map.config().key_len;
 		for _ in name_bytes.len()..key_len {
@@ -533,6 +581,9 @@ impl<'a> HttpHeaders<'a> {
 			let len = header.len();
 			let mut header_ret = vec![];
 			for i in 0..len {
+				if header[i] == 0 {
+					break;
+				}
 				header_ret.push(header[i]);
 			}
 			ret.push(std::str::from_utf8(&header_ret)?.to_string());
@@ -822,6 +873,8 @@ pub struct ProxyEntry {
 	health_check: Option<HealthCheck>,
 	nonce: u128,
 	proxy_rotation: ProxyRotation,
+	control_percent: usize,
+	last_lat_count: usize,
 }
 
 impl std::hash::Hash for ProxyEntry {
@@ -839,6 +892,8 @@ impl ProxyEntry {
 			health_check,
 			nonce: rand::random(),
 			proxy_rotation,
+			control_percent: 0,
+			last_lat_count: 0,
 		}
 	}
 
@@ -854,6 +909,8 @@ impl ProxyEntry {
 			health_check,
 			nonce: rand::random(),
 			proxy_rotation,
+			control_percent: 0,
+			last_lat_count: 0,
 		}
 	}
 
@@ -862,6 +919,8 @@ impl ProxyEntry {
 		max_connections_per_thread: usize,
 		health_check: Option<HealthCheck>,
 		proxy_rotation: ProxyRotation,
+		last_lat_count: usize,
+		control_percent: usize,
 	) -> Self {
 		Self {
 			upstream,
@@ -869,6 +928,8 @@ impl ProxyEntry {
 			health_check,
 			nonce: rand::random(),
 			proxy_rotation,
+			control_percent,
+			last_lat_count,
 		}
 	}
 
@@ -924,6 +985,7 @@ pub struct HttpConfig {
 	pub idle_timeout: u128,
 	pub mime_map: Vec<(String, String)>,
 	pub proxy_config: ProxyConfig,
+	pub show_headers: bool,
 }
 
 impl Default for HttpConfig {
@@ -948,6 +1010,7 @@ impl Default for HttpConfig {
 			cache_recheck_fs_millis: 3_000, // 3 seconds
 			connect_timeout: 30_000,        // 30 seconds
 			idle_timeout: 60_000,           // 1 minute
+			show_headers: false,            // debug: show headers
 			mime_map: vec![
 				("html".to_string(), "text/html".to_string()),
 				("htm".to_string(), "text/html".to_string()),
@@ -1424,7 +1487,8 @@ where
 
 	fn process_proxy_outbound(
 		inbound: &ConnectionData,
-		_headers: &HttpHeaders,
+		headers: &HttpHeaders,
+		_config: &HttpConfig,
 		proxy_entry: &ProxyEntry,
 		buffer: &[u8],
 		evh_params: &EvhParams,
@@ -1433,6 +1497,7 @@ where
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		remote_peer: &Option<SocketAddr>,
+		now: SystemTime,
 	) -> Result<(), Error> {
 		// select a random health socket
 		let state = proxy_state.get(proxy_entry);
@@ -1450,22 +1515,111 @@ where
 							rand % len
 						}
 						ProxyRotation::LeastLatency => {
-							0 // TODO: implement
+							let control_pct = proxy_entry.control_percent;
+							let mut least_micros = u128::MAX;
+							let mut fastest_addr = None;
+							for (_k, v) in &state.last_lat_micros {
+								let mut sum = 0;
+								for entry in &v.1 {
+									sum += entry;
+								}
+								let avg = sum / v.1.len() as u128;
+								if avg < least_micros {
+									least_micros = avg;
+									fastest_addr = Some(v.2);
+								}
+							}
+							let rand: usize = rand::random();
+							if fastest_addr.is_some() && rand % 100 >= control_pct {
+								fastest_addr.unwrap()
+							} else {
+								let rand: usize = rand::random();
+								rand % len
+							}
 						}
 						ProxyRotation::StickyIp => match remote_peer {
 							Some(remote_peer) => {
 								let mut sha256 = Sha256::new();
-								sha256.write(&remote_peer.ip().to_string().as_bytes())?;
+								match remote_peer.ip() {
+									IpAddr::V4(ip) => {
+										sha256.write(&ip.octets())?;
+									}
+									IpAddr::V6(ip) => {
+										sha256.write(&ip.octets())?;
+									}
+								}
 								let hash = sha256.finalize();
 								u32::from_be_bytes(hash.to_vec()[..4].try_into()?) as usize % len
 							}
-							None => 0,
+							None => {
+								let rand: usize = rand::random();
+								rand % len
+							}
 						},
-						ProxyRotation::StickyCookie(_cookie) => {
-							0 // TODO: implement
+						ProxyRotation::StickyCookie(cookie_target) => {
+							match headers.get_header_value(&"Cookie".to_string())? {
+								Some(cookies) => {
+									let mut ret = None;
+									for cookie in cookies {
+										let cookie = cookie.as_bytes();
+										let mut start = 0;
+										loop {
+											let mut end = cookie.len();
+											if start >= end {
+												break;
+											}
+											match bytes_find(&cookie[start..], b";") {
+												Some(semi) => end = semi + start,
+												None => {}
+											}
+											if start >= end {
+												break;
+											}
+
+											match bytes_find(&cookie[start..], b"=") {
+												Some(equal) => {
+													if equal < end {
+														if std::str::from_utf8(
+															&cookie[start..(start + equal)],
+														)? == cookie_target
+														{
+															ret = Some(
+																from_utf8(
+																	&cookie
+																		[(start + equal + 1)..end],
+																)?
+																.to_string(),
+															);
+														}
+													}
+												}
+												None => {}
+											}
+
+											start = end + 2;
+										}
+									}
+									match ret {
+										Some(ret) => {
+											let mut sha256 = Sha256::new();
+											sha256.write(&ret.as_bytes())?;
+											let hash = sha256.finalize();
+											u32::from_be_bytes(hash.to_vec()[..4].try_into()?)
+												as usize % len
+										}
+										None => {
+											let rand: usize = rand::random();
+											rand % len
+										}
+									}
+								}
+								None => {
+									let rand: usize = rand::random();
+									rand % len
+								}
+							}
 						}
 					};
-
 					state.healthy_sockets[entry]
 				}
 			}
@@ -1479,7 +1633,7 @@ where
 		};
 
 		let map = idle_proxy_connections.get_mut(proxy_entry).unwrap();
-		let proxy_info = match map.get_mut(&healthy_sock_addr) {
+		let mut proxy_info = match map.get_mut(&healthy_sock_addr) {
 			Some(hashset) => {
 				let proxy_info = hashset.iter().last();
 				match proxy_info {
@@ -1495,10 +1649,11 @@ where
 		};
 
 		let conn_data = match proxy_info {
-			Some(proxy_info) => {
+			Some(ref mut proxy_info) => {
 				match proxy_connections.get_mut(&proxy_info.proxy_conn.get_connection_id()) {
 					Some(proxy_info) => {
 						proxy_info.response_conn_data = Some(inbound.clone());
+						proxy_info.request_start_time = now.duration_since(UNIX_EPOCH)?.as_micros();
 					}
 					None => {
 						return Err(
@@ -1546,6 +1701,7 @@ where
 						sock_addr: healthy_sock_addr,
 						proxy_conn: conn_data.clone(),
 						proxy_entry: proxy_entry.clone(),
+						request_start_time: now.duration_since(UNIX_EPOCH)?.as_micros(),
 					},
 				);
 
@@ -1577,7 +1733,9 @@ where
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		proxy_connections: &mut HashMap<u128, ProxyInfo>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
+		now: SystemTime,
 	) -> Result<(), Error> {
 		let proxy_info = proxy_connections.get_mut(&conn_data.get_connection_id());
 		match proxy_info {
@@ -1611,6 +1769,27 @@ where
 					}
 				}
 				if is_complete && !is_close {
+					// update latency info
+					let proxy_state = proxy_state.get_mut(&proxy_info.proxy_entry);
+					match proxy_state {
+						Some(proxy_state) => {
+							let v = proxy_state.last_lat_micros.get_mut(&proxy_info.sock_addr);
+							match v {
+								Some(v) => {
+									if v.1.len() > 0 {
+										v.1[v.0] = now
+											.duration_since(UNIX_EPOCH)?
+											.as_micros()
+											.saturating_sub(proxy_info.request_start_time);
+										v.0 = (v.0 + 1) % v.1.len();
+									}
+								}
+								None => {}
+							}
+						}
+						None => {}
+					}
+
 					// put this connection into the idle pool
 					proxy_info.response_conn_data = None;
 					let added = match idle_proxy_connections.get_mut(&proxy_info.proxy_entry) {
@@ -1638,6 +1817,8 @@ where
 							}
 						}
 					}
+
+				// update latency info
 				} else if !is_close {
 					proxy_info.buffer.extend_from_slice(nbuf);
 				}
@@ -1744,7 +1925,9 @@ where
 					conn_data,
 					nbuf,
 					&mut thread_context.proxy_connections,
+					&mut thread_context.proxy_state,
 					&mut thread_context.idle_proxy_connections,
+					now,
 				)?;
 				return Ok(());
 			}
@@ -1883,8 +2066,11 @@ where
 
 		let (len, key) = match headers {
 			Some(headers) => {
+				if config.show_headers {
+					warn!("HTTP Request:\n{}", headers)?;
+				}
 				let range: Option<(usize, usize)> = if headers.has_range() {
-					let range = headers.get_header_value("Range".to_string())?;
+					let range = headers.get_header_value(&"Range".to_string())?;
 					match range {
 						Some(range) => {
 							if range.len() < 1 {
@@ -1936,6 +2122,7 @@ where
 							match Self::process_proxy_outbound(
 								conn_data,
 								&headers,
+								config,
 								&proxy_entry,
 								buffer,
 								evh_params,
@@ -1944,6 +2131,7 @@ where
 								&mut thread_context.idle_proxy_connections,
 								&mut thread_context.proxy_state,
 								remote_peer,
+								now,
 							) {
 								Ok(_) => {}
 								Err(e) => {
@@ -2063,63 +2251,6 @@ where
 
 	fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 		clean(path)
-		/*
-				let mut i = 0;
-				let mut prev = 0;
-				let mut prev_prev = 0;
-				let mut prev_prev_prev = 0;
-				let mut path_len = path.len();
-				loop {
-					if i >= path_len {
-						break;
-					}
-					if prev_prev_prev == '/' as u8 && prev_prev == '.' as u8 && prev == '.' as u8 {
-						// delete and remove prev dir
-						if i < 4 {
-							return Err(ErrorKind::HttpError403("Forbidden".into()).into());
-						}
-						let mut j = i - 4;
-						loop {
-							if path[j] == '/' as u8 {
-								break;
-							}
-
-							j -= 1;
-						}
-						path.drain(j..i);
-						path_len = path.len();
-						i = j;
-						prev = if i > 0 { path[i] } else { 0 };
-						prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
-						prev_prev_prev = if i as i32 - 2 >= 0 { path[i - 2] } else { 0 };
-						continue;
-					} else if prev_prev == '/' as u8 && prev == '.' as u8 {
-						if path[i] == '/' as u8 {
-							// delete
-							path.drain(i - 2..i);
-							path_len = path.len();
-							i -= 2;
-							prev = if i > 0 { path[i] } else { 0 };
-							prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
-							prev_prev_prev = if i as i32 - 2 > 0 { path[i - 2] } else { 0 };
-							continue;
-						}
-					}
-
-					prev_prev_prev = prev_prev;
-					prev_prev = prev;
-					prev = path[i];
-
-					i += 1;
-				}
-
-				path_len = path.len();
-				if path_len > 0 && path[path_len - 1] == '/' as u8 {
-					path.drain(path_len - 1..);
-				}
-
-				Ok(())
-		*/
 	}
 
 	fn check_path(path: &[u8], root_dir: &[u8]) -> Result<(), Error> {

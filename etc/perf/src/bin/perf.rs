@@ -387,6 +387,8 @@ fn main() -> Result<(), Error> {
 			false => 1_000_000,
 		};
 
+		let show_headers = args.is_present("show_headers");
+
 		let evh_config = EventHandlerConfig {
 			threads,
 			max_rwhandles,
@@ -410,7 +412,9 @@ fn main() -> Result<(), Error> {
 						path: "/50x.html".to_string(),
 						expect_text: "status: ok".to_string(),
 					}),
-					ProxyRotation::StickyIp,
+					ProxyRotation::LeastLatency,
+					10,
+					1,
 				),
 			);
 
@@ -424,6 +428,8 @@ fn main() -> Result<(), Error> {
 					usize::MAX,
 					None,
 					ProxyRotation::Random,
+					10,
+					1,
 				),
 			);
 
@@ -437,6 +443,8 @@ fn main() -> Result<(), Error> {
 					10,
 					None,
 					ProxyRotation::Random,
+					10,
+					1,
 				),
 			);
 
@@ -450,6 +458,8 @@ fn main() -> Result<(), Error> {
 					0,
 					None,
 					ProxyRotation::Random,
+					10,
+					1,
 				),
 			);
 
@@ -478,6 +488,7 @@ fn main() -> Result<(), Error> {
 				idle_timeout: 15000,
 				addrs: vec![SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?],
 				threads,
+				show_headers,
 				proxy_config: ProxyConfig {
 					extensions,
 					mappings,
@@ -585,6 +596,11 @@ fn main() -> Result<(), Error> {
 			false => 100,
 		};
 
+		let header = match args.is_present("header") {
+			true => Some(args.value_of("header").unwrap().to_string()),
+			false => None,
+		};
+
 		let histo_max = args.is_present("histo_max");
 		let bucket_count = args.is_present("bucket_count");
 
@@ -637,8 +653,20 @@ fn main() -> Result<(), Error> {
 				let histo = histo.clone();
 				let lat_sum_total_clone = lat_sum_total.clone();
 				let path = path.clone();
+				let header = header.clone();
 				jhs.push(std::thread::spawn(move || {
-					match run_thread(count, min, max, histo, tls, port, http, show_response, path) {
+					match run_thread(
+						count,
+						min,
+						max,
+						histo,
+						tls,
+						port,
+						http,
+						show_response,
+						path,
+						header,
+					) {
 						Ok(lat_sum) => {
 							let mut lat_sum_total = lockw!(lat_sum_total_clone).unwrap();
 							*lat_sum_total += lat_sum;
@@ -743,13 +771,18 @@ fn run_thread(
 	http: bool,
 	show_response: bool,
 	path: String,
+	header: Option<String>,
 ) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	if http {
 		let request_string = format!(
-			"GET {} HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n\r\n",
+			"GET {} HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n{}\r\n",
 			path,
+			match header {
+				Some(header) => format!("{}\r\n", header),
+				None => "".to_string(),
+			}
 		);
 		wbuf = request_string.as_bytes().to_vec();
 		rbuf.resize(1000, 0u8);
