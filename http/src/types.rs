@@ -977,7 +977,7 @@ impl Default for HttpConfig {
 			max_bring_to_front: 1_000,
 			cache_chunk_size: 1024 * 1024,
 			max_load_factor: 0.9,
-			server_name: format!("nioruntime httpd/{}", VERSION).as_bytes().to_vec(),
+			server_name: format!("NIORuntime Httpd/{}", VERSION).as_bytes().to_vec(),
 			process_cache_update: 1_000,    // 1 second
 			cache_recheck_fs_millis: 3_000, // 3 seconds
 			connect_timeout: 30_000,        // 30 seconds

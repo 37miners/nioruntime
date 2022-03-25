@@ -1,86 +1,23 @@
 name: nioruntime
-author: The BMW Developers
+author: 37 Miners, LLC
 
 args:
-    - client:
-        help: Run the test client
+    - config:
+        help: Configuration file. Any commandline arguments overwrite values in the config file. If multiple values are allowed, both sources (configuration file and commandline are concatenated).
         short: c
-        long: client
+        long: config
         takes_value: false
-    - http:
-        help: Run the http server
-        short: s
-        long: http
-        takes_value: false
-    - count:
-        help: Number of iterations to run per thread
-        short: x
-        long: count
-        value_name: count
-        takes_value: true
-    - threads:
-        help: Number of client threads to run
-        short: t
-        long: threads
-        value_name: threads
-        takes_value: true
-    - itt:
-        help: Number of times to repeat the test
-        short: i
-        long: itt
-        value_name: itt
-        takes_value: true
-    - max:
-        help: Max bytes per request
-        short: m
-        long: max
-        value_name: max
-        takes_value: true
-    - min:
-        help: Min bytes per request
-        short: q
-        long: min
-        value_name: min
-        takes_value: true
-    - debug:
-        help: Whether to print debugging information
-        short: d
-        long: debug
-        takes_value: false
-    - print_headers:
-        help: Whether to print debugging information about headers
-        short: y
-        long: print_headers
-        takes_value: false
-    - certs:
-        help: TLS certificate file location
-        short: e
-        long: certs
-        value_name: certs
-        takes_value: true
-    - private_key:
-        help: TLS private_key file location
-        short: p
-        long: private_key
-        value_name: pkey
-        takes_value: true
-    - tls:
-        help: Whether to use tls mode for the client
-        short: l
-        long: tls
-        takes_value: false
-    - tor_port:
-        help: Optional tor port. If not specified, tor daemon will not be started
-        short: w
-        long: tor
-        takes_value: true
-    - http_port:
-        help: HTTP server port. Default is 8080.
-        short: v
-        long: http_port
-        takes_value: true
+        value_name: config
     - addr:
-        help: Address to bind to. Default is 0.0.0.0.
+        help: TCP SocketAddr to listen for HTTP Requests on. For example 127.0.0.1:8080. If none are specified, 127.0.0.1:8080 is used.
         short: a
         long: addr
         takes_value: true
+        value_name: addr
+        multiple: true
+    - threads:
+        help: Number of threads used for HTTP processing. The default is 8.
+        short: t
+        long: threads
+        takes_value: true
+        value_name: threads

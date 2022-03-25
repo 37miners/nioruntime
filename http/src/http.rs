@@ -20,6 +20,7 @@ use crate::proxy::{
 use crate::types::*;
 use include_dir::include_dir;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
+use nioruntime_deps::colored::Colorize;
 use nioruntime_deps::dirs;
 use nioruntime_deps::fsutils;
 use nioruntime_deps::hex;
@@ -30,6 +31,7 @@ use nioruntime_deps::nix::sys::socket::SockType::Stream;
 use nioruntime_deps::nix::sys::socket::{
 	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag,
 };
+use nioruntime_deps::num_format::{Locale, ToFormattedString};
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_deps::sha2::{Digest, Sha256};
@@ -50,10 +52,23 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::from_utf8;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-warn!();
+info!();
+
+const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
+const SEPARATOR: &str = "\
+----------\
+----------\
+----------\
+----------\
+----------\
+----------\
+----------\
+----------\
+----------";
 
 pub struct HttpServer<ApiHandler> {
 	config: HttpConfig,
@@ -117,6 +132,8 @@ where
 
 	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
+		self.show_config()?;
+
 		let mut evh = EventHandler::new(self.config.evh_config)?;
 
 		let evh_params = evh.get_evh_params();
@@ -178,7 +195,7 @@ where
 			evh.add_listener_handles(handles, None)?;
 		}
 
-		info!("started")?;
+		info!("{}", "Server started!".cyan())?;
 
 		Ok(())
 	}
@@ -191,6 +208,47 @@ where
 	pub fn set_api_config(&mut self, api_config: HttpApiConfig) -> Result<(), Error> {
 		let mut self_config = lockw!(self.api_config)?;
 		*self_config = api_config;
+		Ok(())
+	}
+
+	fn startup_line(&self, name: &str, value: &str) -> Result<(), Error> {
+		let mut name = format!("{}:", name);
+		for _ in 0..MIN_LENGTH_STARTUP_LINE_NAME.saturating_sub(name.len()) {
+			name = format!("{} ", name);
+		}
+		info!("{} '{}'", name.yellow(), value)?;
+		Ok(())
+	}
+
+	fn show_config(&self) -> Result<(), Error> {
+		info!("{}", from_utf8(&self.config.server_name)?.green())?;
+		info_no_ts!("{}", SEPARATOR)?;
+
+		self.startup_line(
+			"Listener Addresses",
+			&format!("{:?}", &self.config.addrs)[..],
+		)?;
+
+		self.startup_line(
+			"Listen Queue Size",
+			&format!(
+				"{}",
+				self.config
+					.listen_queue_size
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"Max Header Size",
+			&format!(
+				"{} bytes",
+				self.config.max_header_size.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		info_no_ts!("{}", SEPARATOR)?;
+
 		Ok(())
 	}
 

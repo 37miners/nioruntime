@@ -12,20 +12,99 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[allow(deprecated)]
+use clap::load_yaml;
+use clap::Command;
 use nioruntime_err::Error;
+use nioruntime_evh::EventHandlerConfig;
 use nioruntime_http::{HttpConfig, HttpServer};
 use nioruntime_log::*;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::str::FromStr;
 
-trace!();
+info!();
+
+// include build information
+pub mod built_info {
+	include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
 
 fn main() -> Result<(), Error> {
+	log_config!(LogConfig {
+		show_line_num: false,
+		show_log_level: false,
+		show_bt: false,
+		..Default::default()
+	})?;
+
+	#[allow(deprecated)]
+	let yml = load_yaml!("nio.yml");
+	#[allow(deprecated)]
+	let cmd = Command::from_yaml(yml).version(built_info::PKG_VERSION);
+	let args = cmd.clone().get_matches();
+
+	let file_args = match args.is_present("config") {
+		true => {
+			let mut lines = vec![];
+			lines.push("fileargs".to_string());
+			let file = File::open(args.value_of("config").unwrap())?;
+			for line in BufReader::new(file).lines() {
+				let line = line?;
+				for line in line.split_ascii_whitespace() {
+					lines.push(line.to_string());
+				}
+			}
+			cmd.get_matches_from(lines)
+		}
+		false => {
+			let lines: Vec<String> = vec![];
+			#[allow(deprecated)]
+			Command::from_yaml(yml)
+				.version(built_info::PKG_VERSION)
+				.get_matches_from(lines)
+		}
+	};
+
+	let mut addrs = match args.is_present("addr") {
+		true => {
+			let mut addrs = vec![];
+			for addr in args.values_of("addr").unwrap() {
+				addrs.push(SocketAddr::from_str(addr)?);
+			}
+			addrs
+		}
+		false => vec![],
+	};
+
+	match file_args.is_present("addr") {
+		true => {
+			for addr in file_args.values_of("addr").unwrap() {
+				addrs.push(SocketAddr::from_str(addr.trim())?);
+			}
+		}
+		false => {}
+	}
+
+	if addrs.len() == 0 {
+		addrs.push(SocketAddr::from_str("127.0.0.1:8080")?);
+	}
+
+	let threads = match args.is_present("threads") {
+		true => args.value_of("threads").unwrap().parse()?,
+		false => match file_args.is_present("threads") {
+			true => file_args.value_of("threads").unwrap().parse()?,
+			false => 8,
+		},
+	};
+
 	let config = HttpConfig {
-		addrs: vec![
-			SocketAddr::from_str("127.0.0.1:8080")?,
-			SocketAddr::from_str("0.0.0.0:8081")?,
-		],
+		addrs,
+		evh_config: EventHandlerConfig {
+			threads,
+			..Default::default()
+		},
 		..Default::default()
 	};
 

@@ -20,6 +20,8 @@ exclude = ["etc"]
 
 [dependencies]
 
+clap = { version = "3.1.6", features = ["yaml"] }
+
 nioruntime_deps   = { path = "./deps"         }
 nioruntime_log    = { path = "./log"          }
 nioruntime_http   = { path = "./http"         }
