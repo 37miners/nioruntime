@@ -15,6 +15,8 @@
 #[allow(deprecated)]
 use clap::load_yaml;
 use clap::Command;
+use nioruntime_deps::dirs;
+use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_err::Error;
 use nioruntime_evh::EventHandlerConfig;
 use nioruntime_http::{HttpConfig, HttpServer};
@@ -22,6 +24,7 @@ use nioruntime_log::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 info!();
@@ -147,6 +150,22 @@ fn main() -> Result<(), Error> {
 		},
 	}
 	.to_string();
+
+	let mainlog_max_age = match args.is_present("mainlog_max_age") {
+		true => args.value_of("mainlog_max_age").unwrap().parse()?,
+		false => match file_args.is_present("mainlog_max_age") {
+			true => file_args.value_of("mainlog_max_age").unwrap().parse()?,
+			false => 3_600_000,
+		},
+	};
+
+	let mainlog_max_size = match args.is_present("mainlog_max_size") {
+		true => args.value_of("mainlog_max_size").unwrap().parse()?,
+		false => match file_args.is_present("mainlog_max_size") {
+			true => file_args.value_of("mainlog_max_size").unwrap().parse()?,
+			false => 1_000_000,
+		},
+	};
 
 	let max_header_entries = match args.is_present("max_header_entries") {
 		true => args.value_of("max_header_entries").unwrap().parse()?,
@@ -299,7 +318,8 @@ fn main() -> Result<(), Error> {
 		cache_recheck_fs_millis,
 		connect_timeout,
 		idle_timeout,
-
+		mainlog_max_age,
+		mainlog_max_size,
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
 		evh_config: EventHandlerConfig {
@@ -314,7 +334,29 @@ fn main() -> Result<(), Error> {
 		..Default::default()
 	};
 
-	let mut http = HttpServer::new(config);
+	let home_dir = match dirs::home_dir() {
+		Some(p) => p,
+		None => PathBuf::new(),
+	}
+	.as_path()
+	.display()
+	.to_string();
+
+	let mainlog = config.mainlog.replace("~", &home_dir);
+	let mainlog = path_clean(&mainlog);
+
+	log_config!(LogConfig {
+		show_line_num: false,
+		show_log_level: false,
+		show_bt: false,
+		file_path: Some(mainlog),
+		max_age_millis: config.mainlog_max_age,
+		max_size: config.mainlog_max_size,
+		auto_rotate: false,
+		..Default::default()
+	})?;
+
+	let mut http = HttpServer::new(config)?;
 	http.set_api_handler(move |_, _, _| Ok(()))?;
 	http.start()?;
 	std::thread::park();

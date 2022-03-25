@@ -590,7 +590,7 @@ fn update_healthy_socket_state(
 	Ok(())
 }
 
-fn socket_connect(socket_addr: &SocketAddr) -> Result<Handle, Error> {
+pub fn socket_connect(socket_addr: &SocketAddr) -> Result<Handle, Error> {
 	// TODO: support windows
 	let handle = socket(Inet, Stream, SockFlag::empty(), None)?;
 

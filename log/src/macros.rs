@@ -1467,7 +1467,7 @@ macro_rules! log_config {
 ///     });
 ///
 ///     info!("some data...");
-///     rotate!();
+///     let _nfile = rotate!()?;
 ///
 ///     info!("other data...");
 ///     rotate!(MAIN_LOG);
@@ -1482,8 +1482,7 @@ macro_rules! rotate {
 		rotate!(&default)
 	}};
 	($log:expr) => {{
-		//let res: Result<nioruntime_log::RotationStatus, nioruntime_err::Error>;
-		let res: Result<(), nioruntime_err::Error>;
+		let res: Result<Option<String>, nioruntime_err::Error>;
 		match nioruntime_log::lockw!(nioruntime_log::STATIC_LOG) {
 			Ok(mut log_map) => match log_map.get_mut($log) {
 				Some(log) => {

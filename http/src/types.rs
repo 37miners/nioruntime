@@ -977,6 +977,8 @@ pub struct HttpConfig {
 	pub show_headers: bool,
 	pub debug: bool,
 	pub mainlog: String,
+	pub mainlog_max_age: u128,
+	pub mainlog_max_size: u64,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -992,6 +994,8 @@ impl Default for HttpConfig {
 			max_header_entries: 1_000,
 			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
 			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
+			mainlog_max_age: 6 * 60 * 60 * 1000,
+			mainlog_max_size: 1024 * 1024 * 1,
 			max_cache_files: 1_000,
 			max_cache_chunks: 100,
 			max_bring_to_front: 1_000,

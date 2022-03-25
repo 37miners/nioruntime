@@ -151,3 +151,13 @@ args:
         long: mainlog
         takes_value: true
         value_name: mainlog
+    - mainlog_max_size:
+        help: The maximum size in bytes of the main log file. After the mainlog reaches this size, a rotation will occur. The default value is 1 MB.
+        long: mainlog_max_size
+        takes_value: true
+        value_name: mainlog_max_size
+    - mainlog_max_age:
+        help: The maximum age, in milliseconds of the main log file. The default value is 1 hour.
+        long: mainlog_max_age
+        takes_value: true
+        value_name: mainlog_max_age

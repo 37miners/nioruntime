@@ -146,8 +146,8 @@ impl Default for LogConfig {
 }
 
 impl LogImpl {
-	/// This function rotates logs
-	pub fn rotate(&mut self) -> Result<(), Error> {
+	/// This function rotates logs - return the new file name
+	pub fn rotate(&mut self) -> Result<Option<String>, Error> {
 		// get date and create a custom rotation file name.
 		let now: DateTime<Utc> = Utc::now();
 		let rotation_string = now.format(".r_%m_%d_%Y_%T").to_string().replace(":", "-");
@@ -155,7 +155,7 @@ impl LogImpl {
 			Some(file_path) => file_path,
 			None => {
 				// not logging to disk. No need to rotate
-				return Ok(());
+				return Ok(None);
 			}
 		};
 		let new_file_path = match original_file_path.rfind(".") {
@@ -197,7 +197,7 @@ impl LogImpl {
 		}
 		self.last_rotation = Instant::now();
 
-		Ok(())
+		Ok(Some(new_file_path))
 	}
 
 	/// Get the [`RotationStatus`] of the log.
@@ -485,7 +485,7 @@ impl Log {
 	}
 
 	/// Rotate the log
-	pub fn rotate(&mut self) -> Result<(), Error> {
+	pub fn rotate(&mut self) -> Result<Option<String>, Error> {
 		match self.log_impl.as_mut() {
 			Some(log_impl) => log_impl.rotate(),
 			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),

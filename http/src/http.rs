@@ -15,7 +15,7 @@
 use crate::cache::HttpCache;
 use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
-	process_proxy_outbound,
+	process_proxy_outbound, socket_connect,
 };
 use crate::types::*;
 use include_dir::include_dir;
@@ -88,7 +88,7 @@ where
 		+ Sync
 		+ Unpin,
 {
-	pub fn new(config: HttpConfig) -> Self {
+	pub fn new(config: HttpConfig) -> Result<Self, Error> {
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
 			None => PathBuf::new(),
@@ -106,30 +106,23 @@ where
 
 		if std::fs::metadata(webroot.clone()).is_err() {
 			// if it doesn't exist
-			match Self::init_webroot(&webroot) {
-				Ok(_) => {}
-				Err(e) => {
-					error!("Could not create webroot due to: {}", e).ok();
-				}
-			}
+			Self::init_webroot(&webroot)?;
 		}
 
 		if std::fs::metadata(mainlog.clone()).is_err() {
-			match Self::init_mainlog(&mainlog) {
-				Ok(_) => {}
-				Err(e) => {
-					error!("Could not create mainlog due to: {}", e).ok();
-				}
-			}
+			// if it doesn't exist
+			Self::init_mainlog(&mainlog)?;
 		}
 
-		Self {
+		Self::check_config(&config)?;
+
+		Ok(Self {
 			config,
 			_listeners: vec![],
 			api_config: Arc::new(RwLock::new(HttpApiConfig::default())),
 			api_handler: None,
 			evh_params: None,
-		}
+		})
 	}
 
 	#[rustfmt::skip]
@@ -141,25 +134,6 @@ where
 
 	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
-                let home_dir = match dirs::home_dir() {
-                        Some(p) => p,
-                        None => PathBuf::new(),
-                }
-                .as_path()
-                .display()
-                .to_string();
-
-                let mainlog = self.config.mainlog.replace("~", &home_dir);
-                let mainlog = path_clean(&mainlog);
-
-        	log_config!(LogConfig {
-                	show_line_num: false,
-                	show_log_level: false,
-                	show_bt: false,
-			file_path: Some(mainlog),
-                	..Default::default()
-        	})?;
-
 		self.show_config()?;
 
 		let mut evh = EventHandler::new(self.config.evh_config)?;
@@ -246,6 +220,29 @@ where
 		Ok(())
 	}
 
+	fn check_config(config: &HttpConfig) -> Result<(), Error> {
+		for addr in &config.addrs {
+			let res = socket_connect(addr);
+			if res.is_ok() {
+				let handle = res.unwrap();
+				#[cfg(unix)]
+				unsafe {
+					libc::close(handle);
+				}
+				#[cfg(windows)]
+				unsafe {
+					ws2_32::closesocket(handle);
+				}
+				return Err(ErrorKind::Configuration(format!(
+					"Port {} already in use.",
+					addr.port()
+				))
+				.into());
+			}
+		}
+		Ok(())
+	}
+
 	fn format_bytes(n: u64) -> String {
 		if n >= 1_000_000 {
 			bytefmt::format_to(n, bytefmt::Unit::MB)
@@ -293,6 +290,15 @@ where
 		)?;
 
 		self.startup_line("mainlog", &self.config.mainlog)?;
+
+		self.startup_line(
+			"mainlog_max_age",
+			&Self::format_time(self.config.mainlog_max_age),
+		)?;
+		self.startup_line(
+			"mainlog_max_size",
+			&Self::format_bytes(self.config.mainlog_max_size.try_into()?),
+		)?;
 
 		self.startup_line(
 			"listen_queue_size",
@@ -1572,12 +1578,30 @@ where
 		Ok(())
 	}
 
+	fn check_log_rotation(tid: usize) -> Result<(), Error> {
+		if tid == 0 {
+			match rotation_status!()? {
+				RotationStatus::Needed => {
+					let nfile = rotate!()?;
+					match nfile {
+						Some(nfile) => info!("Mainlog rotated. Rotated to: '{}'", nfile)?,
+						None => {}
+					}
+				}
+				_ => {}
+			}
+		}
+
+		Ok(())
+	}
+
 	fn process_on_housekeeper(
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		evh_params: &EvhParams,
 		tid: usize,
 	) -> Result<(), Error> {
+		Self::check_log_rotation(tid)?;
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
 		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
@@ -1724,11 +1748,14 @@ mod test {
 		let port = 18999;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		let x = Arc::new(RwLock::new(0));
 		let x_clone = x.clone();
@@ -1822,7 +1849,10 @@ mod test {
 		let port = 18899;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
 				..Default::default()
@@ -1830,7 +1860,7 @@ mod test {
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |conn_data, headers, ctx| {
 			if headers.get_query() == b"abc" {
@@ -1945,11 +1975,14 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let port = 18995;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		let x = Arc::new(RwLock::new(0));
 		let x_clone = x.clone();
@@ -2036,11 +2069,14 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let port = 18996;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http.set_api_config(HttpApiConfig {
@@ -2145,11 +2181,14 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let port = 18998;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http.set_api_config(HttpApiConfig {
@@ -2259,13 +2298,16 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let port = 18997;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			connect_timeout: 2_000,
 			idle_timeout: 3_000,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http.set_api_config(HttpApiConfig {
@@ -2305,7 +2347,9 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let config1 = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?],
 			show_headers: true,
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
 				..Default::default()
@@ -2316,7 +2360,9 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let config2 = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?],
 			show_headers: true,
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
 				..Default::default()
@@ -2352,8 +2398,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let config3 = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port3)[..])?],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
 			show_headers: true,
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
 			proxy_config: ProxyConfig {
 				extensions,
 				mappings: HashMap::new(),
@@ -2365,7 +2413,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			..Default::default()
 		};
 
-		let mut http1 = HttpServer::new(config1);
+		let mut http1 = HttpServer::new(config1).unwrap();
 
 		http1.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http1.set_api_config(HttpApiConfig {
@@ -2373,7 +2421,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		})?;
 		http1.start()?;
 
-		let mut http2 = HttpServer::new(config2);
+		let mut http2 = HttpServer::new(config2).unwrap();
 
 		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http2.set_api_config(HttpApiConfig {
@@ -2381,7 +2429,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		})?;
 		http2.start()?;
 
-		let mut http3 = HttpServer::new(config3);
+		let mut http3 = HttpServer::new(config3).unwrap();
 
 		http3.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http3.set_api_config(HttpApiConfig {
@@ -2446,11 +2494,14 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let port = 18897;
 		let config = HttpConfig {
 			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
-			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
 			..Default::default()
 		};
 
-		let mut http = HttpServer::new(config);
+		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http.set_api_config(HttpApiConfig {
