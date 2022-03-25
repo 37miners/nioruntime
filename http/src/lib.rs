@@ -14,8 +14,11 @@
 
 mod cache;
 mod http;
+mod proxy;
+mod types;
 
-pub use crate::http::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, HttpServer, ProxyConfig, ProxyEntry,
-	ProxyRotation, Upstream,
+pub use crate::http::HttpServer;
+pub use crate::types::{
+	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ProxyConfig, ProxyEntry, ProxyRotation,
+	Upstream,
 };

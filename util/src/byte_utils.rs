@@ -58,6 +58,42 @@ pub fn bytes_find(bytes: &[u8], pattern: &[u8]) -> Option<usize> {
 	}
 }
 
+pub fn bytes_to_usize_hex(bytes: &[u8]) -> Result<usize, Error> {
+	let mut bytes_len = bytes.len();
+	let mut ret = 0;
+	let mut mul = 1;
+	let mut itt = 0;
+	for _ in 0..(bytes_len.saturating_sub(1)) {
+		mul *= 16;
+	}
+	loop {
+		if bytes_len == 0 {
+			break;
+		}
+		bytes_len -= 1;
+
+		if !((bytes[itt] >= '0' as u8 && bytes[itt] <= '9' as u8)
+			|| (bytes[itt] <= 'f' as u8 && bytes[itt] >= 'a' as u8))
+		{
+			return Err(ErrorKind::UnexpectedData(format!(
+				"Illegal character in number: {}",
+				bytes[itt],
+			))
+			.into());
+		}
+		if bytes[itt] >= 'a' as u8 {
+			ret += mul * (10 + bytes[itt] as usize - ('a' as usize));
+		} else {
+			ret += mul * (bytes[itt] as usize - ('0' as usize));
+		}
+
+		itt += 1;
+		mul /= 16;
+	}
+
+	Ok(ret)
+}
+
 pub fn bytes_to_usize(bytes: &[u8]) -> Result<usize, Error> {
 	let mut bytes_len = bytes.len();
 	let mut ret = 0;
@@ -89,21 +125,32 @@ pub fn bytes_to_usize(bytes: &[u8]) -> Result<usize, Error> {
 	Ok(ret)
 }
 
+pub fn bytes_parse_number_hex(bytes: &[u8]) -> Option<usize> {
+	let end = bytes_find(bytes, BACK_R);
+	match end {
+		Some(end) => match bytes_to_usize_hex(&bytes[0..end]) {
+			Ok(v) => Some(v),
+			Err(_e) => None,
+		},
+		None => None,
+	}
+}
+
+pub fn bytes_parse_number(bytes: &[u8]) -> Option<usize> {
+	let end = bytes_find(bytes, BACK_R);
+	match end {
+		Some(end) => match bytes_to_usize(&bytes[0..end]) {
+			Ok(v) => Some(v),
+			Err(_e) => None,
+		},
+		None => None,
+	}
+}
+
 pub fn bytes_parse_number_header(bytes: &[u8], index: usize) -> Option<usize> {
 	let start = bytes_find(&bytes[index..], COLON_SPACE);
 	match start {
-		Some(start) => {
-			let end = bytes_find(&bytes[index + start + 2..], BACK_R);
-			match end {
-				Some(end) => {
-					match bytes_to_usize(&bytes[index + start + 2..end + index + start + 2]) {
-						Ok(v) => Some(v),
-						Err(_e) => None,
-					}
-				}
-				None => None,
-			}
-		}
+		Some(start) => bytes_parse_number(&bytes[index + start + 2..]),
 		None => None,
 	}
 }

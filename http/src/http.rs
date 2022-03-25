@@ -13,1221 +13,54 @@
 // limitations under the License.
 
 use crate::cache::HttpCache;
+use crate::proxy::{
+	process_health_check, process_health_check_response, process_proxy_inbound,
+	process_proxy_outbound,
+};
+use crate::types::*;
+use include_dir::include_dir;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
 use nioruntime_deps::dirs;
+use nioruntime_deps::fsutils;
 use nioruntime_deps::hex;
-use nioruntime_deps::lazy_static::lazy_static;
-use nioruntime_deps::libc;
-use nioruntime_deps::libc::fcntl;
-use nioruntime_deps::nix::sys::socket::AddressFamily::Inet;
+use nioruntime_deps::libc::{
+	self, c_void, setsockopt, socklen_t, SOL_SOCKET, SO_REUSEADDR, SO_REUSEPORT,
+};
 use nioruntime_deps::nix::sys::socket::SockType::Stream;
 use nioruntime_deps::nix::sys::socket::{
-	bind, connect, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag,
+	bind, listen, socket, AddressFamily, InetAddr, SockAddr, SockFlag,
 };
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
-use nioruntime_evh::{EventHandler, EventHandlerConfig, EvhParams};
+use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
-use nioruntime_util::{
-	bytes_eq, bytes_find, bytes_parse_number_header, StaticHash, StaticHashConfig,
-};
 use nioruntime_util::{lockr, lockw};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::fmt::{Display, Formatter};
 use std::fs::{metadata, File, Metadata};
-use std::hash::Hasher;
 use std::io::{Read, Write};
 use std::mem;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::str::from_utf8;
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use std::os::unix::prelude::RawFd;
-
-lazy_static! {
-	static ref HTTP_PARTIAL_206_HEADERS_VEC: Vec<Vec<u8>> = vec![
-		" 206 Partial Content\r\nServer: ".as_bytes().to_vec(),
-		"\"\r\nContent-Range: bytes ".as_bytes().to_vec(),
-		"-".as_bytes().to_vec(),
-		"/".as_bytes().to_vec(),
-		"\r\n\r\n".as_bytes().to_vec(),
-	];
-	static ref HTTP_OK_200_HEADERS_VEC: Vec<Vec<u8>> = vec![
-		" 200 OK\r\nServer: ".as_bytes().to_vec(),
-		"\r\nDate: ".as_bytes().to_vec(),
-		"\r\nLast-Modified: ".as_bytes().to_vec(),
-		"\r\nConnection: ".as_bytes().to_vec(),
-		"\r\nContent-Length: ".as_bytes().to_vec(),
-		"\r\nETag: \"".as_bytes().to_vec(),
-		"\"\r\nAccept-Ranges: bytes\r\n\r\n".as_bytes().to_vec(),
-	];
-	static ref HEALTH_CHECK_VEC: Vec<Vec<u8>> = vec![
-		"GET ".as_bytes().to_vec(),
-		" HTTP/1.1\r\n\
-Host: localhost\r\n\
-Connection: close\r\n\r\n"
-			.as_bytes()
-			.to_vec(),
-	];
-}
-
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-
-const END_HEADERS: &[u8] = "\r\n\r\n".as_bytes();
-const CONTENT_LENGTH: &[u8] = "\r\nContent-Length: ".as_bytes();
-const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
-
-const RANGE_BYTES: &[u8] = "Range".as_bytes();
-const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
-
-const GET_BYTES: &[u8] = "GET ".as_bytes();
-const POST_BYTES: &[u8] = "POST ".as_bytes();
-const HEAD_BYTES: &[u8] = "HEAD ".as_bytes();
-const DELETE_BYTES: &[u8] = "DELETE ".as_bytes();
-const PUT_BYTES: &[u8] = "PUT ".as_bytes();
-const OPTIONS_BYTES: &[u8] = "OPTIONS ".as_bytes();
-const CONNECT_BYTES: &[u8] = "CONNECT ".as_bytes();
-const PATCH_BYTES: &[u8] = "PATCH ".as_bytes();
-const TRACE_BYTES: &[u8] = "TRACE ".as_bytes();
-
-const MON_BYTES: &[u8] = "Mon, ".as_bytes();
-const TUE_BYTES: &[u8] = "Tue, ".as_bytes();
-const WED_BYTES: &[u8] = "Wed, ".as_bytes();
-const THU_BYTES: &[u8] = "Thu, ".as_bytes();
-const FRI_BYTES: &[u8] = "Fri, ".as_bytes();
-const SAT_BYTES: &[u8] = "Sat, ".as_bytes();
-const SUN_BYTES: &[u8] = "Sun, ".as_bytes();
-
-const JAN_BYTES: &[u8] = " Jan ".as_bytes();
-const FEB_BYTES: &[u8] = " Feb ".as_bytes();
-const MAR_BYTES: &[u8] = " Mar ".as_bytes();
-const APR_BYTES: &[u8] = " Apr ".as_bytes();
-const MAY_BYTES: &[u8] = " May ".as_bytes();
-const JUN_BYTES: &[u8] = " Jun ".as_bytes();
-const JUL_BYTES: &[u8] = " Jul ".as_bytes();
-const AUG_BYTES: &[u8] = " Aug ".as_bytes();
-const SEP_BYTES: &[u8] = " Sep ".as_bytes();
-const OCT_BYTES: &[u8] = " Oct ".as_bytes();
-const NOV_BYTES: &[u8] = " Nov ".as_bytes();
-const DEC_BYTES: &[u8] = " Dec ".as_bytes();
-
-const HTTP10_BYTES: &[u8] = "HTTP/1.0".as_bytes();
-const HTTP11_BYTES: &[u8] = "HTTP/1.1".as_bytes();
-const HTTP20_BYTES: &[u8] = "HTTP/2.0".as_bytes();
-
-const KEEP_ALIVE_BYTES: &[u8] = "keep-alive".as_bytes();
-const CLOSE_BYTES: &[u8] = "close".as_bytes();
-
 warn!();
-
-const _SIMPLE: &[u8] = b"HTTP/1.1 200 Ok\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Content-Length: 7\r\n\
-Connection: keep-alive\r\n\
-\r\n\
-Hello\r\n";
-
-const HTTP_ERROR_400: &[u8] = b"HTTP/1.1 400 Bad request\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Bad request.\r\n";
-
-const HTTP_ERROR_403: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Forbidden.\r\n";
-
-const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Content-Length: 12\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Not found.\r\n";
-
-const HTTP_ERROR_405: &[u8] = b"HTTP/1.1 405 Method not supported\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Method Not supported.\r\n";
-
-const HTTP_ERROR_431: &[u8] = b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Request Header Fields Too Large.\r\n";
-
-const HTTP_ERROR_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Content-Length: 14\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Bad Gateway.\r\n";
-
-const HTTP_ERROR_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Content-Length: 22\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Service Unavailable.\r\n";
-
-const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 Internal Server Error\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Internal Server Error.\r\n";
-
-#[cfg(unix)]
-type Handle = RawFd;
-#[cfg(windows)]
-type Handle = u64;
-
-struct ConnectionInfo {
-	last_data: u128,
-	connection: u128,
-	conn_data: ConnectionData,
-}
-
-impl ConnectionInfo {
-	fn new(conn_data: ConnectionData) -> Self {
-		let now = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_micros();
-		Self {
-			connection: now,
-			last_data: now,
-			conn_data,
-		}
-	}
-}
-
-#[derive(Debug)]
-struct ProxyInfo {
-	handle: Handle,
-	proxy_conn: ConnectionData,
-	response_conn_data: Option<ConnectionData>,
-	buffer: Vec<u8>,
-	sock_addr: SocketAddr,
-	proxy_entry: ProxyEntry,
-	request_start_time: u128,
-}
-
-impl std::hash::Hash for ProxyInfo {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		self.handle.hash(state);
-		self.buffer.hash(state);
-		self.sock_addr.hash(state);
-	}
-}
-
-impl PartialEq for ProxyInfo {
-	fn eq(&self, other: &ProxyInfo) -> bool {
-		self.handle == other.handle
-			&& self.sock_addr == other.sock_addr
-			&& self.proxy_entry == other.proxy_entry
-	}
-}
-
-impl Eq for ProxyInfo {}
-
-impl Clone for ProxyInfo {
-	fn clone(&self) -> Self {
-		Self {
-			handle: self.handle.clone(),
-			response_conn_data: self.response_conn_data.clone(),
-			buffer: self.buffer.clone(),
-			sock_addr: self.sock_addr.clone(),
-			proxy_conn: self.proxy_conn.clone(),
-			proxy_entry: self.proxy_entry.clone(),
-			request_start_time: self.request_start_time,
-		}
-	}
-}
-
-#[derive(Debug)]
-pub struct ProxyState {
-	pub cur_connections: usize,
-	pub healthy_sockets: Vec<SocketAddr>,
-	pub last_health_check: u128,
-	pub last_healthy_reply: HashMap<SocketAddr, u128>,
-	last_lat_micros: HashMap<SocketAddr, (usize, Vec<u128>, usize)>,
-}
-
-impl ProxyState {
-	fn new(proxy_entry: ProxyEntry) -> Result<Self, Error> {
-		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-		let mut last_healthy_reply = HashMap::new();
-		let mut healthy_sockets = vec![];
-		let mut last_lat_micros = HashMap::new();
-		let mut index = 0;
-		for upstream in proxy_entry.get_upstream() {
-			last_healthy_reply.insert(upstream.sock_addr.clone(), now);
-			for _ in 0..upstream.weight {
-				healthy_sockets.push(upstream.sock_addr.clone());
-			}
-			let mut last_lat = vec![];
-			last_lat.resize(proxy_entry.last_lat_count, 0u128);
-			last_lat_micros.insert(upstream.sock_addr.clone(), (0, last_lat, index));
-			index += 1;
-		}
-
-		Ok(Self {
-			cur_connections: 0,
-			healthy_sockets,
-			last_health_check: 0,
-			last_healthy_reply,
-			last_lat_micros,
-		})
-	}
-}
-
-struct ThreadContext {
-	header_map: StaticHash<(), ()>,
-	cache_hits: StaticHash<(), ()>,
-	key_buf: Vec<u8>,
-	value_buf: Vec<u8>,
-	instant: Instant,
-	mime_map: HashMap<Vec<u8>, Vec<u8>>,
-	async_connections: Arc<RwLock<HashSet<u128>>>,
-	active_connections: HashMap<u128, ConnectionInfo>,
-	proxy_connections: HashMap<u128, ProxyInfo>,
-	idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
-	proxy_state: HashMap<ProxyEntry, ProxyState>,
-	health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
-}
-
-impl ThreadContext {
-	fn new(config: &HttpConfig) -> Result<Self, Error> {
-		let header_map_conf = StaticHashConfig {
-			key_len: config.max_header_name_len,
-			entry_len: config.max_header_value_len,
-			max_entries: config.max_header_entries + 1,
-			max_load_factor: 1.0,
-			..Default::default()
-		};
-
-		let cache_hits_conf = StaticHashConfig {
-			key_len: 32,
-			entry_len: 16,
-			max_entries: config.max_bring_to_front,
-			max_load_factor: 1.0,
-			..Default::default()
-		};
-		let mut key_buf = vec![];
-		let mut value_buf = vec![];
-		key_buf.resize(config.max_header_name_len, 0u8);
-		value_buf.resize(config.max_header_value_len, 0u8);
-
-		let mut proxy_state = HashMap::new();
-		let mut idle_proxy_connections = HashMap::new();
-		for (_k, v) in &config.proxy_config.mappings {
-			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
-			idle_proxy_connections.insert(v.clone(), HashMap::new());
-		}
-		for (_k, v) in &config.proxy_config.extensions {
-			proxy_state.insert(v.clone(), ProxyState::new(v.clone())?);
-			idle_proxy_connections.insert(v.clone(), HashMap::new());
-		}
-
-		let health_check_connections = HashMap::new();
-
-		Ok(Self {
-			header_map: StaticHash::new(header_map_conf)?,
-			cache_hits: StaticHash::new(cache_hits_conf)?,
-			key_buf,
-			value_buf,
-			instant: Instant::now(),
-			mime_map: HashMap::new(),
-			async_connections: Arc::new(RwLock::new(HashSet::new())),
-			active_connections: HashMap::new(),
-			proxy_connections: HashMap::new(),
-			idle_proxy_connections,
-			proxy_state,
-			health_check_connections,
-		})
-	}
-}
-
-#[derive(Debug)]
-pub enum HttpMethod {
-	Get,
-	Post,
-	Delete,
-	Head,
-	Put,
-	Options,
-	Connect,
-	Patch,
-	Trace,
-}
-
-#[derive(Debug, Clone)]
-pub enum HttpVersion {
-	V10,
-	V11,
-	V20,
-	Unknown,
-}
-
-#[derive(Debug)]
-pub struct HttpHeaders<'a> {
-	method: HttpMethod,
-	version: HttpVersion,
-	uri: &'a [u8],
-	query: &'a [u8],
-	extension: &'a [u8],
-	header_map: &'a StaticHash<(), ()>,
-	len: usize,
-	range: bool,
-}
-
-impl<'a> Display for HttpHeaders<'a> {
-	fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-		write!(f, "method:  '{:?}'\n", self.get_method())?;
-		write!(f, "version: '{:?}'\n", self.get_version())?;
-		write!(
-			f,
-			"uri:     '{}'\n",
-			std::str::from_utf8(self.get_uri()).unwrap_or("[non-utf8-string]")
-		)?;
-		write!(
-			f,
-			"query:   '{}'\n",
-			std::str::from_utf8(self.get_query()).unwrap_or("[non-utf8-string]")
-		)?;
-		write!(f, "\nHTTP Headers:\n")?;
-		for name in self.get_header_names().map_err(|_e| std::fmt::Error)? {
-			let values = self.get_header_value(&name).map_err(|_e| std::fmt::Error)?;
-			match values {
-				Some(values) => {
-					for value in values {
-						let mut spacing = "".to_string();
-						for _ in name.len()..20 {
-							spacing = format!("{} ", spacing);
-						}
-						write!(f, "{}:{} '{}'\n", name, spacing, value)?;
-					}
-				}
-				None => {}
-			}
-		}
-		Ok(())
-	}
-}
-
-impl<'a> HttpHeaders<'a> {
-	fn new(
-		buffer: &'a [u8],
-		config: &HttpConfig,
-		header_map: &'a mut StaticHash<(), ()>,
-		key_buf: &'a mut Vec<u8>,
-		value_buf: &'a mut Vec<u8>,
-	) -> Result<Option<Self>, Error> {
-		let (method, offset) = match Self::parse_method(buffer, config)? {
-			Some((method, offset)) => (method, offset),
-			None => return Ok(None),
-		};
-		trace!("method={:?},offset={}", method, offset)?;
-		let (uri, extension, offset) = match Self::parse_uri(&buffer[offset..], config)? {
-			Some((uri, extension, noffset)) => (uri, extension, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("uri={:?},offset={}", uri, offset)?;
-		let (query, offset) = match Self::parse_query(&buffer[offset..], config)? {
-			Some((query, noffset)) => (query, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("query={:?}", query)?;
-		let (version, offset) = match Self::parse_version(&buffer[offset..], config)? {
-			Some((version, noffset)) => (version, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("version={:?}", version)?;
-
-		if offset + 2 >= buffer.len() {
-			return Ok(None);
-		}
-
-		let (len, range) = match Self::parse_headers(
-			&buffer[(offset + 2)..],
-			config,
-			header_map,
-			key_buf,
-			value_buf,
-		)? {
-			Some((noffset, range)) => (noffset + offset + 2, range),
-			None => return Ok(None),
-		};
-
-		if len > config.max_header_size {
-			return Err(ErrorKind::HttpError431("Request Header Fields Too Large".into()).into());
-		}
-
-		Ok(Some(Self {
-			method,
-			version,
-			uri,
-			query,
-			extension,
-			header_map,
-			len,
-			range,
-		}))
-	}
-
-	pub fn extension(&self) -> &[u8] {
-		self.extension
-	}
-
-	pub fn has_range(&self) -> bool {
-		self.range
-	}
-
-	pub fn len(&self) -> usize {
-		self.len
-	}
-
-	pub fn get_method(&self) -> &HttpMethod {
-		&self.method
-	}
-
-	pub fn get_version(&self) -> &HttpVersion {
-		&self.version
-	}
-
-	pub fn get_query(&self) -> &[u8] {
-		&self.query
-	}
-
-	pub fn get_uri(&self) -> &[u8] {
-		&self.uri
-	}
-
-	pub fn get_header_value(&self, name: &String) -> Result<Option<Vec<String>>, Error> {
-		let mut name_bytes = name.as_bytes().to_vec();
-		let key_len = self.header_map.config().key_len;
-		for _ in name_bytes.len()..key_len {
-			name_bytes.push(0);
-		}
-		match self.header_map.get_raw(&name_bytes) {
-			Some(value) => {
-				let mut ret = vec![];
-				let mut offset = 0;
-				loop {
-					if offset + 4 >= value.len() {
-						break;
-					}
-					let len = u32::from_be_bytes(value[offset..offset + 4].try_into()?) as usize;
-					if len == 0 {
-						break;
-					}
-					ret.push(
-						std::str::from_utf8(&value[offset + 4..offset + 4 + len])?.to_string(),
-					);
-					offset += 4 + len;
-				}
-
-				Ok(Some(ret))
-			}
-			None => Ok(None),
-		}
-	}
-
-	pub fn get_header_names(&self) -> Result<Vec<String>, Error> {
-		let mut ret = vec![];
-		for (header, _) in self.header_map.iter_raw() {
-			let len = header.len();
-			let mut header_ret = vec![];
-			for i in 0..len {
-				if header[i] == 0 {
-					break;
-				}
-				header_ret.push(header[i]);
-			}
-			ret.push(std::str::from_utf8(&header_ret)?.to_string());
-		}
-		Ok(ret)
-	}
-
-	fn parse_method(
-		buffer: &[u8],
-		_config: &HttpConfig,
-	) -> Result<Option<(HttpMethod, usize)>, Error> {
-		if buffer.len() < POST_BYTES.len() {
-			Ok(None)
-		} else if bytes_eq(&buffer[0..4], GET_BYTES) {
-			Ok(Some((HttpMethod::Get, 4)))
-		} else if bytes_eq(&buffer[0..5], POST_BYTES) {
-			Ok(Some((HttpMethod::Post, 5)))
-		} else if bytes_eq(&buffer[0..5], HEAD_BYTES) {
-			Ok(Some((HttpMethod::Head, 5)))
-		} else if bytes_eq(&buffer[0..4], PUT_BYTES) {
-			Ok(Some((HttpMethod::Put, 4)))
-		} else {
-			if buffer.len() < OPTIONS_BYTES.len() {
-				Ok(None)
-			} else if bytes_eq(&buffer[0..8], OPTIONS_BYTES) {
-				Ok(Some((HttpMethod::Options, 8)))
-			} else if bytes_eq(&buffer[0..8], CONNECT_BYTES) {
-				Ok(Some((HttpMethod::Connect, 8)))
-			} else if bytes_eq(&buffer[0..7], DELETE_BYTES) {
-				Ok(Some((HttpMethod::Delete, 7)))
-			} else if bytes_eq(&buffer[0..6], PATCH_BYTES) {
-				Ok(Some((HttpMethod::Patch, 6)))
-			} else if bytes_eq(&buffer[0..6], TRACE_BYTES) {
-				Ok(Some((HttpMethod::Trace, 6)))
-			} else {
-				Err(ErrorKind::HttpError405("Method not supported".into()).into())
-			}
-		}
-	}
-
-	fn parse_version(
-		buffer: &[u8],
-		config: &HttpConfig,
-	) -> Result<Option<(HttpVersion, usize)>, Error> {
-		let buffer_len = buffer.len();
-		let http_bytes_len = HTTP10_BYTES.len();
-		if buffer_len < http_bytes_len {
-			Ok(None)
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP10_BYTES) {
-			Ok(Some((HttpVersion::V10, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP11_BYTES) {
-			Ok(Some((HttpVersion::V11, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP20_BYTES) {
-			Ok(Some((HttpVersion::V20, http_bytes_len)))
-		} else {
-			let mut offset = 0;
-			for i in 0..buffer_len {
-				if i > config.max_header_size {
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-				if buffer[i] == '\r' as u8 {
-					offset = i;
-					break;
-				}
-			}
-			Ok(Some((HttpVersion::Unknown, offset)))
-		}
-	}
-
-	fn parse_uri(
-		buffer: &'a [u8],
-		config: &HttpConfig,
-	) -> Result<Option<(&'a [u8], &'a [u8], usize)>, Error> {
-		let buffer_len = buffer.len();
-		let mut i = 0;
-		let mut x = 0;
-		let mut qpresent = false;
-		loop {
-			if i > config.max_header_size {
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
-			}
-			if i >= buffer_len {
-				return Ok(None);
-			}
-			if buffer[i] == '.' as u8 {
-				x = i;
-			}
-			if buffer[i] == '?' as u8
-				|| buffer[i] == ' ' as u8
-				|| buffer[i] == '\r' as u8
-				|| buffer[i] == '\n' as u8
-			{
-				if buffer[i] == '?' as u8 {
-					qpresent = true;
-				}
-				break;
-			}
-			i += 1;
-		}
-
-		if i == 0 || i + 1 >= buffer_len {
-			Ok(None)
-		} else {
-			if x != 0 {
-				x += 1;
-			}
-			Ok(Some((
-				&buffer[0..i],
-				&buffer[x..i],
-				if qpresent { i + 1 } else { i },
-			)))
-		}
-	}
-
-	fn parse_query(
-		buffer: &'a [u8],
-		config: &HttpConfig,
-	) -> Result<Option<(&'a [u8], usize)>, Error> {
-		let buffer_len = buffer.len();
-		let mut i = 0;
-		loop {
-			if i > config.max_header_size {
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
-			}
-			if i >= buffer_len {
-				return Ok(None);
-			}
-			if buffer[i] == ' ' as u8 || buffer[i] == '\r' as u8 || buffer[i] == '\n' as u8 {
-				break;
-			}
-			i += 1;
-		}
-
-		if i + 1 >= buffer_len {
-			Ok(None)
-		} else {
-			Ok(Some((
-				&buffer[0..i],
-				match buffer[i] {
-					13 => i,
-					_ => i + 1,
-				},
-			)))
-		}
-	}
-
-	fn parse_headers(
-		buffer: &[u8],
-		config: &HttpConfig,
-		header_map: &mut StaticHash<(), ()>,
-		key_buf: &mut Vec<u8>,
-		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool)>, Error> {
-		let mut i = 0;
-		let buffer_len = buffer.len();
-		let mut proc_key = true;
-		let mut key_offset = 0;
-		let mut value_offset = 4;
-		let mut range = false;
-
-		loop {
-			if i > config.max_header_size {
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
-			}
-			if i >= buffer_len {
-				break;
-			}
-
-			if proc_key && buffer[i] != ':' as u8 {
-				if buffer[i] == '\r' as u8 || buffer[i] == '\n' as u8 {
-					if i == 0 {
-						// there is a valid no header case
-						if buffer_len < 2 {
-							return Ok(None);
-						}
-
-						if buffer[0] == '\r' as u8 && buffer[1] == '\n' as u8 {
-							// no headers
-							return Ok(Some((i + 2, range)));
-						}
-					}
-					return Err(ErrorKind::HttpError400("Bad request: 1".into()).into());
-				}
-
-				if key_offset >= key_buf.len() {
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-
-				key_buf[key_offset] = buffer[i];
-				key_offset += 1;
-			} else if proc_key {
-				i += 1; // skip over the empty space
-				proc_key = false;
-			} else if buffer[i] != '\r' as u8 && buffer[i] != '\n' as u8 {
-				if value_offset >= value_buf.len() {
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-				value_buf[value_offset] = buffer[i];
-				value_offset += 1;
-			} else {
-				value_buf[0..4]
-					.clone_from_slice(&((value_offset.saturating_sub(4)) as u32).to_be_bytes());
-
-				if bytes_eq(&key_buf[0..key_offset], RANGE_BYTES) {
-					range = true;
-				}
-				match header_map.get_raw(&key_buf) {
-					Some(value) => {
-						if value.len() + 4 + value_offset > config.max_header_value_len {
-							return Err(ErrorKind::HttpError431(
-								"Request Header Fields Too Large".into(),
-							)
-							.into());
-						}
-						value_buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
-						value_buf.extend_from_slice(value);
-						header_map
-							.insert_raw(&key_buf, &value_buf[0..config.max_header_value_len])?;
-						value_buf.resize(config.max_header_value_len, 0u8);
-					}
-					None => {
-						header_map.insert_raw(&key_buf, &value_buf)?;
-					}
-				}
-
-				for j in 0..key_offset {
-					key_buf[j] = 0;
-				}
-				for j in 0..value_offset {
-					value_buf[j] = 0;
-				}
-
-				i += 1;
-				proc_key = true;
-				key_offset = 0;
-				value_offset = 4;
-
-				if i + 2 < buffer_len && buffer[i + 1] == '\r' as u8 && buffer[i + 2] == '\n' as u8
-				{
-					// end of headers
-					return Ok(Some(((i + 3), range)));
-				}
-			}
-			i += 1;
-		}
-
-		Ok(None)
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
-pub struct Upstream {
-	sock_addr: SocketAddr,
-	weight: usize,
-}
-
-impl Upstream {
-	pub fn new(sock_addr: SocketAddr, weight: usize) -> Self {
-		Self { sock_addr, weight }
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProxyRotation {
-	Random,
-	StickyIp,
-	StickyCookie(String),
-	LeastLatency,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProxyEntry {
-	upstream: Vec<Upstream>,
-	max_connections_per_thread: usize,
-	health_check: Option<HealthCheck>,
-	nonce: u128,
-	proxy_rotation: ProxyRotation,
-	control_percent: usize,
-	last_lat_count: usize,
-}
-
-impl std::hash::Hash for ProxyEntry {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		self.nonce.hash(state);
-	}
-}
-
-impl ProxyEntry {
-	pub fn from_socket_addr(sock_addr: SocketAddr, health_check: Option<HealthCheck>) -> Self {
-		let proxy_rotation = ProxyRotation::Random;
-		Self {
-			upstream: vec![Upstream::new(sock_addr, 1)],
-			max_connections_per_thread: usize::MAX,
-			health_check,
-			nonce: rand::random(),
-			proxy_rotation,
-			control_percent: 0,
-			last_lat_count: 0,
-		}
-	}
-
-	pub fn from_socket_addr_with_limit(
-		sock_addr: SocketAddr,
-		max_connections_per_thread: usize,
-		health_check: Option<HealthCheck>,
-	) -> Self {
-		let proxy_rotation = ProxyRotation::Random;
-		Self {
-			upstream: vec![Upstream::new(sock_addr, 1)],
-			max_connections_per_thread,
-			health_check,
-			nonce: rand::random(),
-			proxy_rotation,
-			control_percent: 0,
-			last_lat_count: 0,
-		}
-	}
-
-	pub fn multi_socket_addr(
-		upstream: Vec<Upstream>,
-		max_connections_per_thread: usize,
-		health_check: Option<HealthCheck>,
-		proxy_rotation: ProxyRotation,
-		last_lat_count: usize,
-		control_percent: usize,
-	) -> Self {
-		Self {
-			upstream,
-			max_connections_per_thread,
-			health_check,
-			nonce: rand::random(),
-			proxy_rotation,
-			control_percent,
-			last_lat_count,
-		}
-	}
-
-	fn get_upstream(&self) -> &Vec<Upstream> {
-		&self.upstream
-	}
-}
-
-#[derive(Hash, PartialEq, Eq, Debug, Clone)]
-pub struct HealthCheck {
-	pub path: String,
-	pub check_secs: u128,
-	pub expect_text: String,
-}
-
-#[derive(Clone)]
-pub struct ProxyConfig {
-	pub mappings: HashMap<Vec<u8>, ProxyEntry>,
-	pub extensions: HashMap<Vec<u8>, ProxyEntry>,
-}
-
-impl Default for ProxyConfig {
-	fn default() -> Self {
-		let mappings = HashMap::new();
-		let extensions = HashMap::new();
-
-		Self {
-			mappings,
-			extensions,
-		}
-	}
-}
-
-#[derive(Clone)]
-pub struct HttpConfig {
-	pub addrs: Vec<SocketAddr>,
-	pub threads: usize,
-	pub listen_queue_size: usize,
-	pub max_header_size: usize,
-	pub max_header_entries: usize,
-	pub max_header_name_len: usize,
-	pub max_header_value_len: usize,
-	pub root_dir: Vec<u8>,
-	pub max_cache_files: usize,
-	pub max_cache_chunks: u64,
-	pub cache_chunk_size: u64,
-	pub max_load_factor: f64,
-	pub server_name: Vec<u8>,
-	pub max_bring_to_front: usize,
-	pub process_cache_update: u128,
-	pub cache_recheck_fs_millis: u128,
-	pub connect_timeout: u128,
-	pub idle_timeout: u128,
-	pub mime_map: Vec<(String, String)>,
-	pub proxy_config: ProxyConfig,
-	pub show_headers: bool,
-}
-
-impl Default for HttpConfig {
-	fn default() -> Self {
-		Self {
-			proxy_config: ProxyConfig::default(),
-			addrs: vec![SocketAddr::from_str("127.0.0.1:8080").unwrap()],
-			threads: 8,
-			listen_queue_size: 100,
-			max_header_size: 16 * 1024,
-			max_header_name_len: 128,
-			max_header_value_len: 1024,
-			max_header_entries: 1_000,
-			root_dir: "~/.niohttpd".to_string().as_bytes().to_vec(),
-			max_cache_files: 1_000,
-			max_cache_chunks: 100,
-			max_bring_to_front: 1_000,
-			cache_chunk_size: 1024 * 1024,
-			max_load_factor: 0.9,
-			server_name: format!("nioruntime httpd/{}", VERSION).as_bytes().to_vec(),
-			process_cache_update: 1_000,    // 1 second
-			cache_recheck_fs_millis: 3_000, // 3 seconds
-			connect_timeout: 30_000,        // 30 seconds
-			idle_timeout: 60_000,           // 1 minute
-			show_headers: false,            // debug: show headers
-			mime_map: vec![
-				("html".to_string(), "text/html".to_string()),
-				("htm".to_string(), "text/html".to_string()),
-				("shtml".to_string(), "text/html".to_string()),
-				("txt".to_string(), "text/plain".to_string()),
-				("css".to_string(), "text/css".to_string()),
-				("xml".to_string(), "text/xml".to_string()),
-				("gif".to_string(), "image/gif".to_string()),
-				("jpeg".to_string(), "image/jpeg".to_string()),
-				("jpg".to_string(), "image/jpeg".to_string()),
-				("js".to_string(), "application/javascript".to_string()),
-				("atom".to_string(), "application/atom+xml".to_string()),
-				("rss".to_string(), "application/rss+xml".to_string()),
-				("mml".to_string(), "text/mathml".to_string()),
-				(
-					"jad".to_string(),
-					"text/vnd.sun.j2me.app-descriptor".to_string(),
-				),
-				("wml".to_string(), "text/vnd.wap.wml".to_string()),
-				("htc".to_string(), "text/x-component".to_string()),
-				("avif".to_string(), "image/avif".to_string()),
-				("png".to_string(), "image/png".to_string()),
-				("svg".to_string(), "image/svg+xml".to_string()),
-				("svgz".to_string(), "image/svg+xml".to_string()),
-				("tif".to_string(), "image/tiff".to_string()),
-				("tiff".to_string(), "image/tiff".to_string()),
-				("wbmp".to_string(), "image/vnd.wap.wbmp".to_string()),
-				("webp".to_string(), "image/webp".to_string()),
-				("ico".to_string(), "image/x-icon".to_string()),
-				("jng".to_string(), "image/x-jng".to_string()),
-				("bmp".to_string(), "image/x-ms-bmp".to_string()),
-				("woff".to_string(), "font/woff".to_string()),
-				("woff2".to_string(), "font/woff2".to_string()),
-				("jar".to_string(), "application/java-archive".to_string()),
-				("war".to_string(), "application/java-archive".to_string()),
-				("ear".to_string(), "application/java-archive".to_string()),
-				("json".to_string(), "application/json".to_string()),
-				("hqx".to_string(), "application/mac-binhex40".to_string()),
-				("doc".to_string(), "application/msword".to_string()),
-				("pdf".to_string(), "application/pdf".to_string()),
-				("ps".to_string(), "application/postscript".to_string()),
-				("eps".to_string(), "application/postscript".to_string()),
-				("ai".to_string(), "application/postscript".to_string()),
-				("rtf".to_string(), "application/rtf".to_string()),
-				(
-					"m3u8".to_string(),
-					"application/vnd.apple.mpegurl".to_string(),
-				),
-				(
-					"kml".to_string(),
-					"application/vnd.google-earth.kml+xml".to_string(),
-				),
-				(
-					"kmz".to_string(),
-					"application/vnd.google-earth.kmz".to_string(),
-				),
-				("xls".to_string(), "application/vnd.ms-excel".to_string()),
-				(
-					"eot".to_string(),
-					"application/vnd.ms-fontobject".to_string(),
-				),
-				(
-					"ppt".to_string(),
-					"application/vnd.ms-powerpoint".to_string(),
-				),
-				(
-					"odg".to_string(),
-					"application/vnd.oasis.opendocument.graphics".to_string(),
-				),
-				(
-					"odp".to_string(),
-					"application/vnd.oasis.opendocument.presentation".to_string(),
-				),
-				(
-					"ods".to_string(),
-					"application/vnd.oasis.opendocument.spreadsheet".to_string(),
-				),
-				(
-					"odt".to_string(),
-					"application/vnd.oasis.opendocument.text".to_string(),
-				),
-				(
-					"pptx".to_string(),
-					"application/vnd.openxmlformats-officedocument.presentationml.presentation"
-						.to_string(),
-				),
-				(
-					"xlsx".to_string(),
-					"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string(),
-				),
-				(
-					"docx".to_string(),
-					"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-						.to_string(),
-				),
-				("wmlc".to_string(), "application/vnd.wap.wmlc".to_string()),
-				("wasm".to_string(), "application/wasm".to_string()),
-				("7z".to_string(), "application/x-7z-compressed".to_string()),
-				("cco".to_string(), "application/x-cocoa".to_string()),
-				(
-					"jardiff".to_string(),
-					"application/x-java-archive-diff".to_string(),
-				),
-				(
-					"jnlp".to_string(),
-					"application/x-java-jnlp-file".to_string(),
-				),
-				("run".to_string(), "application/x-makeself".to_string()),
-				("pl".to_string(), "application/x-perl".to_string()),
-				("pm".to_string(), "application/x-perl".to_string()),
-				("prc".to_string(), "application/x-pilot".to_string()),
-				("pbd".to_string(), "application/x-pilot".to_string()),
-				(
-					"rar".to_string(),
-					"application/x-rar-compressed".to_string(),
-				),
-				(
-					"rpm".to_string(),
-					"application/x-redhat-package-manager".to_string(),
-				),
-				("sea".to_string(), "application/x-sea".to_string()),
-				(
-					"swf".to_string(),
-					"application/x-shockwave-flash".to_string(),
-				),
-				("sit".to_string(), "application/x-stuffit".to_string()),
-				("tcl".to_string(), "application/x-tcl".to_string()),
-				("tk".to_string(), "application/x-tcl".to_string()),
-				("der".to_string(), "application/x-x509-ca-cert".to_string()),
-				("pem".to_string(), "application/x-x509-ca-cert".to_string()),
-				("crt".to_string(), "application/x-x509-ca-cert".to_string()),
-				("xpi".to_string(), "application/x-xpinstall".to_string()),
-				("xhtml".to_string(), "application/xhtml+xml".to_string()),
-				("xspf".to_string(), "application/xspf+xml".to_string()),
-				("zip".to_string(), "application/zip".to_string()),
-				("bin".to_string(), "application/octet-stream".to_string()),
-				("exe".to_string(), "application/octet-stream".to_string()),
-				("dll".to_string(), "application/octet-stream".to_string()),
-				("deb".to_string(), "application/octet-stream".to_string()),
-				("dmg".to_string(), "application/octet-stream".to_string()),
-				("iso".to_string(), "application/octet-stream".to_string()),
-				("img".to_string(), "application/octet-stream".to_string()),
-				("msi".to_string(), "application/octet-stream".to_string()),
-				("msp".to_string(), "application/octet-stream".to_string()),
-				("msm".to_string(), "application/octet-stream".to_string()),
-				("mid".to_string(), "audio/midi".to_string()),
-				("midi".to_string(), "audio/midi".to_string()),
-				("kar".to_string(), "audio/midi".to_string()),
-				("mp3".to_string(), "audio/mpeg".to_string()),
-				("ogg".to_string(), "audio/ogg".to_string()),
-				("m4a".to_string(), "audio/x-m4a".to_string()),
-				("ra".to_string(), "audio/x-realaudio".to_string()),
-				("3gpg".to_string(), "video/3gpp".to_string()),
-				("3gp".to_string(), "video/mp2t".to_string()),
-				("ts".to_string(), "video/mp2t".to_string()),
-				("mp4".to_string(), "video/mp4".to_string()),
-				("mpeg".to_string(), "video/mpeg".to_string()),
-				("mpg".to_string(), "video/mpeg".to_string()),
-				("mov".to_string(), "video/quicktime".to_string()),
-				("webm".to_string(), "video/webm".to_string()),
-				("flv".to_string(), "video/x-flv".to_string()),
-				("m4v".to_string(), "video/x-m4v".to_string()),
-				("mng".to_string(), "video/x-mng".to_string()),
-				("asx".to_string(), "video/x-ms-asf".to_string()),
-				("asf".to_string(), "video/x-ms-asf".to_string()),
-				("wmv".to_string(), "video/x-ms-wmv".to_string()),
-				("avi".to_string(), "video/x-msvideo".to_string()),
-			],
-		}
-	}
-}
-
-pub struct HttpApiConfig {
-	pub mappings: HashSet<Vec<u8>>,
-	pub extensions: HashSet<Vec<u8>>,
-}
-
-impl Default for HttpApiConfig {
-	fn default() -> Self {
-		Self {
-			mappings: HashSet::new(),
-			extensions: HashSet::new(),
-		}
-	}
-}
-
-#[derive(Clone)]
-pub struct ApiContext {
-	async_connections: Arc<RwLock<HashSet<u128>>>,
-	conn_data: ConnectionData,
-}
-
-impl ApiContext {
-	pub fn set_async(&mut self) -> Result<(), Error> {
-		let mut async_connections = lockw!(self.async_connections)?;
-		async_connections.insert(self.conn_data.get_connection_id());
-		Ok(())
-	}
-
-	pub fn async_complete(&mut self) -> Result<(), Error> {
-		self.conn_data.async_complete()?;
-		Ok(())
-	}
-
-	fn new(async_connections: Arc<RwLock<HashSet<u128>>>, conn_data: ConnectionData) -> Self {
-		Self {
-			async_connections,
-			conn_data,
-		}
-	}
-}
 
 pub struct HttpServer<ApiHandler> {
 	config: HttpConfig,
 	_listeners: Vec<TcpListener>,
 	api_config: Arc<RwLock<HttpApiConfig>>,
 	api_handler: Option<Pin<Box<ApiHandler>>>,
+	evh_params: Option<EvhParams>,
 }
 
 impl<ApiHandler> HttpServer<ApiHandler>
@@ -1253,6 +86,17 @@ where
 		root_dir = root_dir.replace("~", &home_dir);
 		root_dir = path_clean(&root_dir);
 		root_dir = format!("{}/www", root_dir);
+
+		if std::fs::metadata(root_dir.clone()).is_err() {
+			// if it doesn't exist
+			match Self::init_webroot(&root_dir) {
+				Ok(_) => {}
+				Err(e) => {
+					error!("Could not create webroot due to: {}", e).ok();
+				}
+			}
+		}
+
 		config.root_dir = root_dir.as_bytes().to_vec();
 
 		Self {
@@ -1260,17 +104,26 @@ where
 			_listeners: vec![],
 			api_config: Arc::new(RwLock::new(HttpApiConfig::default())),
 			api_handler: None,
+			evh_params: None,
 		}
 	}
 
+	#[rustfmt::skip]
+	pub fn stop(&mut self) -> Result<(), Error> {
+		match &self.evh_params { Some(e) => e.stop()?, _ => {} }
+		self._listeners = vec![];
+		Ok(())
+	}
+
+	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
-		let mut evh = EventHandler::new(EventHandlerConfig {
-			threads: self.config.threads,
-			..EventHandlerConfig::default()
-		})?;
+		let mut evh = EventHandler::new(self.config.evh_config)?;
 
 		let evh_params = evh.get_evh_params();
 		let evh_params_clone = evh_params.clone();
+		let evh_params_clone2 = evh_params.clone();
+
+		self.evh_params = Some(evh_params_clone2);
 
 		let config1 = self.config.clone();
 		let config2 = self.config.clone();
@@ -1287,17 +140,7 @@ where
 		let api_handler = self.api_handler.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			Self::process_on_read(
-				&conn_data,
-				buf,
-				ctx,
-				&config1,
-				&cache,
-				&api_config,
-				&api_handler,
-				&evh_params,
-				user_data,
-			)
+			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache, &api_config, &api_handler, &evh_params, user_data)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
 			Self::process_on_accept(conn_data, ctx, &config2, user_data)
@@ -1317,7 +160,7 @@ where
 			let sock_addr = SockAddr::new_inet(inet_addr);
 
 			let mut handles = vec![];
-			for _ in 0..self.config.threads {
+			for _ in 0..self.config.evh_config.threads {
 				let handle = Self::get_handle()?;
 				bind(handle, &sock_addr)?;
 				listen(handle, self.config.listen_queue_size)?;
@@ -1336,10 +179,6 @@ where
 		Ok(())
 	}
 
-	pub fn stop(&self) -> Result<(), Error> {
-		Ok(())
-	}
-
 	pub fn set_api_handler(&mut self, handler: ApiHandler) -> Result<(), Error> {
 		self.api_handler = Some(Box::pin(handler));
 		Ok(())
@@ -1351,17 +190,40 @@ where
 		Ok(())
 	}
 
+	#[rustfmt::skip]
+	fn init_webroot(root_dir: &str) -> Result<(), Error> {
+		fsutils::mkdir(root_dir);
+		for file in include_dir!("$CARGO_MANIFEST_DIR/src/resources/www").files() {
+			let file_path = file.path().file_name().unwrap().to_str().unwrap().to_string();
+			let root_dir = root_dir.to_string();
+			let contents = file.contents();
+			Self::create_file_from_bytes(file_path, root_dir, contents)?;
+		}
+
+		Ok(())
+	}
+
+	fn create_file_from_bytes(
+		resource: String,
+		root_dir: String,
+		bytes: &[u8],
+	) -> Result<(), Error> {
+		let path = format!("{}/{}", root_dir, resource);
+		let mut file = File::create(&path)?;
+		file.write_all(bytes)?;
+		Ok(())
+	}
+
 	fn init_user_data(
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		config: &HttpConfig,
 	) -> Result<(), Error> {
 		match user_data.downcast_ref::<ThreadContext>() {
-			Some(_value) => {}
+			Some(_) => {}
 			None => {
 				let mut value = ThreadContext::new(config)?;
 
-				for entry in &config.mime_map {
-					let (k, v) = entry;
+				for (k, v) in &config.mime_map {
 					value
 						.mime_map
 						.insert(k.as_bytes().to_vec(), v.as_bytes().to_vec());
@@ -1390,492 +252,16 @@ where
 		conn_data: &ConnectionData,
 		now: SystemTime,
 	) -> Result<(), Error> {
-		match thread_context
-			.active_connections
-			.get_mut(&conn_data.get_connection_id())
-		{
-			Some(conn_info) => {
-				conn_info.last_data = now.duration_since(UNIX_EPOCH)?.as_micros();
-			}
-			None => {
-				error!(
-					"No connection info found for connection {}",
-					conn_data.get_connection_id(),
-				)?;
-			}
+		let id = conn_data.get_connection_id();
+		let now = now.duration_since(UNIX_EPOCH)?.as_micros();
+		match thread_context.active_connections.get_mut(&id) {
+			Some(conn_info) => conn_info.last_data = now,
+			None => error!("No connection info found for connection {}", id)?,
 		}
-
 		Ok(())
 	}
 
-	// whether complete or not and also whether Connection is set to 'close'.
-	fn check_complete(buffer: &[u8]) -> (bool, bool) {
-		match bytes_find(buffer, END_HEADERS) {
-			Some(end) => {
-				let clen = bytes_find(buffer, CONTENT_LENGTH);
-				match clen {
-					Some(clen) => {
-						if clen < end {
-							let len = bytes_parse_number_header(buffer, clen);
-							match len {
-								Some(len) => {
-									let complete = len + end <= buffer.len();
-									let close = if complete {
-										bytes_find(buffer, CONNECTION_CLOSE).is_some()
-									} else {
-										false
-									};
-									(complete, close)
-								}
-								None => {
-									(false, false) // TODO: how do we handle this?
-								}
-							}
-						} else {
-							// no content, just headers
-							let complete = end <= buffer.len();
-							let close = if complete {
-								bytes_find(buffer, CONNECTION_CLOSE).is_some()
-							} else {
-								false
-							};
-							(complete, close)
-						}
-					}
-					None => {
-						// TODO: handle chunked encoding
-						let complete = end <= buffer.len();
-						let close = if complete {
-							bytes_find(buffer, CONNECTION_CLOSE).is_some()
-						} else {
-							false
-						};
-						(complete, close)
-					}
-				}
-			}
-			None => (false, false),
-		}
-	}
-
-	fn socket_connect(socket_addr: &SocketAddr) -> Result<Handle, Error> {
-		// TODO: support windows
-		let handle = socket(Inet, Stream, SockFlag::empty(), None)?;
-
-		let inet_addr = InetAddr::from_std(socket_addr);
-		let sock_addr = SockAddr::new_inet(inet_addr);
-		match connect(handle, &sock_addr) {
-			Ok(_) => {}
-			Err(e) => {
-				#[cfg(unix)]
-				unsafe {
-					libc::close(handle);
-				}
-				#[cfg(windows)]
-				unsafe {
-					ws2_32::closesocket(handle);
-				}
-				debug!("error connecting to {}: {}", sock_addr, e)?;
-				return Err(ErrorKind::IOError(format!("connect generated error: {}", e)).into());
-			}
-		};
-
-		unsafe { fcntl(handle, libc::F_SETFL, libc::O_NONBLOCK) };
-
-		Ok(handle)
-	}
-
-	fn process_proxy_outbound(
-		inbound: &ConnectionData,
-		headers: &HttpHeaders,
-		_config: &HttpConfig,
-		proxy_entry: &ProxyEntry,
-		buffer: &[u8],
-		evh_params: &EvhParams,
-		proxy_connections: &mut HashMap<u128, ProxyInfo>,
-		active_connections: &mut HashMap<u128, ConnectionInfo>,
-		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
-		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-		remote_peer: &Option<SocketAddr>,
-		now: SystemTime,
-	) -> Result<(), Error> {
-		// select a random health socket
-		let state = proxy_state.get(proxy_entry);
-		let healthy_sock_addr = match state {
-			Some(state) => {
-				let len = state.healthy_sockets.len();
-				if len == 0 {
-					// 503 service unavailable
-					inbound.write(HTTP_ERROR_503)?;
-					return Ok(());
-				} else {
-					let entry = match &proxy_entry.proxy_rotation {
-						ProxyRotation::Random => {
-							let rand: usize = rand::random();
-							rand % len
-						}
-						ProxyRotation::LeastLatency => {
-							let control_pct = proxy_entry.control_percent;
-							let mut least_micros = u128::MAX;
-							let mut fastest_addr = None;
-							for (_k, v) in &state.last_lat_micros {
-								let mut sum = 0;
-								for entry in &v.1 {
-									sum += entry;
-								}
-								let avg = sum / v.1.len() as u128;
-								if avg < least_micros {
-									least_micros = avg;
-									fastest_addr = Some(v.2);
-								}
-							}
-							let rand: usize = rand::random();
-							if fastest_addr.is_some() && rand % 100 >= control_pct {
-								fastest_addr.unwrap()
-							} else {
-								let rand: usize = rand::random();
-								rand % len
-							}
-						}
-						ProxyRotation::StickyIp => match remote_peer {
-							Some(remote_peer) => {
-								let mut sha256 = Sha256::new();
-								match remote_peer.ip() {
-									IpAddr::V4(ip) => {
-										sha256.write(&ip.octets())?;
-									}
-									IpAddr::V6(ip) => {
-										sha256.write(&ip.octets())?;
-									}
-								}
-								let hash = sha256.finalize();
-								u32::from_be_bytes(hash.to_vec()[..4].try_into()?) as usize % len
-							}
-							None => {
-								let rand: usize = rand::random();
-								rand % len
-							}
-						},
-						ProxyRotation::StickyCookie(cookie_target) => {
-							match headers.get_header_value(&"Cookie".to_string())? {
-								Some(cookies) => {
-									let mut ret = None;
-									for cookie in cookies {
-										let cookie = cookie.as_bytes();
-										let mut start = 0;
-										loop {
-											let mut end = cookie.len();
-											if start >= end {
-												break;
-											}
-											match bytes_find(&cookie[start..], b";") {
-												Some(semi) => end = semi + start,
-												None => {}
-											}
-											if start >= end {
-												break;
-											}
-
-											match bytes_find(&cookie[start..], b"=") {
-												Some(equal) => {
-													if equal < end {
-														if std::str::from_utf8(
-															&cookie[start..(start + equal)],
-														)? == cookie_target
-														{
-															ret = Some(
-																from_utf8(
-																	&cookie
-																		[(start + equal + 1)..end],
-																)?
-																.to_string(),
-															);
-														}
-													}
-												}
-												None => {}
-											}
-
-											start = end + 2;
-										}
-									}
-									match ret {
-										Some(ret) => {
-											let mut sha256 = Sha256::new();
-											sha256.write(&ret.as_bytes())?;
-											let hash = sha256.finalize();
-											u32::from_be_bytes(hash.to_vec()[..4].try_into()?)
-												as usize % len
-										}
-										None => {
-											let rand: usize = rand::random();
-											rand % len
-										}
-									}
-								}
-								None => {
-									let rand: usize = rand::random();
-									rand % len
-								}
-							}
-						}
-					};
-					state.healthy_sockets[entry]
-				}
-			}
-			None => {
-				return Err(ErrorKind::InternalError(format!(
-					"no state found for proxy: {:?}",
-					proxy_entry
-				))
-				.into());
-			}
-		};
-
-		let map = idle_proxy_connections.get_mut(proxy_entry).unwrap();
-		let mut proxy_info = match map.get_mut(&healthy_sock_addr) {
-			Some(hashset) => {
-				let proxy_info = hashset.iter().last();
-				match proxy_info {
-					Some(proxy_info) => {
-						let proxy_info = proxy_info.to_owned();
-						hashset.retain(|k| k != &proxy_info);
-						Some(proxy_info)
-					}
-					None => None,
-				}
-			}
-			None => None,
-		};
-
-		let conn_data = match proxy_info {
-			Some(ref mut proxy_info) => {
-				match proxy_connections.get_mut(&proxy_info.proxy_conn.get_connection_id()) {
-					Some(proxy_info) => {
-						proxy_info.response_conn_data = Some(inbound.clone());
-						proxy_info.request_start_time = now.duration_since(UNIX_EPOCH)?.as_micros();
-					}
-					None => {
-						return Err(
-							ErrorKind::InternalError("proxy connection not found".into()).into(),
-						)
-					}
-				}
-				proxy_info.proxy_conn.clone()
-			}
-			None => {
-				let tid = inbound.tid();
-				let state = proxy_state.get_mut(proxy_entry);
-				let state = match state {
-					Some(state) => state,
-					None => return Err(ErrorKind::InternalError("No state found".into()).into()),
-				};
-
-				let (handle, conn_data) =
-					match Self::connect_outbound(&healthy_sock_addr, tid, evh_params) {
-						Ok((handle, conn_data)) => {
-							state.cur_connections += 1;
-							(handle, conn_data)
-						}
-						Err(e) => {
-							return Err(ErrorKind::IOError(format!(
-								"Error connecting to proxy: {}",
-								e
-							))
-							.into());
-						}
-					};
-
-				debug!(
-					"proxy added handle = {}, conn_id = {}",
-					handle,
-					conn_data.get_connection_id()
-				)?;
-
-				proxy_connections.insert(
-					conn_data.get_connection_id(),
-					ProxyInfo {
-						handle,
-						response_conn_data: Some(inbound.clone()),
-						buffer: vec![],
-						sock_addr: healthy_sock_addr,
-						proxy_conn: conn_data.clone(),
-						proxy_entry: proxy_entry.clone(),
-						request_start_time: now.duration_since(UNIX_EPOCH)?.as_micros(),
-					},
-				);
-
-				active_connections.insert(
-					conn_data.get_connection_id(),
-					ConnectionInfo::new(conn_data.clone()),
-				);
-
-				conn_data
-			}
-		};
-
-		conn_data.write(buffer)?;
-
-		Ok(())
-	}
-
-	fn connect_outbound(
-		sock_addr: &SocketAddr,
-		tid: usize,
-		evh_params: &EvhParams,
-	) -> Result<(Handle, ConnectionData), Error> {
-		let handle = Self::socket_connect(sock_addr)?;
-		let conn_data = evh_params.add_handle(handle, None, Some(tid))?;
-		Ok((handle, conn_data))
-	}
-
-	fn process_proxy_inbound(
-		conn_data: &ConnectionData,
-		nbuf: &[u8],
-		proxy_connections: &mut HashMap<u128, ProxyInfo>,
-		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
-		now: SystemTime,
-	) -> Result<(), Error> {
-		let proxy_info = proxy_connections.get_mut(&conn_data.get_connection_id());
-		match proxy_info {
-			Some(proxy_info) => {
-				let (is_complete, is_close) = if proxy_info.buffer.len() > 0 {
-					proxy_info.buffer.extend_from_slice(nbuf);
-					let (ret, close) = Self::check_complete(&proxy_info.buffer);
-					if ret {
-						proxy_info.buffer.clear();
-					}
-					(ret, close)
-				} else {
-					let ret = Self::check_complete(nbuf);
-					ret
-				};
-
-				// we write whether we're done or not
-				match &proxy_info.response_conn_data {
-					Some(conn_data) => match conn_data.write(nbuf) {
-						Ok(_) => {}
-						Err(e) => {
-							warn!("proxy request generated error: {}", e)?;
-						}
-					},
-					None => {
-						warn!(
-							"no proxy for id = {}, nbuf='{}'",
-							conn_data.get_connection_id(),
-							std::str::from_utf8(nbuf)?
-						)?;
-					}
-				}
-				if is_complete && !is_close {
-					// update latency info
-					let proxy_state = proxy_state.get_mut(&proxy_info.proxy_entry);
-					match proxy_state {
-						Some(proxy_state) => {
-							let v = proxy_state.last_lat_micros.get_mut(&proxy_info.sock_addr);
-							match v {
-								Some(v) => {
-									if v.1.len() > 0 {
-										v.1[v.0] = now
-											.duration_since(UNIX_EPOCH)?
-											.as_micros()
-											.saturating_sub(proxy_info.request_start_time);
-										v.0 = (v.0 + 1) % v.1.len();
-									}
-								}
-								None => {}
-							}
-						}
-						None => {}
-					}
-
-					// put this connection into the idle pool
-					proxy_info.response_conn_data = None;
-					let added = match idle_proxy_connections.get_mut(&proxy_info.proxy_entry) {
-						Some(conns) => match conns.get_mut(&proxy_info.sock_addr) {
-							Some(ref mut conns) => {
-								conns.insert(proxy_info.clone());
-								true
-							}
-							None => false,
-						},
-						None => false,
-					};
-
-					if !added {
-						let mut nhashset = HashSet::new();
-						nhashset.insert(proxy_info.clone());
-						match idle_proxy_connections.get_mut(&proxy_info.proxy_entry.clone()) {
-							Some(map) => {
-								map.insert(proxy_info.sock_addr, nhashset);
-							}
-							None => {
-								let mut map = HashMap::new();
-								map.insert(proxy_info.sock_addr, nhashset);
-								idle_proxy_connections.insert(proxy_info.proxy_entry.clone(), map);
-							}
-						}
-					}
-
-				// update latency info
-				} else if !is_close {
-					proxy_info.buffer.extend_from_slice(nbuf);
-				}
-			}
-			None => {
-				error!("no proxy information found for this connection")?;
-			}
-		}
-
-		Ok(())
-	}
-
-	fn process_health_check_response(
-		conn_data: &ConnectionData,
-		nbuf: &[u8],
-		health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
-		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-	) -> Result<(), Error> {
-		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-		let proxy_entry = health_check_connections.get(&conn_data.get_connection_id());
-
-		match proxy_entry {
-			Some((proxy_entry, sock_addr)) => {
-				match &proxy_entry.health_check {
-					Some(health_check) => {
-						// TODO: check cross boundry reply (unlikely, but possible)
-						if bytes_find(nbuf, health_check.expect_text.as_bytes()).is_some() {
-							match proxy_state.get_mut(proxy_entry) {
-								Some(state) => {
-									let last = state.last_healthy_reply.get_mut(sock_addr);
-									match last {
-										Some(last) => *last = now,
-										None => {
-											warn!("no last for our sockaddr: {:?}", sock_addr)?;
-										}
-									}
-								}
-								None => {
-									warn!("unexpected none")?;
-								}
-							}
-							conn_data.close()?;
-						}
-					}
-					None => {
-						warn!("unexepected none2")?;
-					}
-				}
-			}
-			None => {
-				warn!("unexpected none3")?;
-			}
-		}
-
-		Ok(())
-	}
-
+	#[rustfmt::skip]
 	fn process_on_read(
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
@@ -1900,18 +286,13 @@ where
 
 		debug!(
 			"on_read[{}] = '{:?}', acc_handle={:?}, buffer_len={}",
-			connection_id,
-			nbuf,
-			conn_data.get_accept_handle(),
-			buffer_len,
+			connection_id, nbuf, conn_data.get_accept_handle(), buffer_len
 		)?;
 
 		match thread_context.health_check_connections.get(&connection_id) {
 			Some(_x) => {
-				Self::process_health_check_response(
-					conn_data,
-					nbuf,
-					&mut thread_context.health_check_connections,
+				process_health_check_response(
+					conn_data, nbuf, &mut thread_context.health_check_connections,
 					&mut thread_context.proxy_state,
 				)?;
 				return Ok(());
@@ -1921,13 +302,9 @@ where
 
 		match thread_context.proxy_connections.get(&connection_id) {
 			Some(_proxy_info) => {
-				Self::process_proxy_inbound(
-					conn_data,
-					nbuf,
-					&mut thread_context.proxy_connections,
-					&mut thread_context.proxy_state,
-					&mut thread_context.idle_proxy_connections,
-					now,
+				process_proxy_inbound(
+					conn_data, nbuf, &mut thread_context.proxy_connections, &mut thread_context.proxy_state,
+					&mut thread_context.idle_proxy_connections, now,
 				)?;
 				return Ok(());
 			}
@@ -1946,16 +323,8 @@ where
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
 				let amt = Self::process_buffer(
-					conn_data,
-					buffer,
-					config,
-					cache,
-					api_config,
-					thread_context,
-					api_handler,
-					evh_params,
-					now,
-					remote_peer,
+					conn_data, buffer, config, cache, api_config, thread_context, api_handler,
+					evh_params, now, remote_peer
 				)?;
 				if amt == 0 {
 					break;
@@ -1963,13 +332,9 @@ where
 				buffer.drain(..amt);
 
 				// if were now async, we must break
+				if lockr!(thread_context.async_connections)?.get(&connection_id).is_some()
 				{
-					if lockr!(thread_context.async_connections)?
-						.get(&connection_id)
-						.is_some()
-					{
-						break;
-					}
+					break;
 				}
 			}
 		} else {
@@ -1983,16 +348,8 @@ where
 				// premptively try to process the incoming buffer without appending
 				// in many cases this will work and be faster
 				let amt = Self::process_buffer(
-					conn_data,
-					pbuf,
-					config,
-					cache,
-					api_config,
-					thread_context,
-					api_handler,
-					evh_params,
-					now,
-					remote_peer,
+					conn_data, pbuf, config, cache, api_config, thread_context,
+					api_handler, evh_params, now, remote_peer,
 				)?;
 				if amt == 0 {
 					Self::append_buffer(&pbuf, buffer)?;
@@ -2002,14 +359,9 @@ where
 				offset += amt;
 
 				// if were now async, we must break
-				{
-					if lockr!(thread_context.async_connections)?
-						.get(&connection_id)
-						.is_some()
-					{
-						Self::append_buffer(&nbuf[offset..], buffer)?;
-						break;
-					}
+				if lockr!(thread_context.async_connections)?.get(&connection_id).is_some() {
+					Self::append_buffer(&nbuf[offset..], buffer)?;
+					break;
 				}
 			}
 		}
@@ -2111,7 +463,7 @@ where
 					}
 
 					if proxy_entry.is_none() {
-						match config.proxy_config.mappings.get(headers.uri) {
+						match config.proxy_config.mappings.get(headers.get_uri()) {
 							Some(entry) => proxy_entry = Some(entry),
 							None => {}
 						}
@@ -2119,7 +471,7 @@ where
 
 					match proxy_entry {
 						Some(proxy_entry) => {
-							match Self::process_proxy_outbound(
+							match process_proxy_outbound(
 								conn_data,
 								&headers,
 								config,
@@ -2135,7 +487,7 @@ where
 							) {
 								Ok(_) => {}
 								Err(e) => {
-									debug!("Error while communicating with proxy: {}", e.kind(),)?;
+									warn!("Error while communicating with proxy: {}", e.kind(),)?;
 									conn_data.write(HTTP_ERROR_502)?;
 								}
 							}
@@ -2150,7 +502,7 @@ where
 					let api_config = lockr!(api_config)?;
 					if was_proxy {
 						false
-					} else if api_config.mappings.get(headers.uri).is_some()
+					} else if api_config.mappings.get(headers.get_uri()).is_some()
 						|| api_config.extensions.get(headers.extension()).is_some()
 					{
 						match api_handler {
@@ -2174,7 +526,7 @@ where
 
 				if !was_api && !was_proxy {
 					match Self::send_file(
-						&headers.uri,
+						&headers.get_uri(),
 						conn_data,
 						config,
 						cache,
@@ -2203,7 +555,7 @@ where
 							}
 							debug!(
 								"sending file {} generated error: {}",
-								std::str::from_utf8(&headers.uri)?,
+								std::str::from_utf8(&headers.get_uri())?,
 								e
 							)?;
 						}
@@ -2219,29 +571,25 @@ where
 		Ok(len)
 	}
 
+	#[rustfmt::skip]
 	fn update_thread_context(
 		thread_context: &mut ThreadContext,
 		key: Option<[u8; 32]>,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
-		match key {
-			Some(key) => {
-				thread_context.cache_hits.insert_raw(&key, &[0u8; 16])?;
-			}
-			None => {}
+		let ch = &mut thread_context.cache_hits;
+		if key.is_some() {
+			let key = key.unwrap();
+			ch.insert_raw(&key, &[0u8; 16])?;
 		}
 
-		match thread_context.instant.elapsed().as_millis() > config.process_cache_update {
-			true => {
-				let mut cache = lockw!(cache)?;
-				for (k, _v) in thread_context.cache_hits.iter_raw() {
-					cache.bring_to_front(k.try_into()?)?;
-				}
-				thread_context.cache_hits.clear()?;
-				thread_context.instant = Instant::now();
-			}
-			false => {}
+		if thread_context.instant.elapsed().as_millis() > config.process_cache_update {
+			let mut cache = lockw!(cache)?;
+			let itr = ch.iter_raw();
+			for (k, _v) in itr { cache.bring_to_front(k.try_into()?)?; }
+			ch.clear()?;
+			thread_context.instant = Instant::now();
 		}
 
 		thread_context.header_map.clear()?;
@@ -2311,6 +659,10 @@ where
 				mime_map,
 			)?;
 			if found && !need_update {
+				match http_version {
+					HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
+					HttpVersion::V11 | HttpVersion::V20 => {}
+				}
 				return Ok(Some(key));
 			}
 			need_update
@@ -2532,6 +884,11 @@ where
 				if len <= 0 {
 					break;
 				}
+			}
+
+			match http_version {
+				HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
+				HttpVersion::V11 | HttpVersion::V20 => {}
 			}
 
 			ctx.async_complete()?;
@@ -2847,11 +1204,6 @@ where
 
 		conn_data.write(&response)?;
 
-		match http_version {
-			HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
-			HttpVersion::V11 | HttpVersion::V20 => {}
-		}
-
 		Ok(())
 	}
 
@@ -2866,19 +1218,15 @@ where
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 	) -> Result<(), Error> {
-		debug!(
-			"on accept: {}, handle={}",
-			conn_data.get_connection_id(),
-			conn_data.get_handle()
-		)?;
+		let id = conn_data.get_connection_id();
+		let handle = conn_data.get_handle();
+		debug!("on accept: {}, handle={}", id, handle)?;
 
 		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 
-		thread_context.active_connections.insert(
-			conn_data.get_connection_id(),
-			ConnectionInfo::new(conn_data.clone()),
-		);
+		let cinfo = ConnectionInfo::new(conn_data.clone());
+		thread_context.active_connections.insert(id, cinfo);
 
 		Ok(())
 	}
@@ -2943,106 +1291,6 @@ where
 		Ok(())
 	}
 
-	fn check(
-		sock_addr: &SocketAddr,
-		tid: usize,
-		evh_params: &EvhParams,
-		health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
-		active_connections: &mut HashMap<u128, ConnectionInfo>,
-		proxy_entry: &ProxyEntry,
-	) -> Result<bool, Error> {
-		let (_handle, conn_data) = Self::connect_outbound(sock_addr, tid, evh_params)?;
-		let mut health_check = HEALTH_CHECK_VEC[0].clone();
-		health_check.extend_from_slice(b"/50x.html");
-		health_check.extend_from_slice(&HEALTH_CHECK_VEC[1]);
-		health_check_connections.insert(
-			conn_data.get_connection_id(),
-			(proxy_entry.clone(), sock_addr.clone()),
-		);
-		conn_data.write(&health_check)?;
-
-		active_connections.insert(
-			conn_data.get_connection_id(),
-			ConnectionInfo::new(conn_data.clone()),
-		);
-
-		Ok(true)
-	}
-
-	fn process_health_check(
-		thread_context: &mut ThreadContext,
-		_config: &HttpConfig,
-		evh_params: &EvhParams,
-		tid: usize,
-	) -> Result<(), Error> {
-		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-		let mut update_vec = vec![];
-		for (k, v) in &thread_context.proxy_state {
-			match &k.health_check {
-				Some(hc) => {
-					if now.saturating_sub(v.last_health_check) > hc.check_secs * 1_000 {
-						let mut healthy_sockets = vec![];
-						for upstream in &k.upstream {
-							let res = Self::check(
-								&upstream.sock_addr,
-								tid,
-								evh_params,
-								&mut thread_context.health_check_connections,
-								&mut thread_context.active_connections,
-								k,
-							);
-
-							match res {
-								Ok(res) => {
-									if res {
-										match thread_context.proxy_state.get(k) {
-											Some(state) => {
-												let last = state
-													.last_healthy_reply
-													.get(&upstream.sock_addr);
-												match last {
-													Some(last) => {
-														if now.saturating_sub(*last)
-															< hc.check_secs * 2_000
-														{
-															for _ in 0..upstream.weight {
-																healthy_sockets.push(
-																	upstream.sock_addr.clone(),
-																);
-															}
-														}
-													}
-													None => {}
-												}
-											}
-											None => {}
-										}
-									}
-								}
-								_ => {}
-							}
-						}
-						update_vec.push((k.to_owned(), healthy_sockets));
-					}
-				}
-				None => {} // no health check specified
-			}
-		}
-
-		for (k, healthy_sockets) in &update_vec {
-			let v = thread_context.proxy_state.get_mut(k);
-			match v {
-				Some(v) => {
-					v.last_health_check = now;
-					v.healthy_sockets = healthy_sockets.clone();
-				}
-				None => warn!("expected to find a value for k={:?}", k)?,
-			}
-		}
-
-		Ok(())
-	}
-
 	fn process_on_housekeeper(
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
@@ -3055,7 +1303,7 @@ where
 
 		debug!("housekeeping thread called")?;
 
-		Self::process_health_check(thread_context, config, evh_params, tid)?;
+		process_health_check(thread_context, config, evh_params, tid)?;
 
 		for (_id, connection) in &thread_context.active_connections {
 			if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
@@ -3072,31 +1320,17 @@ where
 		Ok(())
 	}
 
+	#[rustfmt::skip]
 	fn get_handle() -> Result<Handle, Error> {
-		let raw_fd = socket(AddressFamily::Inet, Stream, SockFlag::empty(), None)?;
+		let r = socket(AddressFamily::Inet, Stream, SockFlag::empty(), None)?;
+		let o: libc::c_int = 1;
+		let s = mem::size_of_val(&o);
 
-		let optval: libc::c_int = 1;
-		unsafe {
-			libc::setsockopt(
-				raw_fd,
-				libc::SOL_SOCKET,
-				libc::SO_REUSEPORT,
-				&optval as *const _ as *const libc::c_void,
-				mem::size_of_val(&optval) as libc::socklen_t,
-			)
-		};
+		unsafe { setsockopt(r, SOL_SOCKET, SO_REUSEPORT, &o as *const _ as *const c_void, s as socklen_t) };
 
-		unsafe {
-			libc::setsockopt(
-				raw_fd,
-				libc::SOL_SOCKET,
-				libc::SO_REUSEADDR,
-				&optval as *const _ as *const libc::c_void,
-				mem::size_of_val(&optval) as libc::socklen_t,
-			)
-		};
+		unsafe { setsockopt(r, SOL_SOCKET, SO_REUSEADDR, &o as *const _ as *const c_void, s as socklen_t) };
 
-		Ok(raw_fd)
+		Ok(r)
 	}
 }
 
@@ -3107,9 +1341,6 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 	let mut prev_prev_prev = 0;
 	let mut path_len = path.len();
 	loop {
-		if i >= path_len {
-			break;
-		}
 		if prev_prev_prev == '/' as u8 && prev_prev == '.' as u8 && prev == '.' as u8 {
 			// delete and remove prev dir
 			if i < 4 {
@@ -3126,11 +1357,18 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 			path.drain(j..i);
 			path_len = path.len();
 			i = j;
+			if i >= path_len {
+				break;
+			}
 			prev = if i > 0 { path[i] } else { 0 };
 			prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
 			prev_prev_prev = if i as i32 - 2 >= 0 { path[i - 2] } else { 0 };
 			continue;
 		} else if prev_prev == '/' as u8 && prev == '.' as u8 {
+			if i >= path_len {
+				path.drain((i - 1)..);
+				break;
+			}
 			if path[i] == '/' as u8 {
 				// delete
 				path.drain(i - 2..i);
@@ -3142,6 +1380,9 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 				continue;
 			}
 		}
+		if i >= path_len {
+			break;
+		}
 
 		prev_prev_prev = prev_prev;
 		prev_prev = prev;
@@ -3151,7 +1392,7 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 	}
 
 	path_len = path.len();
-	if path_len > 0 && path[path_len - 1] == '/' as u8 {
+	if path_len > 1 && path[path_len - 1] == '/' as u8 {
 		path.drain(path_len - 1..);
 	}
 
@@ -3161,28 +1402,863 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 #[cfg(test)]
 mod test {
 	use crate::http::{clean, HttpConfig, HttpServer};
-	use nioruntime_err::Error;
+	use crate::types::{
+		HealthCheck, HttpMethod, HttpVersion, ProxyConfig, ProxyEntry, ProxyRotation, Upstream,
+	};
+	use crate::HttpApiConfig;
+	use nioruntime_deps::rand;
+	use nioruntime_err::{Error, ErrorKind};
+	use nioruntime_evh::EventHandlerConfig;
 	use nioruntime_log::*;
+	use nioruntime_util::bytes_find;
+	use nioruntime_util::{lockr, lockw};
+	use std::collections::HashMap;
+	use std::collections::HashSet;
+	use std::io::{Read, Write};
 	use std::net::SocketAddr;
+	use std::net::TcpStream;
 	use std::str::FromStr;
+	use std::sync::{Arc, RwLock};
+	use std::thread::sleep;
+	use std::time::Duration;
 
 	debug!();
 
+	fn setup_test_dir(name: &str) -> Result<(), Error> {
+		let _ = std::fs::remove_dir_all(name);
+		std::fs::create_dir_all(name)?;
+		Ok(())
+	}
+
+	fn tear_down_test_dir(name: &str) -> Result<(), Error> {
+		std::fs::remove_dir_all(name)?;
+		Ok(())
+	}
+
 	#[test]
 	fn test_http() -> Result<(), Error> {
+		let root_dir = "./.test_http.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18999;
 		let config = HttpConfig {
-			addrs: vec![
-				SocketAddr::from_str("127.0.0.1:8080")?,
-				SocketAddr::from_str("0.0.0.0:8081")?,
-			],
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
 			..Default::default()
 		};
 
 		let mut http = HttpServer::new(config);
-		http.set_api_handler(move |_, _, _| Ok(()))?;
-		http.start()?;
-		//std::thread::park();
 
+		let x = Arc::new(RwLock::new(0));
+		let x_clone = x.clone();
+		http.set_api_handler(move |conn_data, headers, _ctx| {
+			let mut x = lockw!(x)?;
+			*x += 1;
+			conn_data.write(b"msg")?;
+			assert_eq!(headers.get_uri(), b"/api");
+			assert_eq!(headers.get_query(), b"abc");
+			assert_eq!(headers.get_method(), &HttpMethod::Get);
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /api?abc HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 3 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 3);
+		assert_eq!(&buf[0..3], &b"msg"[..]);
+
+		loop {
+			sleep(Duration::from_millis(1));
+			if *(lockr!(x_clone)?) == 1 {
+				break;
+			}
+		}
+
+		// test partial write
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /api?abc HTTP/1.1\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"Host: localhost\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"User-Agent: test\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 3 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 3);
+		assert_eq!(&buf[0..3], &b"msg"[..]);
+
+		loop {
+			sleep(Duration::from_millis(1));
+			if *(lockr!(x_clone)?) == 2 {
+				break;
+			}
+		}
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_async() -> Result<(), Error> {
+		let root_dir = "./.test_async.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18899;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		http.set_api_handler(move |conn_data, headers, ctx| {
+			if headers.get_query() == b"abc" {
+				debug!("sleep 5 seconds")?;
+				ctx.set_async()?;
+				let mut ctx_clone = ctx.clone();
+				let conn_data = conn_data.clone();
+				std::thread::spawn(move || -> Result<(), Error> {
+					sleep(Duration::from_millis(5_000));
+					conn_data.write(b"1111")?;
+					ctx_clone.async_complete()?;
+					Ok(())
+				});
+			} else {
+				conn_data.write(b"2222")?;
+			}
+
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /api?abc HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+		sleep(Duration::from_millis(2500));
+		strm.write(b"GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(4, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 4 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 4);
+		assert_eq!(&buf[0..4], &b"1111"[..]);
+
+		let mut buf = vec![];
+		buf.resize(40, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 4 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 4);
+		assert_eq!(&buf[0..4], &b"2222"[..]);
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET")?;
+		sleep(Duration::from_millis(2500));
+		strm.write(
+			b" /api?abc HTTP/1.1\r\nHost: localhost\r\n\r\n\
+GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
+		)?;
+
+		let mut buf = vec![];
+		buf.resize(4, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 4 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 4);
+		assert_eq!(&buf[0..4], &b"1111"[..]);
+
+		let mut buf = vec![];
+		buf.resize(40, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 4 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 4);
+		assert_eq!(&buf[0..4], &b"2222"[..]);
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_restart() -> Result<(), Error> {
+		let root_dir = "./.test_restart.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18995;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		let x = Arc::new(RwLock::new(0));
+		let x_clone = x.clone();
+		http.set_api_handler(move |conn_data, headers, _ctx| {
+			let mut x = lockw!(x)?;
+			*x += 1;
+			conn_data.write(b"msg")?;
+			assert_eq!(headers.get_uri(), b"/api");
+			assert_eq!(headers.get_query(), b"abc");
+			assert_eq!(headers.get_version(), &HttpVersion::V10);
+			assert_eq!(headers.get_method(), &HttpMethod::Get);
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /api?abc HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 3 {
+				break;
+			}
+		}
+		assert_eq!(len_sum, 3);
+		assert_eq!(&buf[0..3], &b"msg"[..]);
+
+		loop {
+			sleep(Duration::from_millis(1));
+			if *(lockr!(x_clone)?) == 1 {
+				break;
+			}
+		}
+		http.stop()?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /api?abc HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len_sum == 3 {
+				break;
+			}
+		}
+
+		assert_eq!(len_sum, 3);
+		assert_eq!(&buf[0..3], &b"msg"[..]);
+		loop {
+			sleep(Duration::from_millis(1));
+			if *(lockr!(x_clone)?) == 2 {
+				break;
+			}
+		}
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_forbidden() -> Result<(), Error> {
+		let root_dir = "./.test_forbidden.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18996;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /../test.txt HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("403 Forbidden").is_some(), true);
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /.. HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("403 Forbidden").is_some(), true);
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_file() -> Result<(), Error> {
+		let root_dir = "./.test_file.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18998;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /index.html HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("Connection: close").is_some(), true);
+
+		// test partial write
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /index.html HTTP/1.0\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"Host: localhost\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"User-Agent: test\r\n")?;
+		sleep(Duration::from_millis(10));
+		strm.write(b"\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("Connection: close").is_some(), true);
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_timeout() -> Result<(), Error> {
+		let root_dir = "./.test_timeout.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18997;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			connect_timeout: 2_000,
+			idle_timeout: 3_000,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		let mut buf = vec![];
+		buf.resize(10, 0u8);
+		let len = strm.read(&mut buf)?;
+		assert_eq!(len, 0);
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(b"GET /index.html HTTP/1.1\r\n")?;
+		let len = strm.read(&mut buf)?;
+		assert_eq!(len, 0);
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+		Ok(())
+	}
+
+	#[test]
+	fn test_proxy() -> Result<(), Error> {
+		let root_dir = "./.test_proxy.nio";
+		setup_test_dir(root_dir)?;
+
+		let port1 = 18990;
+		let port2 = 18991;
+		let port3 = 18992;
+
+		let config1 = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?],
+			show_headers: true,
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let config2 = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?],
+			show_headers: true,
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut extensions = HashMap::new();
+		extensions.insert(
+			"html".as_bytes().to_vec(),
+			ProxyEntry::multi_socket_addr(
+				vec![
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+						1,
+					),
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..]).unwrap(),
+						1,
+					),
+				],
+				100,
+				Some(HealthCheck {
+					check_secs: 3,
+					path: "/".to_string(),
+					expect_text: "n".to_string(),
+				}),
+				ProxyRotation::Random,
+				10,
+				1,
+			),
+		);
+
+		let config3 = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port3)[..])?],
+			show_headers: true,
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			proxy_config: ProxyConfig {
+				extensions,
+				mappings: HashMap::new(),
+			},
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut http1 = HttpServer::new(config1);
+
+		http1.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http1.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http1.start()?;
+
+		let mut http2 = HttpServer::new(config2);
+
+		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http2.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http2.start()?;
+
+		let mut http3 = HttpServer::new(config3);
+
+		http3.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http3.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http3.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port3)[..])?)?;
+		strm.write(b"GET /index.html HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("Connection: close").is_some(), true);
+
+		http1.stop()?;
+		http2.stop()?;
+		http3.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_range() -> Result<(), Error> {
+		let root_dir = "./.test_range.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18897;
+		let config = HttpConfig {
+			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			root_dir: format!("{}", root_dir).as_bytes().to_vec(),
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config);
+
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-10\r\n\r\n")?;
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let s = bytes_find(&buf[0..len_sum], "\r\n\r\n".as_bytes()).unwrap();
+		let content = &buf[(4 + s)..len_sum];
+		assert_eq!(content.len(), 11);
+
+		strm.write(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nRange: bytes=4-17\r\n\r\n")?;
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let s = bytes_find(&buf[0..len_sum], "\r\n\r\n".as_bytes()).unwrap();
+		let content = &buf[(4 + s)..len_sum];
+		assert_eq!(content.len(), 14);
+
+		http.stop()?;
+
+		tear_down_test_dir(root_dir)?;
 		Ok(())
 	}
 
@@ -3242,6 +2318,13 @@ mod test {
 		let mut path = "/home/abc/.niohttpd/1".as_bytes().to_vec();
 		clean(&mut path)?;
 		assert_eq!("/home/abc/.niohttpd/1", std::str::from_utf8(&path)?);
+
+		let mut path = "/..".as_bytes().to_vec();
+		assert!(clean(&mut path).is_err());
+
+		let mut path = "/.".as_bytes().to_vec();
+		clean(&mut path)?;
+		assert_eq!("/", std::str::from_utf8(&path)?);
 
 		Ok(())
 	}

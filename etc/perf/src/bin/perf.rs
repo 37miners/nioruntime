@@ -28,6 +28,8 @@ use nioruntime_http::{
 	Upstream,
 };
 use nioruntime_log::*;
+use nioruntime_util::bytes_find;
+use nioruntime_util::bytes_parse_number_hex;
 use nioruntime_util::lockw;
 use num_format::{Locale, ToFormattedString};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -412,7 +414,7 @@ fn main() -> Result<(), Error> {
 						path: "/50x.html".to_string(),
 						expect_text: "status: ok".to_string(),
 					}),
-					ProxyRotation::LeastLatency,
+					ProxyRotation::Random,
 					10,
 					1,
 				),
@@ -487,7 +489,10 @@ fn main() -> Result<(), Error> {
 				connect_timeout: 5000,
 				idle_timeout: 15000,
 				addrs: vec![SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?],
-				threads,
+				evh_config: EventHandlerConfig {
+					threads,
+					..Default::default()
+				},
 				show_headers,
 				proxy_config: ProxyConfig {
 					extensions,
@@ -874,23 +879,77 @@ fn run_thread(
 								let mut len: usize = str[0..end].parse()?;
 								len += i + 1;
 								if len_sum >= len {
-									if show_response {
-										debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
-									}
 									do_break = true;
 									break;
 								}
 							}
-							None => {
-								if show_response {
-									debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+							None => match str.find("Transfer-Encoding: chunked") {
+								Some(_) => {
+									let end_headers = match bytes_find(&rbuf, "\r\n\r\n".as_bytes())
+									{
+										Some(end_headers) => end_headers,
+										None => break,
+									};
+
+									let mut offset = end_headers + 4;
+									let buffer_len = rbuf.len();
+									loop {
+										if offset > buffer_len {
+											break;
+										}
+										let len = bytes_parse_number_hex(&rbuf[offset..]);
+										let len = match len {
+											Some(len) => len,
+											None => {
+												warn!("invalid response from upstream. Could not parse Transfer-encoding")?;
+												return Err(
+                                                                                ErrorKind::HttpError500(
+                                                                                        format!(
+                                                                                        "Invalid response from upstream: could not parse transfer encoding"
+                                                                                        )
+                                                                                ).into()
+                                                                        );
+											}
+										};
+
+										if len == 0 {
+											do_break = true;
+											break;
+										}
+										if offset > buffer_len {
+											break;
+										}
+										let next_line =
+											bytes_find(&rbuf[offset..], "\r".as_bytes());
+										match next_line {
+											Some(next_line) => {
+												offset += len + next_line + 5;
+											}
+											None => {
+												return Err(
+                                                                                ErrorKind::HttpError500(
+                                                                                        format!(
+                                                                                        "Invalid response from upstream: (2) could not parse transfer encoding"
+                                                                                        )
+                                                                                ).into()
+                                                                        );
+											}
+										}
+									}
 								}
-							}
+								None => {
+									debug!("No content length or transfer encoding!")?;
+									assert!(false);
+								}
+							},
 						}
 					}
 				}
 
 				if do_break {
+					if show_response {
+						debug!("rbuf: {}", std::str::from_utf8(&rbuf[..len_sum])?)?;
+					}
 					break;
 				}
 			} else if len_sum >= wlen {

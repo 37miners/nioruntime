@@ -12,22 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod byte_utils;
-mod hex;
-mod macros;
-pub mod ser;
-pub mod slabs;
-mod static_hash;
-pub mod threadpool;
-
-pub use nioruntime_deps;
-use nioruntime_deps::futures;
-use nioruntime_deps::lazy_static;
-use nioruntime_deps::rand;
-pub use nioruntime_deps::serde::Serialize;
-pub use nioruntime_deps::serde_derive;
-
-pub use crate::byte_utils::{
-	bytes_eq, bytes_find, bytes_parse_number, bytes_parse_number_header, bytes_parse_number_hex,
-};
-pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
+#[no_mangle]
+pub unsafe extern "C" fn test_fn() {
+	println!("Hello world from Rust!");
+}

@@ -2928,6 +2928,19 @@ impl EvhParams {
 			tid,
 		))
 	}
+
+	pub fn stop(&self) -> Result<(), Error> {
+		for i in 0..self.guarded_data.len() {
+			let guarded_data = &self.guarded_data[i];
+			{
+				let mut guarded_data = lockw!(*guarded_data)?;
+				(*guarded_data).stop = true;
+			}
+			self.wakeup[i].wakeup()?;
+		}
+
+		Ok(())
+	}
 }
 
 #[cfg(test)]
