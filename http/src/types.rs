@@ -958,6 +958,7 @@ pub struct HttpConfig {
 	pub mime_map: Vec<(String, String)>,
 	pub proxy_config: ProxyConfig,
 	pub show_headers: bool,
+	pub debug: bool,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -983,6 +984,7 @@ impl Default for HttpConfig {
 			connect_timeout: 30_000,        // 30 seconds
 			idle_timeout: 60_000,           // 1 minute
 			show_headers: false,            // debug: show headers
+			debug: false,                   // general debugging including log to stdout
 			evh_config: EventHandlerConfig::default(),
 			mime_map: vec![
 				("html".to_string(), "text/html".to_string()),

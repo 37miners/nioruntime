@@ -22,6 +22,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fmt::Display;
 use std::net::AddrParseError;
+use std::num::ParseFloatError;
 use std::num::ParseIntError;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
@@ -165,6 +166,9 @@ pub enum ErrorKind {
 	/// HexError
 	#[fail(display = "HexError: {}", _0)]
 	HexError(String),
+	/// ParseFloatError
+	#[fail(display = "ParseFloatError: {}", _0)]
+	ParseFloatError(String),
 	/// Bad key len
 	#[fail(display = "Keylen not correct {} != {}", _0, _1)]
 	BadKeyLen(usize, usize),
@@ -416,6 +420,17 @@ impl From<FromHexError> for Error {
 	fn from(e: FromHexError) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::HexError(format!("Error parsing hex: {}", e))),
+		}
+	}
+}
+
+impl From<ParseFloatError> for Error {
+	fn from(e: ParseFloatError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::ParseFloatError(format!(
+				"Error parsing float: {}",
+				e
+			))),
 		}
 	}
 }

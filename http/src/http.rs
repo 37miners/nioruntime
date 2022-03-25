@@ -19,6 +19,7 @@ use crate::proxy::{
 };
 use crate::types::*;
 use include_dir::include_dir;
+use nioruntime_deps::bytefmt;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
 use nioruntime_deps::colored::Colorize;
 use nioruntime_deps::dirs;
@@ -195,7 +196,14 @@ where
 			evh.add_listener_handles(handles, None)?;
 		}
 
+		set_config_option!(Settings::Level, true)?;
+
 		info!("{}", "Server started!".cyan())?;
+
+		set_config_option!(Settings::LineNum, true)?;
+		if ! (self.config.debug || self.config.show_headers) {
+			set_config_option!(Settings::Stdout, false)?;
+		}
 
 		Ok(())
 	}
@@ -211,12 +219,40 @@ where
 		Ok(())
 	}
 
+	fn format_bytes(n: u64) -> String {
+		if n >= 1_000_000 {
+			bytefmt::format_to(n, bytefmt::Unit::MB)
+		} else if n >= 1_000 {
+			bytefmt::format_to(n, bytefmt::Unit::KB)
+		} else {
+			bytefmt::format_to(n, bytefmt::Unit::B)
+		}
+	}
+
+	fn format_time(n: u128) -> String {
+		let duration = std::time::Duration::from_millis(n.try_into().unwrap_or(u64::MAX));
+		if n >= 1000 * 60 {
+			format!("{} Minute(s)", (duration.as_secs() / 60))
+		} else if n >= 1000 {
+			format!("{} Second(s)", duration.as_secs())
+		} else {
+			format!("{} Millisecond(s)", duration.as_millis())
+		}
+	}
+
 	fn startup_line(&self, name: &str, value: &str) -> Result<(), Error> {
 		let mut name = format!("{}:", name);
 		for _ in 0..MIN_LENGTH_STARTUP_LINE_NAME.saturating_sub(name.len()) {
 			name = format!("{} ", name);
 		}
 		info!("{} '{}'", name.yellow(), value)?;
+		Ok(())
+	}
+
+	fn debug_flag(&self, name: &str, is_set: bool) -> Result<(), Error> {
+		if is_set {
+			info_no_ts!("{}: '{}' flag is set.", "WARNING:".red(), name.green())?;
+		}
 		Ok(())
 	}
 
@@ -230,7 +266,7 @@ where
 		)?;
 
 		self.startup_line(
-			"Listen Queue Size",
+			"listen_queue_size",
 			&format!(
 				"{}",
 				self.config
@@ -240,12 +276,156 @@ where
 		)?;
 
 		self.startup_line(
-			"Max Header Size",
+			"max_header_size",
 			&format!(
-				"{} bytes",
-				self.config.max_header_size.to_formatted_string(&Locale::en)
+				"{}",
+				Self::format_bytes(self.config.max_header_size.try_into()?)
 			)[..],
 		)?;
+
+		self.startup_line(
+			"max_header_entries",
+			&format!(
+				"{}",
+				self.config
+					.max_header_entries
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_header_name_len",
+			&format!(
+				"{}",
+				Self::format_bytes(self.config.max_header_name_len.try_into()?)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_header_value_len",
+			&format!(
+				"{}",
+				Self::format_bytes(self.config.max_header_value_len.try_into()?)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"root_dir",
+			&format!("{}", from_utf8(&self.config.root_dir)?)[..],
+		)?;
+
+		self.startup_line(
+			"max_cache_files",
+			&format!(
+				"{}",
+				self.config.max_cache_files.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_cache_chunks",
+			&format!(
+				"{}",
+				self.config
+					.max_cache_chunks
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"cache_chunk_size",
+			&format!(
+				"{}",
+				Self::format_bytes(self.config.cache_chunk_size.try_into()?)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_load_factor",
+			&format!("{}", self.config.max_load_factor)[..],
+		)?;
+
+		self.startup_line(
+			"max_bring_to_front",
+			&format!(
+				"{}",
+				self.config
+					.max_bring_to_front
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"process_cache_update",
+			&format!("{}", Self::format_time(self.config.process_cache_update))[..],
+		)?;
+
+		self.startup_line(
+			"cache_recheck_fs_millis",
+			&format!("{}", Self::format_time(self.config.cache_recheck_fs_millis))[..],
+		)?;
+
+		self.startup_line(
+			"connect_timeout",
+			&format!("{}", Self::format_time(self.config.connect_timeout))[..],
+		)?;
+
+		self.startup_line(
+			"idle_timeout",
+			&format!("{}", Self::format_time(self.config.idle_timeout))[..],
+		)?;
+
+		self.startup_line(
+			"threads",
+			&format!(
+				"{}",
+				self.config
+					.evh_config
+					.threads
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"read_buffer_size",
+			&format!(
+				"{}",
+				Self::format_bytes(self.config.evh_config.read_buffer_size.try_into()?)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_rwhandles",
+			&format!(
+				"{}",
+				self.config
+					.evh_config
+					.max_rwhandles
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_handle_numeric_value",
+			&format!(
+				"{}",
+				self.config
+					.evh_config
+					.max_handle_numeric_value
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"housekeeper_frequency",
+			&format!(
+				"{}",
+				Self::format_time(self.config.evh_config.housekeeper_frequency.try_into()?)
+			)[..],
+		)?;
+
+		self.debug_flag("--show_headers", self.config.show_headers)?;
+		self.debug_flag("--debug", self.config.debug)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
 

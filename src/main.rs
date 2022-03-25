@@ -52,6 +52,10 @@ fn main() -> Result<(), Error> {
 			let file = File::open(args.value_of("config").unwrap())?;
 			for line in BufReader::new(file).lines() {
 				let line = line?;
+				let line = line.trim();
+				if line.find("#") == Some(0) {
+					continue; // comments
+				}
 				for line in line.split_ascii_whitespace() {
 					lines.push(line.to_string());
 				}
@@ -99,10 +103,209 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
+	let listen_queue_size = match args.is_present("listen_queue_size") {
+		true => args.value_of("listen_queue_size").unwrap().parse()?,
+		false => match file_args.is_present("listen_queue_size") {
+			true => file_args.value_of("listen_queue_size").unwrap().parse()?,
+			false => 1_000,
+		},
+	};
+
+	let max_header_size = match args.is_present("max_header_size") {
+		true => args.value_of("max_header_size").unwrap().parse()?,
+		false => match file_args.is_present("max_header_size") {
+			true => file_args.value_of("max_header_size").unwrap().parse()?,
+			false => 16_384,
+		},
+	};
+
+	let max_header_name_len = match args.is_present("max_header_name_len") {
+		true => args.value_of("max_header_name_len").unwrap().parse()?,
+		false => match file_args.is_present("max_header_name_len") {
+			true => file_args.value_of("max_header_name_len").unwrap().parse()?,
+			false => 128,
+		},
+	};
+
+	let max_header_value_len = match args.is_present("max_header_value_len") {
+		true => args.value_of("max_header_value_len").unwrap().parse()?,
+		false => match file_args.is_present("max_header_value_len") {
+			true => file_args
+				.value_of("max_header_value_len")
+				.unwrap()
+				.parse()?,
+			false => 1_024,
+		},
+	};
+
+	let root_dir = match args.is_present("root_dir") {
+		true => args.value_of("root_dir").unwrap(),
+		false => match file_args.is_present("root_dir") {
+			true => file_args.value_of("").unwrap(),
+			false => "~/.niohttpd/www",
+		},
+	};
+
+	let max_header_entries = match args.is_present("max_header_entries") {
+		true => args.value_of("max_header_entries").unwrap().parse()?,
+		false => match file_args.is_present("max_header_entries") {
+			true => file_args.value_of("max_header_entries").unwrap().parse()?,
+			false => 1_000,
+		},
+	};
+
+	let max_cache_files = match args.is_present("max_cache_files") {
+		true => args.value_of("max_cache_files").unwrap().parse()?,
+		false => match file_args.is_present("max_cache_files") {
+			true => file_args.value_of("max_cache_files").unwrap().parse()?,
+			false => 1_000,
+		},
+	};
+
+	let max_cache_chunks = match args.is_present("max_cache_chunks") {
+		true => args.value_of("max_cache_chunks").unwrap().parse()?,
+		false => match file_args.is_present("max_cache_chunks") {
+			true => file_args.value_of("max_cache_chunks").unwrap().parse()?,
+			false => 100,
+		},
+	};
+
+	let cache_chunk_size = match args.is_present("cache_chunk_size") {
+		true => args.value_of("cache_chunk_size").unwrap().parse()?,
+		false => match file_args.is_present("cache_chunk_size") {
+			true => file_args.value_of("cache_chunk_size").unwrap().parse()?,
+			false => 1_048_576,
+		},
+	};
+
+	let max_load_factor = match args.is_present("max_load_factor") {
+		true => args.value_of("max_load_factor").unwrap().parse()?,
+		false => match file_args.is_present("max_load_factor") {
+			true => file_args.value_of("max_load_factor").unwrap().parse()?,
+			false => 0.9,
+		},
+	};
+
+	let max_bring_to_front = match args.is_present("max_bring_to_front") {
+		true => args.value_of("max_bring_to_front").unwrap().parse()?,
+		false => match file_args.is_present("max_bring_to_front") {
+			true => file_args.value_of("max_bring_to_front").unwrap().parse()?,
+			false => 1_000,
+		},
+	};
+
+	let process_cache_update = match args.is_present("process_cache_update") {
+		true => args.value_of("process_cache_update").unwrap().parse()?,
+		false => match file_args.is_present("process_cache_update") {
+			true => file_args
+				.value_of("process_cache_update")
+				.unwrap()
+				.parse()?,
+			false => 1_000,
+		},
+	};
+
+	let cache_recheck_fs_millis = match args.is_present("cache_recheck_fs_millis") {
+		true => args.value_of("cache_recheck_fs_millis").unwrap().parse()?,
+		false => match file_args.is_present("cache_recheck_fs_millis") {
+			true => file_args
+				.value_of("cache_recheck_fs_millis")
+				.unwrap()
+				.parse()?,
+			false => 3_000,
+		},
+	};
+
+	let connect_timeout = match args.is_present("connect_timeout") {
+		true => args.value_of("connect_timeout").unwrap().parse()?,
+		false => match file_args.is_present("connect_timeout") {
+			true => file_args.value_of("connect_timeout").unwrap().parse()?,
+			false => 30_000,
+		},
+	};
+
+	let idle_timeout = match args.is_present("idle_timeout") {
+		true => args.value_of("idle_timeout").unwrap().parse()?,
+		false => match file_args.is_present("idle_timeout") {
+			true => file_args.value_of("idle_timeout").unwrap().parse()?,
+			false => 30_000,
+		},
+	};
+
+	let read_buffer_size = match args.is_present("read_buffer_size") {
+		true => args.value_of("read_buffer_size").unwrap().parse()?,
+		false => match file_args.is_present("read_buffer_size") {
+			true => file_args.value_of("read_buffer_size").unwrap().parse()?,
+			false => 10_240,
+		},
+	};
+
+	let max_rwhandles = match args.is_present("max_rwhandles") {
+		true => args.value_of("max_rwhandles").unwrap().parse()?,
+		false => match file_args.is_present("max_rwhandles") {
+			true => file_args.value_of("max_rwhandles").unwrap().parse()?,
+			false => 16_000,
+		},
+	};
+
+	let max_handle_numeric_value = match args.is_present("max_handle_numeric_value") {
+		true => args.value_of("max_handle_numeric_value").unwrap().parse()?,
+		false => match file_args.is_present("max_handle_numeric_value") {
+			true => file_args
+				.value_of("max_handle_numeric_value")
+				.unwrap()
+				.parse()?,
+			false => 16_100,
+		},
+	};
+
+	let housekeeper_frequency = match args.is_present("housekeeper_frequency") {
+		true => args.value_of("housekeeper_frequency").unwrap().parse()?,
+		false => match file_args.is_present("housekeeper_frequency") {
+			true => file_args
+				.value_of("housekeeper_frequency")
+				.unwrap()
+				.parse()?,
+			false => 1_000,
+		},
+	};
+
+	let show_headers = match args.is_present("show_headers") {
+		true => true,
+		false => file_args.is_present("show_headers"),
+	};
+
+	let debug = match args.is_present("debug") {
+		true => true,
+		false => file_args.is_present("debug"),
+	};
+
 	let config = HttpConfig {
 		addrs,
+		show_headers,
+		listen_queue_size,
+		max_header_size,
+		max_header_entries,
+		max_header_name_len,
+		max_header_value_len,
+		max_cache_files,
+		max_cache_chunks,
+		cache_chunk_size,
+		max_load_factor,
+		max_bring_to_front,
+		process_cache_update,
+		cache_recheck_fs_millis,
+		connect_timeout,
+		idle_timeout,
+
+		root_dir: root_dir.as_bytes().to_vec(),
+		debug,
 		evh_config: EventHandlerConfig {
 			threads,
+			housekeeper_frequency,
+			max_handle_numeric_value,
+			max_rwhandles,
+			read_buffer_size,
 			..Default::default()
 		},
 		..Default::default()

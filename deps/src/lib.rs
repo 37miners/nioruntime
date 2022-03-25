@@ -34,6 +34,7 @@ pub use base64;
 pub use bitvec;
 pub use blake2;
 pub use byte_tools;
+pub use bytefmt;
 pub use byteorder;
 pub use bytes;
 pub use caret;
