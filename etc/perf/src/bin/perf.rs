@@ -41,6 +41,8 @@ use std::mem;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use std::thread::sleep;
+use std::time::Duration;
 use std::time::Instant;
 
 // unix
@@ -569,6 +571,11 @@ fn main() -> Result<(), Error> {
 	if is_client {
 		let http = args.is_present("http");
 
+		let delay = match args.is_present("delay") {
+			true => args.value_of("delay").unwrap().parse()?,
+			false => 0,
+		};
+
 		let port = match args.is_present("port") {
 			true => args.value_of("port").unwrap().parse()?,
 			false => 8092,
@@ -659,6 +666,7 @@ fn main() -> Result<(), Error> {
 				let lat_sum_total_clone = lat_sum_total.clone();
 				let path = path.clone();
 				let header = header.clone();
+				sleep(Duration::from_millis(delay));
 				jhs.push(std::thread::spawn(move || {
 					match run_thread(
 						count,

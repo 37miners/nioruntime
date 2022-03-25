@@ -150,7 +150,11 @@ where
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 		evh.set_on_housekeep(move |user_data, tid| {
-			Self::process_on_housekeeper(&config4, user_data, &evh_params_clone, tid)
+			match Self::process_on_housekeeper(&config4, user_data, &evh_params_clone, tid) {
+				Ok(_) => {},
+				Err(e) => debug!("housekeeping generated error: {}", e)?,
+			}
+			Ok(())
 		})?;
 
 		evh.start()?;

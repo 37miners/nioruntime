@@ -104,6 +104,12 @@ args:
         long: sleep
         takes_value: true
         value_name: sleep
+    - delay:
+        help: how long to sleep between connects (MacOS testing)
+        short: dy
+        long: delay
+        takes_value: true
+        value_name: delay
     - show_headers:
         help: show request headers
         short: d
@@ -115,4 +121,3 @@ args:
         long: header
         takes_value: true
         value_name: header
-        

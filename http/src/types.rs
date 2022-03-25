@@ -966,7 +966,7 @@ impl Default for HttpConfig {
 		Self {
 			proxy_config: ProxyConfig::default(),
 			addrs: vec![SocketAddr::from_str("127.0.0.1:8080").unwrap()],
-			listen_queue_size: 100,
+			listen_queue_size: 1000,
 			max_header_size: 16 * 1024,
 			max_header_name_len: 128,
 			max_header_value_len: 1024,
