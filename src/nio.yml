@@ -8,12 +8,12 @@ args:
         long: config
         takes_value: false
         value_name: config
-    - addr:
+    - listener:
         help: TCP SocketAddr to listen for HTTP Requests on. For example 127.0.0.1:8080. If none are specified, 127.0.0.1:8080 is used.
-        short: a
-        long: addr
+        short: l
+        long: listener
         takes_value: true
-        value_name: addr
+        value_name: listener
         multiple: true
     - threads:
         help: Number of threads used for HTTP processing. The default is 8.
@@ -39,43 +39,43 @@ args:
         value_name: listen_queue_size
     - max_header_size:
         help: Maximum size of the entire HTTP header in bytes. The default value is 16,384 bytes (16 kb).
-        short: mhs
+        short: m
         long: max_header_size
         takes_value: true
         value_name: max_header_size
     - max_header_entries:
         help: Maximum number of HTTP header entries in a request. The default value is 1,000.
-        short: mhe
+        short: e
         long: max_header_entries
         takes_value: true
         value_name: max_header_entries
     - max_header_name_len:
         help: Maximum length of a header name in bytes. The default value is 128 bytes.
-        short: mhnl
+        short: x
         long: max_header_name_len
         takes_value: true
         value_name: max_header_name_len
     - max_header_value_len:
         help: Maximum length of a header value in bytes. The default value is 1,024 bytes.
-        short: mhvl
+        short: v
         long: max_header_value_len
         takes_value: true
         value_name: max_header_value_len
-    - root_dir:
+    - webroot:
         help: The root directory containing webserver files.
         short: r
-        long: root_dir
+        long: webroot 
         takes_value: true
-        value_name: root_dir
+        value_name: webroot
     - max_cache_files:
         help: The maximum number of files that can be in the cache at any given time. Note that this is subject to the load factor. So if the max_cache_files is set to 1,000 and the load factor is 0.75, that means only 750 files can be in the cache at any given time. The default value is 100.
-        short: mcf
+        short: f
         long: max_cache_files
         takes_value: true
         value_name: max_cache_files
     - max_cache_chunks:
         help: The maximum number of slab "chunks" that can be in the cache at any given time. The default value is 200.
-        short: mc
+        short: u
         long: max_cache_chunks
         takes_value: true
         value_name: max_cache_chunks
@@ -87,61 +87,67 @@ args:
         value_name: cache_chunk_size
     - max_load_factor:
         help: The maximum load factor of the cache. See the StaticHash documentation for more details. The default value is 0.9.
-        short: mf
+        short: z
         long: max_load_factor
         takes_value: true
         value_name: max_load_factor
     - max_bring_to_front:
         help: The maximum number of files to bring to the front of the cache, per cycle, per thread. The default value is 1,000.
-        short: mb
+        short: b
         long: max_bring_to_front
         takes_value: true
         value_name: max_bring_to_front
     - process_cache_update:
         help: The length of the bring_to_front cycle where files are brought to the front of the cache, in milliseconds. The default value is 1,000 ms.
-        short: pc
+        short: p
         long: process_cache_update
         takes_value: true
         value_name: process_cache_update
     - cache_recheck_fs_millis:
         help: The time, in milliseconds, that the cache will recheck whether a file has been updated on disk. The default value is 3,000 ms.
-        short: cr
+        short: w
         long: cache_recheck_fs_millis
         takes_value: true
         value_name: cache_recheck_fs_millis
     - idle_timeout:
         help: The amount of time, in milliseconds, before an idle connection is closed. The default is 60,000 ms.
-        short: it
+        short: i
         long: idle_timeout
         takes_value: true
         value_name: idle_timeout
     - connect_timeout:
         help: The amount of time, in milliseconds, before a connection that has not yet sent any data to the server is closed. The default is 30,000 ms.
-        short: ct
-        long: idle_timeout
+        short: s
+        long: connect_timeout
         takes_value: true
         value_name: connect_timeout
     - read_buffer_size:
         help: The default size in bytes of the eventhandler read buffer. The default value is 10,240 bytes.
-        short: rb
+        short: j
         long: read_buffer_size
         takes_value: true
         value_name: read_buffer_size
     - max_rwhandles:
         help: The maximum number of read/write handles that the server can accept. This includes handles that the server creates (like proxy connections) and connections the server accepts.
-        short: mr
+        short: y
         long: max_rwhandles
         takes_value: true
         value_name: max_rwhandles
     - max_handle_numeric_value:
         help: The maximum numeric value of a handle (file handles on windows and file descriptors on unix).
-        short: mh
+        short: n
         long: max_handle_numeric_value
         takes_value: true
         value_name: max_handle_numeric_value
     - housekeeper_frequency:
         help: The frequency, in milliseconds, that the housekeeper thread is executed. This thread does various things like checking for idle connections, doing health checks on the proxy and other things. The default value is 1,000 ms.
-        short: hf
+        short: a
         long: housekeeper_frequency
         takes_value: true
         value_name: housekeeper_frequency
+    - mainlog:
+        help: The location of the main log file. This file contains errors and debugging information only.
+        short: k
+        long: mainlog
+        takes_value: true
+        value_name: mainlog

@@ -32,13 +32,6 @@ pub mod built_info {
 }
 
 fn main() -> Result<(), Error> {
-	log_config!(LogConfig {
-		show_line_num: false,
-		show_log_level: false,
-		show_bt: false,
-		..Default::default()
-	})?;
-
 	#[allow(deprecated)]
 	let yml = load_yaml!("nio.yml");
 	#[allow(deprecated)]
@@ -71,28 +64,28 @@ fn main() -> Result<(), Error> {
 		}
 	};
 
-	let mut addrs = match args.is_present("addr") {
+	let mut listeners = match args.is_present("listener") {
 		true => {
-			let mut addrs = vec![];
-			for addr in args.values_of("addr").unwrap() {
-				addrs.push(SocketAddr::from_str(addr)?);
+			let mut listeners = vec![];
+			for listener in args.values_of("listener").unwrap() {
+				listeners.push(SocketAddr::from_str(listener)?);
 			}
-			addrs
+			listeners
 		}
 		false => vec![],
 	};
 
-	match file_args.is_present("addr") {
+	match file_args.is_present("listener") {
 		true => {
-			for addr in file_args.values_of("addr").unwrap() {
-				addrs.push(SocketAddr::from_str(addr.trim())?);
+			for listener in file_args.values_of("listener").unwrap() {
+				listeners.push(SocketAddr::from_str(listener.trim())?);
 			}
 		}
 		false => {}
 	}
 
-	if addrs.len() == 0 {
-		addrs.push(SocketAddr::from_str("127.0.0.1:8080")?);
+	if listeners.len() == 0 {
+		listeners.push(SocketAddr::from_str("127.0.0.1:8080")?);
 	}
 
 	let threads = match args.is_present("threads") {
@@ -138,13 +131,22 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
-	let root_dir = match args.is_present("root_dir") {
-		true => args.value_of("root_dir").unwrap(),
-		false => match file_args.is_present("root_dir") {
-			true => file_args.value_of("").unwrap(),
+	let webroot = match args.is_present("webroot") {
+		true => args.value_of("webroot").unwrap(),
+		false => match file_args.is_present("webroot") {
+			true => file_args.value_of("webroot").unwrap(),
 			false => "~/.niohttpd/www",
 		},
 	};
+
+	let mainlog = match args.is_present("mainlog") {
+		true => args.value_of("mainlog").unwrap(),
+		false => match file_args.is_present("mainlog") {
+			true => file_args.value_of("mainlog").unwrap(),
+			false => "~/.niohttpd/logs/mainlog.log",
+		},
+	}
+	.to_string();
 
 	let max_header_entries = match args.is_present("max_header_entries") {
 		true => args.value_of("max_header_entries").unwrap().parse()?,
@@ -228,7 +230,7 @@ fn main() -> Result<(), Error> {
 		true => args.value_of("idle_timeout").unwrap().parse()?,
 		false => match file_args.is_present("idle_timeout") {
 			true => file_args.value_of("idle_timeout").unwrap().parse()?,
-			false => 30_000,
+			false => 60_000,
 		},
 	};
 
@@ -281,7 +283,7 @@ fn main() -> Result<(), Error> {
 	};
 
 	let config = HttpConfig {
-		addrs,
+		addrs: listeners,
 		show_headers,
 		listen_queue_size,
 		max_header_size,
@@ -298,7 +300,7 @@ fn main() -> Result<(), Error> {
 		connect_timeout,
 		idle_timeout,
 
-		root_dir: root_dir.as_bytes().to_vec(),
+		webroot: webroot.as_bytes().to_vec(),
 		debug,
 		evh_config: EventHandlerConfig {
 			threads,
@@ -308,6 +310,7 @@ fn main() -> Result<(), Error> {
 			read_buffer_size,
 			..Default::default()
 		},
+		mainlog,
 		..Default::default()
 	};
 

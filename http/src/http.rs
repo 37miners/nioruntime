@@ -88,7 +88,7 @@ where
 		+ Sync
 		+ Unpin,
 {
-	pub fn new(mut config: HttpConfig) -> Self {
+	pub fn new(config: HttpConfig) -> Self {
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
 			None => PathBuf::new(),
@@ -97,15 +97,16 @@ where
 		.display()
 		.to_string();
 
-		let mut root_dir = std::str::from_utf8(&config.root_dir).unwrap().to_string();
+		let webroot = std::str::from_utf8(&config.webroot).unwrap().to_string();
+		let webroot = webroot.replace("~", &home_dir);
+		let webroot = path_clean(&webroot);
 
-		root_dir = root_dir.replace("~", &home_dir);
-		root_dir = path_clean(&root_dir);
-		root_dir = format!("{}/www", root_dir);
+		let mainlog = config.mainlog.replace("~", &home_dir);
+		let mainlog = path_clean(&mainlog);
 
-		if std::fs::metadata(root_dir.clone()).is_err() {
+		if std::fs::metadata(webroot.clone()).is_err() {
 			// if it doesn't exist
-			match Self::init_webroot(&root_dir) {
+			match Self::init_webroot(&webroot) {
 				Ok(_) => {}
 				Err(e) => {
 					error!("Could not create webroot due to: {}", e).ok();
@@ -113,7 +114,14 @@ where
 			}
 		}
 
-		config.root_dir = root_dir.as_bytes().to_vec();
+		if std::fs::metadata(mainlog.clone()).is_err() {
+			match Self::init_mainlog(&mainlog) {
+				Ok(_) => {}
+				Err(e) => {
+					error!("Could not create mainlog due to: {}", e).ok();
+				}
+			}
+		}
 
 		Self {
 			config,
@@ -133,6 +141,25 @@ where
 
 	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
+                let home_dir = match dirs::home_dir() {
+                        Some(p) => p,
+                        None => PathBuf::new(),
+                }
+                .as_path()
+                .display()
+                .to_string();
+
+                let mainlog = self.config.mainlog.replace("~", &home_dir);
+                let mainlog = path_clean(&mainlog);
+
+        	log_config!(LogConfig {
+                	show_line_num: false,
+                	show_log_level: false,
+                	show_bt: false,
+			file_path: Some(mainlog),
+                	..Default::default()
+        	})?;
+
 		self.show_config()?;
 
 		let mut evh = EventHandler::new(self.config.evh_config)?;
@@ -201,7 +228,7 @@ where
 		info!("{}", "Server started!".cyan())?;
 
 		set_config_option!(Settings::LineNum, true)?;
-		if ! (self.config.debug || self.config.show_headers) {
+		if !self.config.debug {
 			set_config_option!(Settings::Stdout, false)?;
 		}
 
@@ -265,6 +292,8 @@ where
 			&format!("{:?}", &self.config.addrs)[..],
 		)?;
 
+		self.startup_line("mainlog", &self.config.mainlog)?;
+
 		self.startup_line(
 			"listen_queue_size",
 			&format!(
@@ -310,8 +339,8 @@ where
 		)?;
 
 		self.startup_line(
-			"root_dir",
-			&format!("{}", from_utf8(&self.config.root_dir)?)[..],
+			"webroot",
+			&format!("{}", from_utf8(&self.config.webroot)?)[..],
 		)?;
 
 		self.startup_line(
@@ -429,6 +458,14 @@ where
 
 		info_no_ts!("{}", SEPARATOR)?;
 
+		Ok(())
+	}
+
+	fn init_mainlog(mainlog: &String) -> Result<(), Error> {
+		let mut p = PathBuf::from(mainlog);
+		p.pop();
+		fsutils::mkdir(&p.as_path().display().to_string());
+		File::create(mainlog)?;
 		Ok(())
 	}
 
@@ -777,6 +814,7 @@ where
 						&mime_map,
 						&async_connections,
 						now,
+						&thread_context.webroot,
 					) {
 						Ok(k) => {
 							key = k;
@@ -868,11 +906,12 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
 		now: SystemTime,
+		webroot: &Vec<u8>,
 	) -> Result<Option<[u8; 32]>, Error> {
-		let mut path = config.root_dir.clone();
+		let mut path = webroot.clone();
 		path.extend_from_slice(&uri);
 		Self::clean(&mut path)?;
-		Self::check_path(&path, &config.root_dir)?;
+		Self::check_path(&path, &webroot)?;
 
 		// try both the exact path and the version with index appended (metadata too expensive)
 		let (found, need_update, key) = Self::try_send_cache(

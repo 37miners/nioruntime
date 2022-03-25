@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+use nioruntime_deps::dirs;
 use nioruntime_deps::lazy_static::lazy_static;
+use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
@@ -24,6 +26,7 @@ use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
 use std::hash::Hasher;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -309,6 +312,7 @@ pub struct ThreadContext {
 	pub idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
 	pub health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
+	pub webroot: Vec<u8>,
 }
 
 impl ThreadContext {
@@ -346,6 +350,18 @@ impl ThreadContext {
 
 		let health_check_connections = HashMap::new();
 
+		let webroot = std::str::from_utf8(&config.webroot).unwrap().to_string();
+		let home_dir = match dirs::home_dir() {
+			Some(p) => p,
+			None => PathBuf::new(),
+		}
+		.as_path()
+		.display()
+		.to_string();
+
+		let webroot = webroot.replace("~", &home_dir);
+		let webroot = path_clean(&webroot).as_bytes().to_vec();
+
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
 			cache_hits: StaticHash::new(cache_hits_conf)?,
@@ -359,6 +375,7 @@ impl ThreadContext {
 			idle_proxy_connections,
 			proxy_state,
 			health_check_connections,
+			webroot,
 		})
 	}
 }
@@ -944,7 +961,7 @@ pub struct HttpConfig {
 	pub max_header_entries: usize,
 	pub max_header_name_len: usize,
 	pub max_header_value_len: usize,
-	pub root_dir: Vec<u8>,
+	pub webroot: Vec<u8>,
 	pub max_cache_files: usize,
 	pub max_cache_chunks: u64,
 	pub cache_chunk_size: u64,
@@ -959,6 +976,7 @@ pub struct HttpConfig {
 	pub proxy_config: ProxyConfig,
 	pub show_headers: bool,
 	pub debug: bool,
+	pub mainlog: String,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -972,7 +990,8 @@ impl Default for HttpConfig {
 			max_header_name_len: 128,
 			max_header_value_len: 1024,
 			max_header_entries: 1_000,
-			root_dir: "~/.niohttpd".to_string().as_bytes().to_vec(),
+			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
+			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
 			max_cache_files: 1_000,
 			max_cache_chunks: 100,
 			max_bring_to_front: 1_000,
