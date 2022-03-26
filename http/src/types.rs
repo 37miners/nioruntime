@@ -200,6 +200,12 @@ pub type Handle = RawFd;
 pub type Handle = u64;
 debug!();
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListenerType {
+	Tls,
+	Plain,
+}
+
 pub struct ConnectionInfo {
 	pub last_data: u128,
 	pub connection: u128,
@@ -955,7 +961,9 @@ impl Default for ProxyConfig {
 
 #[derive(Clone)]
 pub struct HttpConfig {
-	pub addrs: Vec<SocketAddr>,
+	pub listeners: Vec<(ListenerType, SocketAddr)>,
+	pub fullchain_map: HashMap<u16, String>,
+	pub privkey_map: HashMap<u16, String>,
 	pub listen_queue_size: usize,
 	pub max_header_size: usize,
 	pub max_header_entries: usize,
@@ -979,6 +987,7 @@ pub struct HttpConfig {
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
 	pub mainlog_max_size: u64,
+	pub error_page: Vec<u8>,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -986,7 +995,12 @@ impl Default for HttpConfig {
 	fn default() -> Self {
 		Self {
 			proxy_config: ProxyConfig::default(),
-			addrs: vec![SocketAddr::from_str("127.0.0.1:8080").unwrap()],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str("127.0.0.1:8080").unwrap(),
+			)],
+			fullchain_map: HashMap::new(),
+			privkey_map: HashMap::new(),
 			listen_queue_size: 1000,
 			max_header_size: 16 * 1024,
 			max_header_name_len: 128,
@@ -1008,6 +1022,7 @@ impl Default for HttpConfig {
 			idle_timeout: 60_000,           // 1 minute
 			show_headers: false,            // debug: show headers
 			debug: false,                   // general debugging including log to stdout
+			error_page: "/error.html".as_bytes().to_vec(),
 			evh_config: EventHandlerConfig::default(),
 			mime_map: vec![
 				("html".to_string(), "text/html".to_string()),

@@ -19,6 +19,6 @@ mod types;
 
 pub use crate::http::HttpServer;
 pub use crate::types::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ProxyConfig, ProxyEntry, ProxyRotation,
-	Upstream,
+	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ListenerType, ProxyConfig, ProxyEntry,
+	ProxyRotation, Upstream,
 };

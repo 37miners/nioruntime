@@ -69,7 +69,7 @@ args:
         value_name: webroot
     - max_cache_files:
         help: The maximum number of files that can be in the cache at any given time. Note that this is subject to the load factor. So if the max_cache_files is set to 1,000 and the load factor is 0.75, that means only 750 files can be in the cache at any given time. The default value is 100.
-        short: f
+        short: q
         long: max_cache_files
         takes_value: true
         value_name: max_cache_files
@@ -81,7 +81,7 @@ args:
         value_name: max_cache_chunks
     - cache_chunk_size:
         help: The size of the slab "chunks". The default is 262,144 bytes.
-        short: cs
+        short: q
         long: cache_chunk_size
         takes_value: true
         value_name: cache_chunk_size
@@ -147,7 +147,7 @@ args:
         value_name: housekeeper_frequency
     - mainlog:
         help: The location of the main log file. This file contains errors and debugging information only.
-        short: k
+        short: q
         long: mainlog
         takes_value: true
         value_name: mainlog
@@ -161,3 +161,17 @@ args:
         long: mainlog_max_age
         takes_value: true
         value_name: mainlog_max_age
+    - privkey:
+        help: A private key file to be used with a TLS listener. Format is <port>:/path/to/privkey.pem. (e.g. 443:/path/to/privkey.pem)
+        short: k
+        long: privkey
+        takes_value: true
+        value_name: certificate
+        multiple: true
+    - fullchain:
+        help: A fullchain certificates file to be used with a TLS listener. Format is <port>:/path/to/fullchain.pem. (e.g. 443:/path/to/fullchain.pem)
+        short: f
+        long: fullchain
+        takes_value: true
+        value_name: fullchain
+        multiple: true

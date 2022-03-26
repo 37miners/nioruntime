@@ -37,6 +37,7 @@ use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
+use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
@@ -89,6 +90,8 @@ where
 		+ Unpin,
 {
 	pub fn new(config: HttpConfig) -> Result<Self, Error> {
+		Self::check_config(&config)?;
+
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
 			None => PathBuf::new(),
@@ -105,16 +108,12 @@ where
 		let mainlog = path_clean(&mainlog);
 
 		if std::fs::metadata(webroot.clone()).is_err() {
-			// if it doesn't exist
 			Self::init_webroot(&webroot)?;
 		}
 
 		if std::fs::metadata(mainlog.clone()).is_err() {
-			// if it doesn't exist
 			Self::init_mainlog(&mainlog)?;
 		}
-
-		Self::check_config(&config)?;
 
 		Ok(Self {
 			config,
@@ -134,8 +133,6 @@ where
 
 	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
-		self.show_config()?;
-
 		let mut evh = EventHandler::new(self.config.evh_config)?;
 
 		let evh_params = evh.get_evh_params();
@@ -178,8 +175,8 @@ where
 
 		evh.start()?;
 
-		for i in 0..self.config.addrs.len() {
-			let inet_addr = InetAddr::from_std(&self.config.addrs[i]);
+		for i in 0..self.config.listeners.len() {
+			let inet_addr = InetAddr::from_std(&self.config.listeners[i].1);
 			let sock_addr = SockAddr::new_inet(inet_addr);
 
 			let mut handles = vec![];
@@ -194,13 +191,44 @@ where
 				self._listeners.push(listener);
 			}
 
-			evh.add_listener_handles(handles, None)?;
+			let tls_config = if self.config.listeners[i].0 == ListenerType::Tls {
+				let port = self.config.listeners[i].1.port();
+				let private_key_file = match self.config.privkey_map.get(&port) {
+					Some(private_key_file) => private_key_file.to_string(),
+					None => {
+                                		return Err(ErrorKind::Configuration(format!(
+                                        		"No privkey file specified for port {}",
+                                        		self.config.listeners[i].1.port()
+                                		)).into());
+					},
+				};
+
+                                let certificates_file = match self.config.fullchain_map.get(&port) {
+                                        Some(certificates_file) => certificates_file.to_string(),
+                                        None => {
+                                		return Err(ErrorKind::Configuration(format!(
+                                        		"No fullchain file specified for port {}",
+                                        		self.config.listeners[i].1.port()
+                                		)).into());
+                                        },
+                                };
+
+				Some(
+					TLSServerConfig {
+						certificates_file,
+						private_key_file,
+					}
+				)
+			} else {
+				None
+			};
+			evh.add_listener_handles(handles, tls_config)?;
 		}
 
+		self.show_config()?;
+
 		set_config_option!(Settings::Level, true)?;
-
 		info!("{}", "Server started!".cyan())?;
-
 		set_config_option!(Settings::LineNum, true)?;
 		if !self.config.debug {
 			set_config_option!(Settings::Stdout, false)?;
@@ -221,8 +249,8 @@ where
 	}
 
 	fn check_config(config: &HttpConfig) -> Result<(), Error> {
-		for addr in &config.addrs {
-			let res = socket_connect(addr);
+		for listener in &config.listeners {
+			let res = socket_connect(&listener.1);
 			if res.is_ok() {
 				let handle = res.unwrap();
 				#[cfg(unix)]
@@ -235,7 +263,7 @@ where
 				}
 				return Err(ErrorKind::Configuration(format!(
 					"Port {} already in use.",
-					addr.port()
+					listener.1.port()
 				))
 				.into());
 			}
@@ -286,7 +314,7 @@ where
 
 		self.startup_line(
 			"Listener Addresses",
-			&format!("{:?}", &self.config.addrs)[..],
+			&format!("{:?}", &self.config.listeners)[..],
 		)?;
 
 		self.startup_line("mainlog", &self.config.mainlog)?;
@@ -828,7 +856,23 @@ where
 						Err(e) => {
 							match e.kind() {
 								ErrorKind::HttpError404(_) => {
-									conn_data.write(HTTP_ERROR_404)?;
+									match Self::send_file(
+										&config.error_page,
+										conn_data,
+										config,
+										cache,
+										headers.get_version(),
+										range,
+										&mime_map,
+										&async_connections,
+										now,
+										&thread_context.webroot,
+									) {
+										Ok(k) => key = k,
+										Err(_e) => {
+											conn_data.write(HTTP_ERROR_404)?;
+										}
+									}
 								}
 								ErrorKind::HttpError403(_) => {
 									conn_data.write(HTTP_ERROR_403)?;

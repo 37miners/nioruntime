@@ -16,11 +16,13 @@
 use clap::load_yaml;
 use clap::Command;
 use nioruntime_deps::dirs;
+use nioruntime_deps::fsutils;
 use nioruntime_deps::path_clean::clean as path_clean;
-use nioruntime_err::Error;
+use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::EventHandlerConfig;
-use nioruntime_http::{HttpConfig, HttpServer};
+use nioruntime_http::{HttpConfig, HttpServer, ListenerType};
 use nioruntime_log::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -67,11 +69,151 @@ fn main() -> Result<(), Error> {
 		}
 	};
 
+	let fullchain_map = {
+		let mut ret: HashMap<u16, String> = HashMap::new();
+		match args.is_present("fullchain") {
+			true => {
+				for fullchain in args.values_of("fullchain").unwrap() {
+					let mut spl = fullchain.split(':');
+					let port = match spl.next() {
+						Some(port) => port.parse()?,
+						None => {
+							return Err(
+								ErrorKind::Configuration("malformed fullchain".into()).into()
+							);
+						}
+					};
+
+					let file = match spl.next() {
+						Some(file) => file.to_string(),
+						None => {
+							return Err(
+								ErrorKind::Configuration("malformed fullchain".into()).into()
+							);
+						}
+					};
+					ret.insert(port, file);
+				}
+			}
+			false => {}
+		}
+		match file_args.is_present("fullchain") {
+			true => {
+				for fullchain in file_args.values_of("fullchain").unwrap() {
+					let mut spl = fullchain.split(':');
+					let port = match spl.next() {
+						Some(port) => port.parse()?,
+						None => {
+							return Err(
+								ErrorKind::Configuration("malformed fullchain".into()).into()
+							);
+						}
+					};
+
+					let file = match spl.next() {
+						Some(file) => file.to_string(),
+						None => {
+							return Err(
+								ErrorKind::Configuration("malformed fullchain".into()).into()
+							);
+						}
+					};
+					ret.insert(port, file);
+				}
+			}
+			false => {}
+		}
+
+		ret
+	};
+
+	let privkey_map = {
+		let mut ret: HashMap<u16, String> = HashMap::new();
+		match args.is_present("privkey") {
+			true => {
+				for privkey in args.values_of("privkey").unwrap() {
+					let mut spl = privkey.split(':');
+					let port = match spl.next() {
+						Some(port) => port.parse()?,
+						None => {
+							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
+						}
+					};
+
+					let file = match spl.next() {
+						Some(file) => file.to_string(),
+						None => {
+							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
+						}
+					};
+					ret.insert(port, file);
+				}
+			}
+			false => {}
+		}
+		match file_args.is_present("privkey") {
+			true => {
+				for privkey in file_args.values_of("privkey").unwrap() {
+					let mut spl = privkey.split(':');
+					let port = match spl.next() {
+						Some(port) => port.parse()?,
+						None => {
+							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
+						}
+					};
+
+					let file = match spl.next() {
+						Some(file) => file.to_string(),
+						None => {
+							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
+						}
+					};
+					ret.insert(port, file);
+				}
+			}
+			false => {}
+		}
+
+		ret
+	};
+
 	let mut listeners = match args.is_present("listener") {
 		true => {
 			let mut listeners = vec![];
 			for listener in args.values_of("listener").unwrap() {
-				listeners.push(SocketAddr::from_str(listener)?);
+				let mut spl = listener.split(':');
+				let proto = match spl.next() {
+					Some(proto) => proto,
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let sock_addr = match spl.next() {
+					Some(sock_addr) => &sock_addr[2..],
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let sock_addr = match spl.next() {
+					Some(port) => format!("{}:{}", sock_addr, port),
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let listener_type = if proto == "http" {
+					ListenerType::Plain
+				} else if proto == "https" {
+					ListenerType::Tls
+				} else {
+					return Err(ErrorKind::Configuration(
+						"malformed listener (http or https only)".into(),
+					)
+					.into());
+				};
+				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?));
 			}
 			listeners
 		}
@@ -81,14 +223,46 @@ fn main() -> Result<(), Error> {
 	match file_args.is_present("listener") {
 		true => {
 			for listener in file_args.values_of("listener").unwrap() {
-				listeners.push(SocketAddr::from_str(listener.trim())?);
+				let mut spl = listener.split(':');
+				let proto = match spl.next() {
+					Some(proto) => proto,
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let sock_addr = match spl.next() {
+					Some(sock_addr) => &sock_addr[2..],
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let sock_addr = match spl.next() {
+					Some(port) => format!("{}:{}", sock_addr, port),
+					None => {
+						return Err(ErrorKind::Configuration("malformed listener".into()).into());
+					}
+				};
+
+				let listener_type = if proto == "http" {
+					ListenerType::Plain
+				} else if proto == "https" {
+					ListenerType::Tls
+				} else {
+					return Err(ErrorKind::Configuration(
+						"malformed listener (http or https only)".into(),
+					)
+					.into());
+				};
+				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?));
 			}
 		}
 		false => {}
 	}
 
 	if listeners.len() == 0 {
-		listeners.push(SocketAddr::from_str("127.0.0.1:8080")?);
+		listeners.push((ListenerType::Plain, SocketAddr::from_str("127.0.0.1:8080")?));
 	}
 
 	let threads = match args.is_present("threads") {
@@ -302,7 +476,9 @@ fn main() -> Result<(), Error> {
 	};
 
 	let config = HttpConfig {
-		addrs: listeners,
+		listeners,
+		fullchain_map,
+		privkey_map,
 		show_headers,
 		listen_queue_size,
 		max_header_size,
@@ -344,6 +520,11 @@ fn main() -> Result<(), Error> {
 
 	let mainlog = config.mainlog.replace("~", &home_dir);
 	let mainlog = path_clean(&mainlog);
+
+	let mut p = PathBuf::from(mainlog.clone());
+	p.pop();
+	fsutils::mkdir(&p.as_path().display().to_string());
+	File::create(mainlog.clone())?;
 
 	log_config!(LogConfig {
 		show_line_num: false,
