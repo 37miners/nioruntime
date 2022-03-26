@@ -32,6 +32,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::str::from_utf8;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 warn!();
@@ -61,12 +62,19 @@ pub fn process_proxy_inbound(
 
 			// we write whether we're done or not
 			match &proxy_info.response_conn_data {
-				Some(conn_data) => match conn_data.write(nbuf) {
-					Ok(_) => {}
-					Err(e) => {
-						warn!("proxy request generated error: {}", e)?;
+				Some(conn_data) => {
+					match conn_data.write(nbuf) {
+						Ok(_) => {}
+						Err(e) => {
+							warn!("proxy request generated error: {}", e)?;
+						}
 					}
-				},
+
+					// if complete, call async complete
+					if is_complete && !is_close {
+						conn_data.async_complete()?;
+					}
+				}
 				None => {
 					warn!(
 						"no proxy for id = {}, nbuf='{}'",
@@ -213,75 +221,68 @@ pub fn check_complete(buffer: &[u8]) -> Result<(bool, bool, usize), Error> {
 								} else {
 									false
 								};
-								Ok((complete, close, 0))
+
+								let end = if complete { 6 + len + end_headers } else { 0 };
+								return Ok((complete, close, end));
 							}
 							None => {
-								Ok((false, false, 0)) // TODO: how do we handle this?
+								return Ok((false, false, 0)); // TODO: how do we handle this?
 							}
 						}
-					} else {
-						// no content, just headers
-						let complete = end_headers <= buffer.len();
-						let close = if complete {
-							bytes_find(buffer, CONNECTION_CLOSE).unwrap_or(usize::MAX) < end_headers
-						} else {
-							false
-						};
-						Ok((complete, close, 0))
 					}
 				}
-				None => {
-					let chunked = bytes_find(buffer, TRANSFER_ENCODING_CHUNKED).is_some();
-					if !chunked {
-						// if it's not chunked and no content-length, we return that it's not complete
-						// HTTP/1.0
-						// data is still sent and we must close the client connection
-						// when upstream closes
-						Ok((false, false, 0))
-					} else {
-						let mut offset = end_headers + 4;
-						let buffer_len = buffer.len();
-						loop {
-							if offset > buffer_len {
-								return Ok((false, false, 0));
-							}
-							let len = bytes_parse_number_hex(&buffer[offset..]);
-							let len = match len {
-								Some(len) => len,
-								None => {
-									warn!("invalid response from upstream. Could not parse Transfer-encoding")?;
-									return Err(ErrorKind::HttpError500(format!(
+				None => {}
+			}
+			let chunked = bytes_find(buffer, TRANSFER_ENCODING_CHUNKED).is_some();
+			if !chunked {
+				// if it's not chunked and no content-length, we return that it's not complete
+				// HTTP/1.0
+				// data is still sent and we must close the client connection
+				// when upstream closes
+				Ok((false, false, 0))
+			} else {
+				let mut offset = end_headers + 4;
+				let buffer_len = buffer.len();
+				loop {
+					if offset > buffer_len {
+						return Ok((false, false, 0));
+					}
+					let len = bytes_parse_number_hex(&buffer[offset..]);
+					let len =
+						match len {
+							Some(len) => len,
+							None => {
+								warn!("invalid response from upstream. Could not parse Transfer-encoding")?;
+								return Err(ErrorKind::HttpError500(format!(
 											"Invalid response from upstream: could not parse transfer encoding"
 											))
-									.into());
-								}
-							};
+								.into());
+							}
+						};
 
-							if len == 0 {
-								break;
-							}
-							if offset > buffer_len {
-								return Ok((false, false, 0));
-							}
-							let next_line = bytes_find(&buffer[offset..], BACK_R);
-							match next_line {
-								Some(next_line) => {
-									offset += len + next_line + 5;
-								}
-								None => {
-									return Err(
+					if len == 0 {
+						break;
+					}
+					if offset > buffer_len {
+						return Ok((false, false, 0));
+					}
+					let next_line = bytes_find(&buffer[offset..], BACK_R);
+					match next_line {
+						Some(next_line) => {
+							offset += len + next_line + 5;
+						}
+						None => {
+							return Err(
 										ErrorKind::HttpError500(
                                                                                         format!(
                                                                                         "Invalid response from upstream: (2) could not parse transfer encoding"
                                                                                         )
                                                                                 ).into()
 									);
-								}
-							}
 						}
-						Ok((true, false, 0))
 					}
 				}
+				Ok((true, false, offset + 3))
 			}
 		}
 		None => Ok((false, false, 0)), // headers not complete, we can't be done
@@ -299,9 +300,10 @@ pub fn process_proxy_outbound(
 	active_connections: &mut HashMap<u128, ConnectionInfo>,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+	async_connections: &Arc<RwLock<HashSet<u128>>>,
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
 	// select a random health socket
 	let state = proxy_state.get(proxy_entry);
 	let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
@@ -311,7 +313,7 @@ pub fn process_proxy_outbound(
 			if len == 0 {
 				// 503 service unavailable
 				inbound.write(HTTP_ERROR_503)?;
-				return Ok(());
+				return Ok(buffer.len());
 			} else {
 				match &proxy_entry.proxy_rotation {
 					ProxyRotation::Random => {
@@ -535,9 +537,27 @@ pub fn process_proxy_outbound(
 		}
 	};
 
-	proxy_info.proxy_conn.write(buffer)?;
+	// set async
+	let mut ctx = ApiContext::new(async_connections.clone(), inbound.clone());
+	ctx.set_async()?;
 
-	Ok(())
+	// send the first request
+	let end = send_first_request(headers, &proxy_info.proxy_conn, buffer)?;
+
+	Ok(end)
+}
+
+fn send_first_request(
+	headers: &HttpHeaders,
+	conn_data: &ConnectionData,
+	buffer: &[u8],
+) -> Result<usize, Error> {
+	let len = headers.len();
+	// TODO: deal with Content-Length / Transfer-Encoding in request
+
+	conn_data.write(&buffer[0..len])?;
+
+	Ok(len)
 }
 
 pub fn connect_outbound(
@@ -712,7 +732,7 @@ mod test {
 			check_complete(
 				b"HTTP/1.1 200 OK\r\nServer: test\r\nContent-Length: 10\r\n\r\n0123456789"
 			)?,
-			(true, false, 0)
+			(true, false, 65)
 		);
 		assert_eq!(
 			check_complete(
@@ -729,7 +749,7 @@ Connection: keep-alive\r\n\
 0\r\n\
 \r\n"
 			)?,
-			(true, false, 0)
+			(true, false, 188)
 		);
 		assert_eq!(
 			check_complete(

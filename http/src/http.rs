@@ -613,21 +613,24 @@ where
 			None => {}
 		}
 
-		match thread_context.proxy_connections.get(&connection_id) {
-			Some(_proxy_info) => {
-				process_proxy_inbound(
-					conn_data, nbuf, &mut thread_context.proxy_connections, &mut thread_context.proxy_state,
-					&mut thread_context.idle_proxy_connections, now,
-				)?;
-				return Ok(());
+                let is_async = {
+                        let async_connections = lockr!(thread_context.async_connections)?;
+                        async_connections.get(&connection_id).is_some()
+                };
+
+		if !is_async {
+			match thread_context.proxy_connections.get(&connection_id) {
+				Some(_proxy_info) => {
+					process_proxy_inbound(
+						conn_data, nbuf, &mut thread_context.proxy_connections, &mut thread_context.proxy_state,
+						&mut thread_context.idle_proxy_connections, now,
+					)?;
+					return Ok(());
+				}
+				None => {}
 			}
-			None => {}
 		}
 
-		let is_async = {
-			let async_connections = lockr!(thread_context.async_connections)?;
-			async_connections.get(&connection_id).is_some()
-		};
 
 		if is_async {
 			// it's async just append to the buffer and return
@@ -662,7 +665,7 @@ where
 				// in many cases this will work and be faster
 				let amt = Self::process_buffer(
 					conn_data, pbuf, config, cache, api_config, thread_context,
-					api_handler, evh_params, now, remote_peer,
+					api_handler, evh_params, now, remote_peer
 				)?;
 				if amt == 0 {
 					Self::append_buffer(&pbuf, buffer)?;
@@ -795,6 +798,7 @@ where
 								&mut thread_context.active_connections,
 								&mut thread_context.idle_proxy_connections,
 								&mut thread_context.proxy_state,
+								async_connections,
 								remote_peer,
 								now,
 							) {
@@ -875,6 +879,9 @@ where
 											conn_data.write(HTTP_ERROR_404)?;
 										}
 									}
+								}
+								ErrorKind::HttpError405(_) => {
+									conn_data.write(HTTP_ERROR_405)?;
 								}
 								ErrorKind::HttpError403(_) => {
 									conn_data.write(HTTP_ERROR_403)?;
@@ -961,6 +968,10 @@ where
 		now: SystemTime,
 		webroot: &Vec<u8>,
 	) -> Result<Option<[u8; 32]>, Error> {
+		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
+			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
+		}
+
 		let mut path = webroot.clone();
 		path.extend_from_slice(&uri);
 		Self::clean(&mut path)?;
@@ -1765,11 +1776,13 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 
 #[cfg(test)]
 mod test {
-	use crate::http::{clean, HttpConfig, HttpServer};
+	use crate::http::{clean, ConnectionData, HttpConfig, HttpServer};
 	use crate::types::{
-		HealthCheck, HttpMethod, HttpVersion, ProxyConfig, ProxyEntry, ProxyRotation, Upstream,
+		ApiContext, HealthCheck, HttpMethod, HttpVersion, ListenerType, ProxyConfig, ProxyEntry,
+		ProxyRotation, Upstream,
 	};
 	use crate::HttpApiConfig;
+	use crate::HttpHeaders;
 	use nioruntime_deps::rand;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_evh::EventHandlerConfig;
@@ -1806,7 +1819,10 @@ mod test {
 
 		let port = 18999;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -1907,7 +1923,10 @@ mod test {
 
 		let port = 18899;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2033,7 +2052,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port = 18995;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2127,7 +2149,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port = 18996;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2239,7 +2264,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port = 18998;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2356,7 +2384,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port = 18997;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
 			show_headers: true,
@@ -2401,23 +2432,12 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port1 = 18990;
 		let port2 = 18991;
-		let port3 = 18992;
 
 		let config1 = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?],
-			show_headers: true,
-			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
-			mainlog: format!("{}/logs/mainlog.log", root_dir),
-			debug: true,
-			evh_config: EventHandlerConfig {
-				threads: 1,
-				..Default::default()
-			},
-			..Default::default()
-		};
-
-		let config2 = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+			)],
 			show_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -2455,8 +2475,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			),
 		);
 
-		let config3 = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port3)[..])?],
+		let config2 = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2488,16 +2511,8 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		})?;
 		http2.start()?;
 
-		let mut http3 = HttpServer::new(config3).unwrap();
-
-		http3.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
-		http3.set_api_config(HttpApiConfig {
-			..Default::default()
-		})?;
-		http3.start()?;
-
 		let mut strm =
-			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port3)[..])?)?;
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?)?;
 		strm.write(b"GET /index.html HTTP/1.0\r\n\r\n")?;
 
 		let mut buf = vec![];
@@ -2538,7 +2553,6 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		http1.stop()?;
 		http2.stop()?;
-		http3.stop()?;
 
 		tear_down_test_dir(root_dir)?;
 
@@ -2552,7 +2566,10 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let port = 18897;
 		let config = HttpConfig {
-			addrs: vec![SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?],
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2650,6 +2667,263 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		http.stop()?;
 
 		tear_down_test_dir(root_dir)?;
+		Ok(())
+	}
+
+	#[test]
+	fn test_post() -> Result<(), Error> {
+		let root_dir = "./.test_post.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18797;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |conn_data, _headers, _ctx| {
+			conn_data.write(b"msg")?;
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(
+			b"POST /api HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 10\r\n\
+\r\n0123456789\r\n",
+		)?;
+
+		//std::thread::park();
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	fn process_proxy_pipeline_request(
+		conn_data: &ConnectionData,
+		header: &HttpHeaders,
+		ctx: &mut ApiContext,
+	) -> Result<(), Error> {
+		if header.get_query() == b"abc" {
+			debug!("sleep 5 seconds")?;
+			ctx.set_async()?;
+			let mut ctx_clone = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				sleep(Duration::from_millis(5_000));
+				conn_data.write(
+					b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\na123456789\r\n",
+				)?;
+				ctx_clone.async_complete()?;
+				Ok(())
+			});
+		} else {
+			conn_data.write(
+				b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\n0123456789\r\n",
+			)?;
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_proxy_pipeline() -> Result<(), Error> {
+		let root_dir = "./.test_proxy_pipeline.nio";
+		setup_test_dir(root_dir)?;
+
+		let port1 = 18690;
+		let port2 = 18691;
+
+		let config1 = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+			)],
+			show_headers: true,
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut extensions = HashMap::new();
+		extensions.insert(
+			"api".as_bytes().to_vec(),
+			ProxyEntry::multi_socket_addr(
+				vec![Upstream::new(
+					SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+					1,
+				)],
+				100,
+				Some(HealthCheck {
+					check_secs: 3,
+					path: "/".to_string(),
+					expect_text: "n".to_string(),
+				}),
+				ProxyRotation::Random,
+				10,
+				1,
+			),
+		);
+
+		let config3 = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			proxy_config: ProxyConfig {
+				extensions,
+				mappings: HashMap::new(),
+			},
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut http1 = HttpServer::new(config1).unwrap();
+
+		http1.set_api_handler(move |conn_data, headers, ctx| {
+			process_proxy_pipeline_request(conn_data, headers, ctx)?;
+			Ok(())
+		})?;
+		let mut extensions = HashSet::new();
+		extensions.insert("api".as_bytes().to_vec());
+
+		http1.set_api_config(HttpApiConfig {
+			extensions: extensions.clone(),
+			..Default::default()
+		})?;
+		http1.start()?;
+
+		let mut http2 = HttpServer::new(config3).unwrap();
+
+		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http2.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+		http2.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?)?;
+		strm.write(b"GET /index.api?abc HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+		strm.write(b"GET /index.api HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 3;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("a123456789").is_some(), true);
+
+		if len_sum > 65 {
+			// if we got the second response too
+			assert_eq!(full_response.find("0123456789").is_some(), true);
+			assert!(
+				full_response.find("0123456789").unwrap()
+					> full_response.find("a123456789").unwrap()
+			);
+		} else {
+			let mut buf = vec![];
+			buf.resize(10000, 0u8);
+			let mut len_sum = 0;
+			loop {
+				let len = strm.read(&mut buf[len_sum..])?;
+				len_sum += len;
+
+				let mut do_break = false;
+				for i in 3..len_sum {
+					if buf[i - 3] == '\r' as u8
+						&& buf[i - 2] == '\n' as u8
+						&& buf[i - 1] == '\r' as u8
+						&& buf[i] == '\n' as u8
+					{
+						let str = std::str::from_utf8(&buf[0..len_sum])?;
+						let index = str.find("Content-Length: ");
+						let index = index.unwrap();
+						let str = &str[index + 16..];
+						let end = str.find("\r").unwrap();
+						let mut len: usize = str[0..end].parse()?;
+						len += i + 3;
+						if len_sum >= len {
+							do_break = true;
+							break;
+						}
+					}
+				}
+				assert!(len != 0);
+				if do_break {
+					break;
+				}
+			}
+
+			let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+			assert_eq!(full_response.find("0123456789").is_some(), true);
+		}
+
+		http1.stop()?;
+		http2.stop()?;
+
+		tear_down_test_dir(root_dir)?;
+
 		Ok(())
 	}
 
