@@ -844,6 +844,7 @@ where
 						config,
 						cache,
 						headers.get_version(),
+						headers.get_method(),
 						range,
 						&mime_map,
 						&async_connections,
@@ -862,6 +863,7 @@ where
 										config,
 										cache,
 										headers.get_version(),
+										headers.get_method(),
 										range,
 										&mime_map,
 										&async_connections,
@@ -952,6 +954,7 @@ where
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 		http_version: &HttpVersion,
+		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
@@ -971,6 +974,7 @@ where
 			&cache,
 			now,
 			http_version,
+			http_method,
 			range,
 			mime_map,
 		)?;
@@ -986,6 +990,7 @@ where
 				cache,
 				now,
 				http_version,
+				http_method,
 				range,
 				mime_map,
 			)?;
@@ -1030,6 +1035,7 @@ where
 			cache.clone(),
 			now,
 			http_version,
+			http_method.clone(),
 			range,
 			need_update,
 			mime_map,
@@ -1047,6 +1053,7 @@ where
 		cache: &Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
+		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
@@ -1093,7 +1100,11 @@ where
 							&conn_data,
 							config,
 							len,
-							Some(&chunk[..wlen]),
+							if http_method == &HttpMethod::Head {
+								None
+							} else {
+								Some(&chunk[..wlen])
+							},
 							now,
 							last_modified,
 							http_version,
@@ -1138,6 +1149,7 @@ where
 		cache: Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
+		http_method: HttpMethod,
 		range: Option<(usize, usize)>,
 		need_update: bool,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
@@ -1185,35 +1197,38 @@ where
 
 			let mut len_sum = 0;
 			let mut len_written = 0;
-			loop {
-				let len = file.read(&mut in_buf)?;
-				let nslice = &in_buf[0..len];
-				if len > 0
-					&& md_len <= (config.max_cache_chunks * config.cache_chunk_size).try_into()?
-				{
-					let mut cache = lockw!(cache)?;
-					if need_update {
-						cache.remove(&path)?;
+			if http_method != HttpMethod::Head {
+				loop {
+					let len = file.read(&mut in_buf)?;
+					let nslice = &in_buf[0..len];
+					if len > 0
+						&& md_len
+							<= (config.max_cache_chunks * config.cache_chunk_size).try_into()?
+					{
+						let mut cache = lockw!(cache)?;
+						if need_update {
+							cache.remove(&path)?;
+						}
+						if len_sum != 0 || !(*cache).exists(&path)? {
+							len_sum += len;
+							(*cache).append_file_chunk(
+								&path,
+								nslice,
+								Some(md_len),
+								Some(etag),
+								len_sum as u64 == md_len,
+								now,
+								md.modified().unwrap_or(now),
+							)?;
+						}
 					}
-					if len_sum != 0 || !(*cache).exists(&path)? {
-						len_sum += len;
-						(*cache).append_file_chunk(
-							&path,
-							nslice,
-							Some(md_len),
-							Some(etag),
-							len_sum as u64 == md_len,
-							now,
-							md.modified().unwrap_or(now),
-						)?;
+
+					Self::write_range(&conn_data, nslice, range, len_written)?;
+					len_written += nslice.len();
+
+					if len <= 0 {
+						break;
 					}
-				}
-
-				Self::write_range(&conn_data, nslice, range, len_written)?;
-				len_written += nslice.len();
-
-				if len <= 0 {
-					break;
 				}
 			}
 

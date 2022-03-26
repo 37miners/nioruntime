@@ -386,7 +386,7 @@ impl ThreadContext {
 	}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum HttpMethod {
 	Get,
 	Post,
