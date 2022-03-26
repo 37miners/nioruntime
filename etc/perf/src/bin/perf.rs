@@ -24,8 +24,8 @@ use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_http::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ProxyConfig, ProxyEntry, ProxyRotation,
-	Upstream,
+	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ListenerType, ProxyConfig, ProxyEntry,
+	ProxyRotation, Upstream,
 };
 use nioruntime_log::*;
 use nioruntime_util::bytes_find;
@@ -490,7 +490,10 @@ fn main() -> Result<(), Error> {
 			let config = HttpConfig {
 				connect_timeout: 5000,
 				idle_timeout: 15000,
-				addrs: vec![SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?],
+				listeners: vec![(
+					ListenerType::Plain,
+					SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?,
+				)],
 				evh_config: EventHandlerConfig {
 					threads,
 					..Default::default()
@@ -503,7 +506,7 @@ fn main() -> Result<(), Error> {
 				..Default::default()
 			};
 
-			let mut http = HttpServer::new(config);
+			let mut http = HttpServer::new(config)?;
 			let mut mappings = HashSet::new();
 			let mut extensions = HashSet::new();
 			mappings.insert("/testapi".as_bytes().to_vec());
