@@ -376,6 +376,7 @@ mod test {
 
 	#[test]
 	fn test_cache() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		debug!("calling new")?;
 		let mut cache = HttpCache::new(30, 5, 16, 0.99)?;
 		let file1 = "/abc.html".as_bytes();
@@ -436,6 +437,7 @@ mod test {
 
 	#[test]
 	fn test_cache_remove_file_slabs() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		let mut cache = HttpCache::new(30, 3, 16, 0.99)?;
 
 		let file1 = "/abc.html".as_bytes();
@@ -537,6 +539,7 @@ mod test {
 
 	#[test]
 	fn test_cache_remove_file_hash() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		let mut cache = HttpCache::new(3, 10, 16, 0.99)?;
 		let file1 = "/abc.html".as_bytes();
 		let file2 = "/def.html".as_bytes();
@@ -596,6 +599,7 @@ mod test {
 
 	#[test]
 	fn test_partial() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		let mut cache = HttpCache::new(3, 3, 16, 0.99)?;
 
 		let file1 = "/abc.html".as_bytes();
@@ -627,6 +631,7 @@ mod test {
 
 	#[test]
 	fn test_incomplete() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		let mut cache = HttpCache::new(10, 10, 16, 0.99)?;
 		let file1 = "/abc.html".as_bytes();
 		cache.append_file_chunk(

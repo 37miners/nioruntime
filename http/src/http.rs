@@ -500,6 +500,7 @@ where
 		p.pop();
 		fsutils::mkdir(&p.as_path().display().to_string());
 		File::create(mainlog)?;
+
 		Ok(())
 	}
 
@@ -1943,8 +1944,11 @@ mod test {
 	debug!();
 
 	fn setup_test_dir(name: &str) -> Result<(), Error> {
+		crate::test::test::init_logger()?;
+
 		let _ = std::fs::remove_dir_all(name);
 		std::fs::create_dir_all(name)?;
+
 		Ok(())
 	}
 
@@ -3340,8 +3344,8 @@ Content-Length: 30\r\n\
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
 			)],
 			show_headers: true,
-			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
-			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			webroot: format!("{}/www1", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs1/mainlog.log", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
@@ -3370,13 +3374,13 @@ Content-Length: 30\r\n\
 			),
 		);
 
-		let config3 = HttpConfig {
+		let config2 = HttpConfig {
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
 			)],
-			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
-			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			webroot: format!("{}/www2", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs2/mainlog.log", root_dir),
 			debug: true,
 			show_headers: true,
 			proxy_config: ProxyConfig {
@@ -3405,7 +3409,7 @@ Content-Length: 30\r\n\
 		})?;
 		http1.start()?;
 
-		let mut http2 = HttpServer::new(config3).unwrap();
+		let mut http2 = HttpServer::new(config2).unwrap();
 
 		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http2.set_api_config(HttpApiConfig {
@@ -3502,13 +3506,14 @@ Content-Length: 30\r\n\
 		http1.stop()?;
 		http2.stop()?;
 
-		tear_down_test_dir(root_dir)?;
+		//tear_down_test_dir(root_dir)?;
 
 		Ok(())
 	}
 
 	#[test]
 	fn test_clean() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		let mut path = "/abc".as_bytes().to_vec();
 		clean(&mut path)?;
 		assert_eq!("/abc".as_bytes(), path);

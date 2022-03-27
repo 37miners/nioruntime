@@ -15,6 +15,7 @@
 mod cache;
 mod http;
 mod proxy;
+mod test;
 mod types;
 
 pub use crate::http::HttpServer;

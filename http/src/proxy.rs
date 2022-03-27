@@ -717,6 +717,7 @@ mod test {
 
 	#[test]
 	fn test_check_complete() -> Result<(), Error> {
+		crate::test::test::init_logger()?;
 		assert_eq!(check_complete(b"H")?, (false, false, 0));
 		assert_eq!(
 			check_complete(b"HTTP/1.1 200 OK\r\nServer: test\r\nContent-Length: 10\r\n")?,
