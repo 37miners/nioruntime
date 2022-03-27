@@ -20,14 +20,14 @@ use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
+use nioruntime_util::lockw;
 use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig};
-use nioruntime_util::{lockr, lockw};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
 use std::fs::{remove_file, File, OpenOptions};
 use std::hash::Hasher;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -1279,6 +1279,10 @@ impl ApiContext {
 		Ok(())
 	}
 
+	pub fn remaining(&self) -> usize {
+		self.expected.saturating_sub(self.offset)
+	}
+
 	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
 		match &self.temp_file {
 			Some(file) => {
@@ -1295,7 +1299,9 @@ impl ApiContext {
 							.into());
 						}
 					};
-					if metadata.len() < self.expected.try_into()? {
+
+					let metadata_len: usize = metadata.len().try_into()?;
+					if metadata_len < self.expected {
 						let send: SyncSender<()>;
 						let recv: Receiver<()>;
 						(send, recv) = sync_channel(1);
@@ -1305,21 +1311,24 @@ impl ApiContext {
 						None
 					}
 				};
-				let mut file = OpenOptions::new().read(true).open(file)?;
-				if buf.len() < self.expected.saturating_sub(self.offset) {
-					file.read_exact(buf)?;
-					self.offset += buf.len();
-					Ok(buf.len())
-				} else {
-					match recv {
-						Some(recv) => recv.recv()?,
-						None => {}
+
+				match recv {
+					Some(receive) => {
+						receive.recv()?;
 					}
-					file.read_exact(&mut buf[..(self.expected.saturating_sub(self.offset))])?;
-					let ret = self.expected.saturating_sub(self.offset);
-					self.offset += self.expected.saturating_sub(self.offset);
-					Ok(ret)
+					_ => {}
+				};
+
+				let mut requested = self.expected.saturating_sub(self.offset);
+				if requested > buf.len() {
+					requested = buf.len();
 				}
+
+				let mut file = OpenOptions::new().read(true).open(file)?;
+				file.seek(SeekFrom::Start(self.offset.try_into()?))?;
+				file.read_exact(&mut buf[0..requested])?;
+				self.offset += requested;
+				Ok(requested)
 			}
 			None => Ok(0),
 		}
@@ -1331,9 +1340,9 @@ impl ApiContext {
 		Ok(())
 	}
 
-	pub fn push_bytes(&mut self, buffer: &[u8]) -> Result<usize, Error> {
+	pub fn push_bytes(&mut self, buffer: &[u8]) -> Result<(usize, usize), Error> {
 		if self.rem == 0 || buffer.len() == 0 {
-			return Ok(0);
+			return Ok((self.rem, 0));
 		}
 
 		let buf = if buffer.len() > self.rem {
@@ -1341,6 +1350,8 @@ impl ApiContext {
 		} else {
 			&buffer[..]
 		};
+
+		let pushed = buf.len();
 
 		self.rem = self.rem.saturating_sub(buf.len());
 
@@ -1356,40 +1367,30 @@ impl ApiContext {
 			}
 		};
 
-		self.set_async()?;
-		let rem = self.rem;
 		let send = self.send.clone();
-		let mut clone = self.clone();
 		let buf: Vec<u8> = buf.to_vec();
+		let rem = self.rem;
 
 		std::thread::spawn(move || -> Result<(), Error> {
 			let mut file = OpenOptions::new().write(true).append(true).open(file)?;
 			file.write_all(&buf)?;
 			if rem == 0 {
-				let send = lockr!(send)?;
+				let send = lockw!(send)?;
 				match &*send {
-					Some(send) => send.send(()).map_err(|e| {
-						let error: Error =
-							ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
-						error
-					})?,
+					Some(send) => {
+						send.send(()).map_err(|e| {
+							let error: Error =
+								ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
+							error
+						})?;
+					}
 					None => {}
-				}
+				};
 			}
-
-			clone.async_complete_no_delete()?;
 
 			Ok(())
 		});
 
-		Ok(self.rem)
-	}
-
-	fn async_complete_no_delete(&mut self) -> Result<(), Error> {
-		{
-			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove(&self.conn_data.get_connection_id());
-		}
-		self.conn_data.async_complete()
+		Ok((self.rem, pushed))
 	}
 }

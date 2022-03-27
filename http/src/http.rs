@@ -574,10 +574,25 @@ where
 		Ok(())
 	}
 
-	fn process_post_await(ctx: &mut ApiContext, nbuf: &[u8]) -> Result<(), Error> {
-		ctx.push_bytes(nbuf)?;
+	fn process_post_await(
+		connection_id: u128,
+		post_await_connections: &mut HashMap<u128, ApiContext>,
+		nbuf: &[u8],
+	) -> Result<(bool, usize), Error> {
+		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
+			Some(ctx) => {
+				let (rem, pushed) = ctx.push_bytes(nbuf)?;
+				(rem == 0, nbuf.len().saturating_sub(pushed))
+			}
+			None => {
+				return Ok((false, 0));
+			}
+		};
+		if rem {
+			post_await_connections.remove(&connection_id);
+		}
 
-		Ok(())
+		Ok((true, overflow))
 	}
 
 	#[rustfmt::skip]
@@ -608,6 +623,11 @@ where
 			connection_id, nbuf, conn_data.get_accept_handle(), buffer_len
 		)?;
 
+		if buffer_len == 0 && nbuf.len() == 0 {
+			// there's nothing to do
+			return Ok(());
+		}
+
 		match thread_context.health_check_connections.get(&connection_id) {
 			Some(_x) => {
 				process_health_check_response(
@@ -624,16 +644,32 @@ where
                         async_connections.get(&connection_id).is_some()
                 };
 
-                match thread_context.post_await_connections.get_mut(&connection_id) {
-                        Some(api_context) => {
-                                Self::process_post_await(
-                                        api_context,
-                                        nbuf,
-                                )?;
-                                return Ok(())
-                        },
-                        None => {},
-                }
+		let (was_post_await, overflow) = Self::process_post_await(
+			connection_id,
+			&mut thread_context.post_await_connections,
+			nbuf
+		)?;
+
+		if was_post_await {
+			if overflow > 0 {
+				let nbuf = &nbuf[nbuf.len().saturating_sub(overflow)..];
+                        	Self::process_sync(
+                                	conn_data,
+                                	evh_params,
+                                	nbuf,
+                                	buffer,
+                                	connection_id,
+                                	now,
+                                	thread_context,
+                                	remote_peer,
+                                	api_config,
+                                	cache,
+                                	config,
+                                	api_handler,
+                        	)?;
+			}
+			return Ok(());
+		}
 
 		if !is_async {
 			match thread_context.proxy_connections.get(&connection_id) {
@@ -671,34 +707,76 @@ where
 				}
 			}
 		} else {
-			let mut offset = 0;
-			loop {
-				let pbuf = &nbuf[offset..];
-				if pbuf.len() == 0 {
-					break;
-				}
-
-				// premptively try to process the incoming buffer without appending
-				// in many cases this will work and be faster
-				let amt = Self::process_buffer(
-					conn_data, pbuf, config, cache, api_config, thread_context,
-					api_handler, evh_params, now, remote_peer
-				)?;
-				if amt == 0 {
-					Self::append_buffer(&pbuf, buffer)?;
-					break;
-				}
-
-				offset += amt;
-
-				// if were now async, we must break
-				if lockr!(thread_context.async_connections)?.get(&connection_id).is_some() {
-					Self::append_buffer(&nbuf[offset..], buffer)?;
-					break;
-				}
-			}
+			Self::process_sync(
+				conn_data,
+				evh_params,
+				nbuf,
+				buffer,
+				connection_id,
+				now,
+				thread_context,
+				remote_peer,
+				api_config,
+				cache,
+				config,
+				api_handler,
+			)?;
 		}
 
+		Ok(())
+	}
+
+	fn process_sync(
+		conn_data: &ConnectionData,
+		evh_params: &EvhParams,
+		nbuf: &[u8],
+		buffer: &mut Vec<u8>,
+		connection_id: u128,
+		now: SystemTime,
+		thread_context: &mut ThreadContext,
+		remote_peer: &Option<SocketAddr>,
+		api_config: &Arc<RwLock<HttpApiConfig>>,
+		cache: &Arc<RwLock<HttpCache>>,
+		config: &HttpConfig,
+		api_handler: &Option<Pin<Box<ApiHandler>>>,
+	) -> Result<(), Error> {
+		let mut offset = 0;
+		loop {
+			let pbuf = &nbuf[offset..];
+			if pbuf.len() == 0 {
+				break;
+			}
+
+			// premptively try to process the incoming buffer without appending
+			// in many cases this will work and be faster
+			let amt = Self::process_buffer(
+				conn_data,
+				pbuf,
+				config,
+				cache,
+				api_config,
+				thread_context,
+				api_handler,
+				evh_params,
+				now,
+				remote_peer,
+			)?;
+			if amt == 0 {
+				Self::append_buffer(&pbuf, buffer)?;
+				break;
+			}
+
+			offset += amt;
+
+			// if were now async, we must break
+			if lockr!(thread_context.async_connections)?
+				.get(&connection_id)
+				.is_some()
+			{
+				Self::append_buffer(&nbuf[offset..], buffer)?;
+				break;
+			}
+		}
 		Ok(())
 	}
 
@@ -902,7 +980,16 @@ where
 						}
 					}
 				}
-				(headers.len(), key)
+
+				let clen = headers.content_len()?;
+				let headers_len = headers.len();
+				let end = if clen + headers_len > buffer.len() {
+					buffer.len()
+				} else {
+					clen + headers_len
+				};
+
+				(end, key)
 			}
 			None => (0, None),
 		};
@@ -2752,12 +2839,12 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 				let mut buf = vec![];
 				buf.resize(100, 0u8);
 				let len = ctx.pull_bytes(&mut buf)?;
+				assert_eq!(ctx.remaining(), 0);
 				assert_eq!(len, 10);
 				assert_eq!(&buf[0..len], b"0123456789");
 				conn_data.write(
 					b"200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: 10\r\n\r\nmsg1234567",
 				)?;
-
 				ctx.async_complete()?;
 
 				Ok(())
@@ -2826,6 +2913,287 @@ Content-Length: 10\r\n\
 	}
 
 	#[test]
+	fn test_partial_read_post() -> Result<(), Error> {
+		let root_dir = "./.test_partialreadpost.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18791;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |conn_data, _headers, ctx| {
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				let mut buf = vec![];
+				buf.resize(1, 0u8);
+
+				let mut counter = 0;
+				loop {
+					let len = ctx.pull_bytes(&mut buf)?;
+					assert_eq!(buf[0], '0' as u8 + counter as u8 % 10);
+					assert_eq!(len, 1);
+					counter += 1;
+					assert_eq!(ctx.remaining(), 30 - counter);
+					if ctx.remaining() == 0 {
+						assert_eq!(counter, 30);
+						break;
+					}
+				}
+
+				conn_data.write(
+					b"200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: 10\r\n\r\nmsg1234567",
+				)?;
+
+				ctx.async_complete()?;
+
+				Ok(())
+			});
+
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(
+			b"POST /api HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 30\r\n\
+\r\n0123456789",
+		)?;
+
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_post_and_then_get() -> Result<(), Error> {
+		let root_dir = "./.test_post_and_then_get.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18792;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |conn_data, headers, ctx| {
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			match headers.get_method() {
+				HttpMethod::Post => {
+					std::thread::spawn(move || -> Result<(), Error> {
+						let mut buf = vec![];
+						buf.resize(100, 0u8);
+
+						let len = ctx.pull_bytes(&mut buf)?;
+						assert_eq!(len, 30);
+						assert_eq!(ctx.remaining(), 0);
+
+						conn_data.write(
+							b"200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: 10\r\n\r\nmsg1234567",
+						)?;
+
+						ctx.async_complete()?;
+
+						Ok(())
+					});
+				},
+				HttpMethod::Get => {
+					conn_data.write(
+                                                b"200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: 10\r\n\r\nmsg0123456",
+                                        )?;
+				},
+				_ => {},
+			}
+
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/apix".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(
+			b"POST /apix HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 30\r\n\
+\r\n0123456789",
+		)?;
+
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789GET /apix HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = 0;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break += 1;
+						if do_break == 2 {
+							break;
+						}
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break == 2 {
+				break;
+			}
+		}
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+		assert!(bytes_find(&buf[0..len_sum], "msg0123".as_bytes()).is_some());
+
+		strm.write(
+			b"POST /apix HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 30\r\n\
+\r\n012345678901234567890123456789GET /apix HTTP/1.1\r\nHost: localhost\r\n\r\n",
+		)?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = 0;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break += 1;
+						if do_break == 2 {
+							break;
+						}
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break == 2 {
+				break;
+			}
+		}
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+		assert!(bytes_find(&buf[0..len_sum], "msg0123".as_bytes()).is_some());
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
 	fn test_slow_post() -> Result<(), Error> {
 		let root_dir = "./.test_slowpost.nio";
 		setup_test_dir(root_dir)?;
@@ -2853,6 +3221,7 @@ Content-Length: 10\r\n\
 				let mut buf = vec![];
 				buf.resize(100, 0u8);
 				let len = ctx.pull_bytes(&mut buf)?;
+				assert_eq!(ctx.remaining(), 0);
 				assert_eq!(len, 30);
 				assert_eq!(&buf[0..len], b"012345678901234567890123456789");
 				conn_data.write(
