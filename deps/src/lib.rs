@@ -30,6 +30,7 @@ pub use ws2_32;
 
 pub use arrayref;
 pub use backtrace;
+pub use base58;
 pub use base64;
 pub use bitvec;
 pub use blake2;
@@ -59,6 +60,7 @@ pub use native_tls;
 pub use nix;
 pub use num_enum;
 pub use num_format;
+pub use oneshot;
 pub use path_clean;
 pub use portpicker;
 pub use rand;

@@ -574,6 +574,12 @@ where
 		Ok(())
 	}
 
+	fn process_post_await(ctx: &mut ApiContext, nbuf: &[u8]) -> Result<(), Error> {
+		ctx.push_bytes(nbuf)?;
+
+		Ok(())
+	}
+
 	#[rustfmt::skip]
 	fn process_on_read(
 		conn_data: &ConnectionData,
@@ -617,6 +623,17 @@ where
                         let async_connections = lockr!(thread_context.async_connections)?;
                         async_connections.get(&connection_id).is_some()
                 };
+
+                match thread_context.post_await_connections.get_mut(&connection_id) {
+                        Some(api_context) => {
+                                Self::process_post_await(
+                                        api_context,
+                                        nbuf,
+                                )?;
+                                return Ok(())
+                        },
+                        None => {},
+                }
 
 		if !is_async {
 			match thread_context.proxy_connections.get(&connection_id) {
@@ -815,31 +832,16 @@ where
 				};
 
 				// check for api mapping/extension
-				let was_api = {
-					let api_config = lockr!(api_config)?;
-					if was_proxy {
-						false
-					} else if api_config.mappings.get(headers.get_uri()).is_some()
-						|| api_config.extensions.get(headers.extension()).is_some()
-					{
-						match api_handler {
-							Some(api_handler) => {
-								let mut ctx = ApiContext::new(
-									thread_context.async_connections.clone(),
-									conn_data.clone(),
-								);
-								(api_handler)(conn_data, &headers, &mut ctx)?;
-								true
-							}
-							None => {
-								error!("no api handler configured!")?;
-								false
-							}
-						}
-					} else {
-						false
-					}
-				};
+				let was_api = Self::process_api(
+					buffer,
+					was_proxy,
+					&headers,
+					api_config,
+					api_handler,
+					&thread_context.async_connections,
+					&mut thread_context.post_await_connections,
+					conn_data,
+				)?;
 
 				if !was_api && !was_proxy {
 					match Self::send_file(
@@ -908,6 +910,58 @@ where
 		Self::update_thread_context(thread_context, key, config, cache)?;
 
 		Ok(len)
+	}
+
+	fn process_api(
+		buf: &[u8],
+		was_proxy: bool,
+		headers: &HttpHeaders,
+		api_config: &Arc<RwLock<HttpApiConfig>>,
+		api_handler: &Option<Pin<Box<ApiHandler>>>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		post_await_connections: &mut HashMap<u128, ApiContext>,
+		conn_data: &ConnectionData,
+	) -> Result<bool, Error> {
+		let api_config = lockr!(api_config)?;
+		if was_proxy {
+			Ok(false)
+		} else if api_config.mappings.get(headers.get_uri()).is_some()
+			|| api_config.extensions.get(headers.extension()).is_some()
+		{
+			match api_handler {
+				Some(api_handler) => {
+					let clen = headers.content_len()?;
+					let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone());
+					if clen > 0 {
+						let headers_len = headers.len();
+						let buf_len = buf.len();
+
+						if buf_len > headers_len {
+							let (end, rem) = if clen + headers_len > buf_len {
+								(buf_len, (headers_len + clen).saturating_sub(buf_len))
+							} else {
+								(clen + headers_len, 0)
+							};
+							ctx.set_expected(clen)?;
+							ctx.push_bytes(&buf[headers_len..end])?;
+
+							if rem > 0 {
+								post_await_connections
+									.insert(conn_data.get_connection_id(), ctx.clone());
+							}
+						}
+					}
+					(api_handler)(conn_data, &headers, &mut ctx)?;
+					Ok(true)
+				}
+				None => {
+					error!("no api handler configured!")?;
+					Ok(false)
+				}
+			}
+		} else {
+			Ok(false)
+		}
 	}
 
 	#[rustfmt::skip]
@@ -2690,8 +2744,25 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let mut http = HttpServer::new(config).unwrap();
 
-		http.set_api_handler(move |conn_data, _headers, _ctx| {
-			conn_data.write(b"msg")?;
+		http.set_api_handler(move |conn_data, _headers, ctx| {
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				let mut buf = vec![];
+				buf.resize(100, 0u8);
+				let len = ctx.pull_bytes(&mut buf)?;
+				assert_eq!(len, 10);
+				assert_eq!(&buf[0..len], b"0123456789");
+				conn_data.write(
+					b"200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: 10\r\n\r\nmsg1234567",
+				)?;
+
+				ctx.async_complete()?;
+
+				Ok(())
+			});
+
 			Ok(())
 		})?;
 		let mut mappings = HashSet::new();
@@ -2711,10 +2782,150 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			b"POST /api HTTP/1.1\r\n\
 Host: localhost\r\n\
 Content-Length: 10\r\n\
-\r\n0123456789\r\n",
+\r\n0123456789",
 		)?;
 
-		//std::thread::park();
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_slow_post() -> Result<(), Error> {
+		let root_dir = "./.test_slowpost.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18790;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |conn_data, _headers, ctx| {
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				let mut buf = vec![];
+				buf.resize(100, 0u8);
+				let len = ctx.pull_bytes(&mut buf)?;
+				assert_eq!(len, 30);
+				assert_eq!(&buf[0..len], b"012345678901234567890123456789");
+				conn_data.write(
+					b"200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: 10\r\n\r\nmsg1234567",
+				)?;
+
+				ctx.async_complete()?;
+
+				Ok(())
+			});
+
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(
+			b"POST /api HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 30\r\n\
+\r\n0123456789",
+		)?;
+
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+
 		tear_down_test_dir(root_dir)?;
 
 		Ok(())
@@ -2733,14 +2944,14 @@ Content-Length: 10\r\n\
 			std::thread::spawn(move || -> Result<(), Error> {
 				sleep(Duration::from_millis(5_000));
 				conn_data.write(
-					b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\na123456789\r\n",
+					b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\na123456789",
 				)?;
 				ctx_clone.async_complete()?;
 				Ok(())
 			});
 		} else {
 			conn_data.write(
-				b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\n0123456789\r\n",
+				b"200 Ok HTTP/1.1\r\nServer: test\r\nContent-Length: 10\r\n\r\n0123456789",
 			)?;
 		}
 		Ok(())

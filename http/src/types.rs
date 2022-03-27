@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+use nioruntime_deps::base58;
 use nioruntime_deps::dirs;
 use nioruntime_deps::lazy_static::lazy_static;
 use nioruntime_deps::path_clean::clean as path_clean;
@@ -19,15 +20,18 @@ use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
-use nioruntime_util::lockw;
 use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig};
+use nioruntime_util::{lockr, lockw};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
+use std::fs::{remove_file, File, OpenOptions};
 use std::hash::Hasher;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -316,6 +320,7 @@ pub struct ThreadContext {
 	pub active_connections: HashMap<u128, ConnectionInfo>,
 	pub proxy_connections: HashMap<u128, ProxyInfo>,
 	pub idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
+	pub post_await_connections: HashMap<u128, ApiContext>,
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
 	pub health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
 	pub webroot: Vec<u8>,
@@ -378,6 +383,7 @@ impl ThreadContext {
 			async_connections: Arc::new(RwLock::new(HashSet::new())),
 			active_connections: HashMap::new(),
 			proxy_connections: HashMap::new(),
+			post_await_connections: HashMap::new(),
 			idle_proxy_connections,
 			proxy_state,
 			health_check_connections,
@@ -511,6 +517,19 @@ impl<'a> HttpHeaders<'a> {
 			len,
 			range,
 		}))
+	}
+
+	pub fn content_len(&self) -> Result<usize, Error> {
+		match self.get_header_value(&"Content-Length".to_string())? {
+			Some(clen) => {
+				if clen.len() >= 1 {
+					Ok(clen[0].parse()?)
+				} else {
+					Ok(0)
+				}
+			}
+			None => Ok(0),
+		}
 	}
 
 	pub fn extension(&self) -> &[u8] {
@@ -1214,9 +1233,26 @@ impl Default for HttpApiConfig {
 pub struct ApiContext {
 	async_connections: Arc<RwLock<HashSet<u128>>>,
 	conn_data: ConnectionData,
+	temp_file: Option<String>,
+	offset: usize,
+	expected: usize,
+	rem: usize,
+	send: Arc<RwLock<Option<SyncSender<()>>>>,
 }
 
 impl ApiContext {
+	pub fn new(async_connections: Arc<RwLock<HashSet<u128>>>, conn_data: ConnectionData) -> Self {
+		Self {
+			async_connections,
+			conn_data,
+			temp_file: None,
+			offset: 0,
+			expected: 0,
+			rem: 0,
+			send: Arc::new(RwLock::new(None)),
+		}
+	}
+
 	pub fn set_async(&mut self) -> Result<(), Error> {
 		let mut async_connections = lockw!(self.async_connections)?;
 		async_connections.insert(self.conn_data.get_connection_id());
@@ -1224,14 +1260,136 @@ impl ApiContext {
 	}
 
 	pub fn async_complete(&mut self) -> Result<(), Error> {
+		// remove the temp file, if it exists
+		match &self.temp_file {
+			Some(file) => match remove_file(file) {
+				Ok(_) => {}
+				Err(e) => {
+					warn!("could not remove file: '{}' due to:  {}", file, e)?;
+				}
+			},
+			None => {}
+		}
+
+		{
+			let mut async_connections = lockw!(self.async_connections)?;
+			async_connections.remove(&self.conn_data.get_connection_id());
+		}
 		self.conn_data.async_complete()?;
 		Ok(())
 	}
 
-	pub fn new(async_connections: Arc<RwLock<HashSet<u128>>>, conn_data: ConnectionData) -> Self {
-		Self {
-			async_connections,
-			conn_data,
+	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+		match &self.temp_file {
+			Some(file) => {
+				let recv = {
+					let mut sender = lockw!(self.send)?;
+
+					let metadata = match std::fs::metadata(file) {
+						Ok(metadata) => metadata,
+						Err(e) => {
+							warn!("metadata returned: {}", e)?;
+							return Err(ErrorKind::IOError(
+								"could not read file metadata".to_string(),
+							)
+							.into());
+						}
+					};
+					if metadata.len() < self.expected.try_into()? {
+						let send: SyncSender<()>;
+						let recv: Receiver<()>;
+						(send, recv) = sync_channel(1);
+						*sender = Some(send);
+						Some(recv)
+					} else {
+						None
+					}
+				};
+				let mut file = OpenOptions::new().read(true).open(file)?;
+				if buf.len() < self.expected.saturating_sub(self.offset) {
+					file.read_exact(buf)?;
+					self.offset += buf.len();
+					Ok(buf.len())
+				} else {
+					match recv {
+						Some(recv) => recv.recv()?,
+						None => {}
+					}
+					file.read_exact(&mut buf[..(self.expected.saturating_sub(self.offset))])?;
+					let ret = self.expected.saturating_sub(self.offset);
+					self.offset += self.expected.saturating_sub(self.offset);
+					Ok(ret)
+				}
+			}
+			None => Ok(0),
 		}
+	}
+
+	pub fn set_expected(&mut self, expected: usize) -> Result<(), Error> {
+		self.expected = expected;
+		self.rem = expected;
+		Ok(())
+	}
+
+	pub fn push_bytes(&mut self, buffer: &[u8]) -> Result<usize, Error> {
+		if self.rem == 0 || buffer.len() == 0 {
+			return Ok(0);
+		}
+
+		let buf = if buffer.len() > self.rem {
+			&buffer[0..self.rem]
+		} else {
+			&buffer[..]
+		};
+
+		self.rem = self.rem.saturating_sub(buf.len());
+
+		let file = match &self.temp_file {
+			Some(file) => file.clone(),
+			None => {
+				let r: [u8; 16] = rand::random();
+				let r: &[u8] = &r[0..16];
+				let file = format!("/tmp/nioruntime.{}", base58::ToBase58::to_base58(r));
+				self.temp_file = Some(file.clone());
+				File::create(&file)?;
+				file
+			}
+		};
+
+		self.set_async()?;
+		let rem = self.rem;
+		let send = self.send.clone();
+		let mut clone = self.clone();
+		let buf: Vec<u8> = buf.to_vec();
+
+		std::thread::spawn(move || -> Result<(), Error> {
+			let mut file = OpenOptions::new().write(true).append(true).open(file)?;
+			file.write_all(&buf)?;
+			if rem == 0 {
+				let send = lockr!(send)?;
+				match &*send {
+					Some(send) => send.send(()).map_err(|e| {
+						let error: Error =
+							ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
+						error
+					})?,
+					None => {}
+				}
+			}
+
+			clone.async_complete_no_delete()?;
+
+			Ok(())
+		});
+
+		Ok(self.rem)
+	}
+
+	fn async_complete_no_delete(&mut self) -> Result<(), Error> {
+		{
+			let mut async_connections = lockw!(self.async_connections)?;
+			async_connections.remove(&self.conn_data.get_connection_id());
+		}
+		self.conn_data.async_complete()
 	}
 }
