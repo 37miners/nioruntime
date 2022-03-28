@@ -41,6 +41,7 @@ use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
+use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::{lockr, lockw};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -158,11 +159,27 @@ where
 			self.config.max_load_factor,
 		)?));
 
+		let slabs = Arc::new(RwLock::new(SlabAllocator::new(
+			self.config.content_upload_slab_count,
+			self.config.content_upload_slab_size,
+		)));
+
 		let api_config = self.api_config.clone();
 		let api_handler = self.api_handler.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			Self::process_on_read(&conn_data, buf, ctx, &config1, &cache, &api_config, &api_handler, &evh_params, user_data)
+			Self::process_on_read(
+				&conn_data,
+				buf,
+				ctx,
+				&config1,
+				&cache,
+				&api_config,
+				&api_handler,
+				&evh_params,
+				&slabs,
+				user_data,
+			)
 		})?;
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
 			Self::process_on_accept(conn_data, ctx, &config2, user_data)
@@ -621,6 +638,7 @@ where
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		evh_params: &EvhParams,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 	) -> Result<(), Error> {
 		let now = SystemTime::now();
@@ -683,6 +701,7 @@ where
                                 	cache,
                                 	config,
                                 	api_handler,
+					slabs,
                         	)?;
 			}
 			return Ok(());
@@ -710,7 +729,7 @@ where
 			loop {
 				let amt = Self::process_buffer(
 					conn_data, buffer, config, cache, api_config, thread_context, api_handler,
-					evh_params, now, remote_peer
+					evh_params, now, remote_peer, slabs,
 				)?;
 				if amt == 0 {
 					break;
@@ -737,6 +756,7 @@ where
 				cache,
 				config,
 				api_handler,
+				slabs,
 			)?;
 		}
 
@@ -756,6 +776,7 @@ where
 		cache: &Arc<RwLock<HttpCache>>,
 		config: &HttpConfig,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<(), Error> {
 		let mut offset = 0;
 		loop {
@@ -777,6 +798,7 @@ where
 				evh_params,
 				now,
 				remote_peer,
+				slabs,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -808,6 +830,7 @@ where
 		evh_params: &EvhParams,
 		now: SystemTime,
 		remote_peer: &Option<SocketAddr>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<usize, Error> {
 		let mime_map = &thread_context.mime_map;
 		let async_connections = &thread_context.async_connections;
@@ -913,6 +936,7 @@ where
 								async_connections,
 								remote_peer,
 								now,
+								slabs,
 							) {
 								Ok(_) => {}
 								Err(e) => {
@@ -937,6 +961,7 @@ where
 					&mut thread_context.post_await_connections,
 					conn_data,
 					&thread_context.temp_dir,
+					slabs,
 				)?;
 
 				if !was_api && !was_proxy {
@@ -952,6 +977,7 @@ where
 						&async_connections,
 						now,
 						&thread_context.webroot,
+						slabs,
 					) {
 						Ok(k) => {
 							key = k;
@@ -971,6 +997,7 @@ where
 										&async_connections,
 										now,
 										&thread_context.webroot,
+										slabs,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1027,6 +1054,7 @@ where
 		post_await_connections: &mut HashMap<u128, ApiContext>,
 		conn_data: &ConnectionData,
 		temp_dir: &String,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<bool, Error> {
 		let api_config = lockr!(api_config)?;
 		if was_proxy {
@@ -1037,7 +1065,11 @@ where
 			match api_handler {
 				Some(api_handler) => {
 					let clen = headers.content_len()?;
-					let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone());
+					let mut ctx = ApiContext::new(
+						async_connections.clone(),
+						conn_data.clone(),
+						slabs.clone(),
+					);
 					if clen > 0 {
 						let headers_len = headers.len();
 						let buf_len = buf.len();
@@ -1050,7 +1082,6 @@ where
 							};
 							ctx.set_expected(clen)?;
 							ctx.push_bytes(&buf[headers_len..end], temp_dir)?;
-
 							if rem > 0 {
 								post_await_connections
 									.insert(conn_data.get_connection_id(), ctx.clone());
@@ -1127,6 +1158,7 @@ where
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
 		now: SystemTime,
 		webroot: &Vec<u8>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -1211,6 +1243,7 @@ where
 			need_update,
 			mime_map,
 			async_connections,
+			slabs,
 		)?;
 
 		Ok(None)
@@ -1325,11 +1358,12 @@ where
 		need_update: bool,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
 
-		let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone());
+		let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone(), slabs.clone());
 
 		ctx.set_async()?;
 		let mut ctx = ctx.clone();
@@ -1607,7 +1641,7 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<(), Error> {
 		let mut last_dot = None;
-		let mut itt = path.len() - 1;
+		let mut itt = path.len().saturating_sub(1);
 		loop {
 			if itt <= 0 {
 				break;
@@ -1703,6 +1737,11 @@ where
 			warn!("HTTP Response Headers:\n{}", from_utf8(&response)?)?;
 		}
 
+		match range {
+			Some(_range) => response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[5]),
+			None => response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[7]),
+		}
+
 		match chunk {
 			Some(chunk) => match range {
 				Some(range) => {
@@ -1789,7 +1828,7 @@ where
 				let state = thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
 				match state {
 					Some(state) => {
-						state.cur_connections -= 1;
+						state.cur_connections = state.cur_connections.saturating_sub(1);
 					}
 					None => {}
 				}
@@ -1887,7 +1926,7 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 			}
 			let mut j = i - 4;
 			loop {
-				if path[j] == '/' as u8 {
+				if path[j] == '/' as u8 || j <= 0 {
 					break;
 				}
 
@@ -1912,7 +1951,7 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 				// delete
 				path.drain(i - 2..i);
 				path_len = path.len();
-				i -= 2;
+				i = i.saturating_sub(2);
 				prev = if i > 0 { path[i] } else { 0 };
 				prev_prev = if i as i32 - 1 >= 0 { path[i - 1] } else { 0 };
 				prev_prev_prev = if i as i32 - 2 > 0 { path[i - 2] } else { 0 };
@@ -1932,7 +1971,7 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 
 	path_len = path.len();
 	if path_len > 1 && path[path_len - 1] == '/' as u8 {
-		path.drain(path_len - 1..);
+		path.drain((path_len - 1)..);
 	}
 
 	Ok(())
@@ -2838,7 +2877,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 	}
 
 	#[test]
-	fn test_post() -> Result<(), Error> {
+	fn test_post1() -> Result<(), Error> {
 		let root_dir = "./.test_post.nio";
 		setup_test_dir(root_dir)?;
 
@@ -3090,7 +3129,7 @@ Content-Length: 30\r\n\
 						assert_eq!(ctx.remaining(), 0);
 
 						conn_data.write(
-							b"200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: 10\r\n\r\nmsg1234567",
+                                                    b"200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: 10\r\n\r\nmsg1234567",
 						)?;
 
 						ctx.async_complete()?;
@@ -3528,7 +3567,117 @@ Content-Length: 30\r\n\
 		http1.stop()?;
 		http2.stop()?;
 
-		//tear_down_test_dir(root_dir)?;
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_multi_slab() -> Result<(), Error> {
+		let root_dir = "./.test_multi_slab.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 18740;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			content_upload_slab_count: 1000,
+			content_upload_slab_size: 8,
+
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			debug: true,
+			show_request_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |conn_data, _headers, ctx| {
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				let mut buf = vec![];
+				buf.resize(100, 0u8);
+				let len = ctx.pull_bytes(&mut buf)?;
+				assert_eq!(ctx.remaining(), 0);
+				assert_eq!(len, 30);
+				assert_eq!(&buf[0..len], b"012345678901234567890123456789");
+				conn_data.write(
+					b"200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: 10\r\n\r\nmsg1234567",
+				)?;
+
+				ctx.async_complete()?;
+
+				Ok(())
+			});
+
+			Ok(())
+		})?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+
+		strm.write(
+			b"POST /api HTTP/1.1\r\n\
+Host: localhost\r\n\
+Content-Length: 30\r\n\
+\r\n0123456789",
+		)?;
+
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+		sleep(Duration::from_millis(1000));
+		strm.write(b"0123456789")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+
+		tear_down_test_dir(root_dir)?;
 
 		Ok(())
 	}

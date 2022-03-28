@@ -186,3 +186,15 @@ args:
         long: temp_dir
         takes_value: true
         value_name: temp_dir
+    - content_upload_slab_count:
+        help: The number of slabs in the slab allocator that is used for content uploads (POSTs). The default is 10240.
+        long: content_upload_slab_count
+        short: q
+        takes_value: true
+        value_name: content_upload_slab_count
+    - content_upload_slab_size:
+        help: The size of the slabs used by the slab allocator for content uploads (POSTs). The default is 1024.
+        long: content_upload_slab_size
+        short: q
+        takes_value: true
+        value_name: content_upload_slab_size

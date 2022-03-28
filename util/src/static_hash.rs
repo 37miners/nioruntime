@@ -673,7 +673,7 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 						self.remove_iterator(entry).ok()?;
 					}
 
-					self.stats.cur_elements -= 1;
+					self.stats.cur_elements = self.stats.cur_elements.saturating_sub(1);
 					let offset = self.get_value_offset(entry);
 					return Some(&self.data[offset..offset + self.config.entry_len]);
 				}

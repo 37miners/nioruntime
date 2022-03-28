@@ -20,8 +20,9 @@ use nioruntime_deps::rand;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
-use nioruntime_util::lockw;
+use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig};
+use nioruntime_util::{lockr, lockw};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
@@ -45,6 +46,7 @@ lazy_static! {
 		"\"\r\nContent-Range: bytes ".as_bytes().to_vec(),
 		"-".as_bytes().to_vec(),
 		"/".as_bytes().to_vec(),
+		"".as_bytes().to_vec(),
 		"\r\n\r\n".as_bytes().to_vec(),
 	];
 	pub static ref HTTP_OK_200_HEADERS_VEC: Vec<Vec<u8>> = vec![
@@ -54,7 +56,8 @@ lazy_static! {
 		"\r\nConnection: ".as_bytes().to_vec(),
 		"\r\nContent-Length: ".as_bytes().to_vec(),
 		"\r\nETag: \"".as_bytes().to_vec(),
-		"\"\r\nAccept-Ranges: bytes\r\n\r\n".as_bytes().to_vec(),
+		"\"\r\nAccept-Ranges: bytes".as_bytes().to_vec(),
+		"\r\n\r\n".as_bytes().to_vec(),
 	];
 	pub static ref HEALTH_CHECK_VEC: Vec<Vec<u8>> = vec![
 		"GET ".as_bytes().to_vec(),
@@ -445,7 +448,7 @@ impl<'a> Display for HttpHeaders<'a> {
 			"query:   '{}'\n",
 			std::str::from_utf8(self.get_query()).unwrap_or("[non-utf8-string]")
 		)?;
-		write!(f, "\nHTTP Headers:\n")?;
+		write!(f, "\nHTTP Headers:")?;
 		for name in self.get_header_names().map_err(|_e| std::fmt::Error)? {
 			let values = self.get_header_value(&name).map_err(|_e| std::fmt::Error)?;
 			match values {
@@ -455,7 +458,7 @@ impl<'a> Display for HttpHeaders<'a> {
 						for _ in name.len()..20 {
 							spacing = format!("{} ", spacing);
 						}
-						write!(f, "{}:{} '{}'\n", name, spacing, value)?;
+						write!(f, "\n{}:{} '{}'", name, spacing, value)?;
 					}
 				}
 				None => {}
@@ -1014,6 +1017,8 @@ pub struct HttpConfig {
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
 	pub mainlog_max_size: u64,
+	pub content_upload_slab_count: u64,
+	pub content_upload_slab_size: u64,
 	pub error_page: Vec<u8>,
 	pub evh_config: EventHandlerConfig,
 }
@@ -1042,6 +1047,8 @@ impl Default for HttpConfig {
 			max_cache_chunks: 100,
 			max_bring_to_front: 1_000,
 			cache_chunk_size: 1024 * 1024,
+			content_upload_slab_count: 1024 * 10,
+			content_upload_slab_size: 1024,
 			max_load_factor: 0.9,
 			server_name: format!("NIORuntime Httpd/{}", VERSION).as_bytes().to_vec(),
 			process_cache_update: 1_000,    // 1 second
@@ -1248,10 +1255,18 @@ pub struct ApiContext {
 	expected: usize,
 	rem: usize,
 	send: Arc<RwLock<Option<SyncSender<()>>>>,
+	slaballocator: Arc<RwLock<SlabAllocator>>,
+	slab_ids: Vec<u64>,
+	slab_size: usize,
+	slab_woffset: Arc<RwLock<usize>>,
 }
 
 impl ApiContext {
-	pub fn new(async_connections: Arc<RwLock<HashSet<u128>>>, conn_data: ConnectionData) -> Self {
+	pub fn new(
+		async_connections: Arc<RwLock<HashSet<u128>>>,
+		conn_data: ConnectionData,
+		slaballocator: Arc<RwLock<SlabAllocator>>,
+	) -> Self {
 		Self {
 			async_connections,
 			conn_data,
@@ -1260,6 +1275,10 @@ impl ApiContext {
 			expected: 0,
 			rem: 0,
 			send: Arc::new(RwLock::new(None)),
+			slaballocator,
+			slab_ids: vec![],
+			slab_size: 0,
+			slab_woffset: Arc::new(RwLock::new(0)),
 		}
 	}
 
@@ -1271,13 +1290,23 @@ impl ApiContext {
 
 	pub fn async_complete(&mut self) -> Result<(), Error> {
 		// remove the temp file, if it exists
+		// free slabs
 		match &self.temp_file {
-			Some(file) => match remove_file(file) {
-				Ok(_) => {}
-				Err(e) => {
-					warn!("could not remove file: '{}' due to:  {}", file, e)?;
+			Some(file) => {
+				if self.slab_ids.len() == 0 {
+					match remove_file(file) {
+						Ok(_) => {}
+						Err(e) => {
+							warn!("could not remove file: '{}' due to:  {}", file, e)?;
+						}
+					}
+				} else {
+					let mut slaballocator = lockw!(self.slaballocator)?;
+					for id in &self.slab_ids {
+						slaballocator.free_id(*id)?;
+					}
 				}
-			},
+			}
 			None => {}
 		}
 
@@ -1293,25 +1322,34 @@ impl ApiContext {
 		self.expected.saturating_sub(self.offset)
 	}
 
+	// note that pull bytes potentially blocks. It must only be called in a thread outside of the
+	// main server loop.
 	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
 		match &self.temp_file {
 			Some(file) => {
 				let recv = {
 					let mut sender = lockw!(self.send)?;
 
-					let metadata = match std::fs::metadata(file) {
-						Ok(metadata) => metadata,
-						Err(e) => {
-							warn!("metadata returned: {}", e)?;
-							return Err(ErrorKind::IOError(
-								"could not read file metadata".to_string(),
-							)
-							.into());
+					let cur_size = match self.slab_ids.len() {
+						0 => {
+							let metadata = match std::fs::metadata(file) {
+								Ok(metadata) => metadata,
+								Err(e) => {
+									warn!("metadata returned: {}", e)?;
+									return Err(ErrorKind::IOError(
+										"could not read file metadata".to_string(),
+									)
+									.into());
+								}
+							};
+
+							let cur_size: usize = metadata.len().try_into()?;
+							cur_size
 						}
+						_ => *lockr!(self.slab_woffset)?,
 					};
 
-					let metadata_len: usize = metadata.len().try_into()?;
-					if metadata_len < self.expected {
+					if cur_size < self.expected {
 						let send: SyncSender<()>;
 						let recv: Receiver<()>;
 						(send, recv) = sync_channel(1);
@@ -1334,11 +1372,41 @@ impl ApiContext {
 					requested = buf.len();
 				}
 
-				let mut file = OpenOptions::new().read(true).open(file)?;
-				file.seek(SeekFrom::Start(self.offset.try_into()?))?;
-				file.read_exact(&mut buf[0..requested])?;
-				self.offset += requested;
-				Ok(requested)
+				match self.slab_ids.len() {
+					0 => {
+						let mut file = OpenOptions::new().read(true).open(file)?;
+						file.seek(SeekFrom::Start(self.offset.try_into()?))?;
+						file.read_exact(&mut buf[0..requested])?;
+						self.offset += requested;
+						Ok(requested)
+					}
+					_ => {
+						let mut i = self.offset;
+						let mut buf_itt = 0;
+						loop {
+							let slab = i / self.slab_size;
+							let slab_offset = i % self.slab_size;
+							let slaballocator = lockr!(self.slaballocator)?;
+							let slab = slaballocator.get(self.slab_ids[slab])?;
+
+							let mut len = self.slab_size.saturating_sub(slab_offset);
+							if len + buf_itt > requested {
+								len = requested.saturating_sub(buf_itt);
+							}
+
+							buf[buf_itt..(buf_itt + len)]
+								.clone_from_slice(&slab.data[slab_offset..(slab_offset + len)]);
+
+							buf_itt += len;
+							i += len;
+							if buf_itt >= requested {
+								break;
+							}
+						}
+						self.offset += requested;
+						Ok(requested)
+					}
+				}
 			}
 			None => Ok(0),
 		}
@@ -1347,6 +1415,25 @@ impl ApiContext {
 	pub fn set_expected(&mut self, expected: usize) -> Result<(), Error> {
 		self.expected = expected;
 		self.rem = expected;
+
+		let mut slaballocator = lockw!(self.slaballocator)?;
+
+		let free_count = slaballocator.free_count() as usize;
+		let slab_size = slaballocator.slab_size() as usize;
+		let size_available = free_count * slab_size;
+		self.slab_size = slab_size;
+
+		if size_available >= expected {
+			let mut slabs_needed = expected / slab_size;
+			if expected % slab_size > 0 {
+				slabs_needed += 1;
+			}
+			for _ in 0..slabs_needed {
+				let slab = slaballocator.allocate()?;
+				self.slab_ids.push(slab.id);
+			}
+		}
+
 		Ok(())
 	}
 
@@ -1383,6 +1470,10 @@ impl ApiContext {
 		let send = self.send.clone();
 		let buf: Vec<u8> = buf.to_vec();
 		let rem = self.rem;
+		let slab_ids = self.slab_ids.clone();
+		let slab_size = self.slab_size;
+		let slaballocator = self.slaballocator.clone();
+		let slab_woffset = self.slab_woffset.clone();
 
 		let (seqsend, seqrecv) = channel::<()>();
 
@@ -1397,12 +1488,49 @@ impl ApiContext {
 				let error: Error = ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
 				error
 			})?;
-			if !Path::new(&file).exists() {
-				File::create(&file)?;
-			}
-			let mut file = OpenOptions::new().write(true).append(true).open(file)?;
 
-			file.write_all(&buf)?;
+			match slab_ids.len() {
+				0 => {
+					if !Path::new(&file).exists() {
+						File::create(&file)?;
+					}
+					let mut file = OpenOptions::new().write(true).append(true).open(file)?;
+
+					file.write_all(&buf)?;
+				}
+				_ => {
+					let slab_woffset_value = { *lockr!(slab_woffset)? };
+					let buf_len = buf.len();
+
+					let mut i = slab_woffset_value;
+					let mut buf_itt = 0;
+					let mut slaballocator = lockw!(slaballocator)?;
+					loop {
+						let slab = i / slab_size;
+						let slab_offset = i % slab_size;
+						let slab = slaballocator.get_mut(slab_ids[slab])?;
+
+						let mut len = slab_size.saturating_sub(slab_offset);
+						if len + buf_itt > buf_len {
+							len = buf_len.saturating_sub(buf_itt);
+						}
+						slab.data[slab_offset..(slab_offset + len)]
+							.clone_from_slice(&buf[buf_itt..(buf_itt + len)]);
+
+						buf_itt += len;
+						i += len;
+						if buf_itt >= buf_len {
+							break;
+						}
+					}
+
+					{
+						let mut slab_woffset = lockw!(slab_woffset)?;
+						*slab_woffset += buf_len;
+					}
+				}
+			}
+
 			if rem == 0 {
 				match &*send {
 					Some(send) => {
@@ -1413,7 +1541,7 @@ impl ApiContext {
 						})?;
 					}
 					None => {}
-				};
+				}
 			}
 
 			Ok(())

@@ -1195,7 +1195,7 @@ where
 								}
 								{
 									let mut cur_connections = lockw!(ctx.cur_connections)?;
-									*cur_connections -= 1;
+									*cur_connections = (*cur_connections).saturating_sub(1);
 								}
 
 								if close_handle {

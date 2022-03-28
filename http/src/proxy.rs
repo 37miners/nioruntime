@@ -25,6 +25,7 @@ use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::ConnectionData;
 use nioruntime_evh::EvhParams;
 use nioruntime_log::*;
+use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::{bytes_find, bytes_parse_number_header, bytes_parse_number_hex};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -303,6 +304,7 @@ pub fn process_proxy_outbound(
 	async_connections: &Arc<RwLock<HashSet<u128>>>,
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
+	slabs: &Arc<RwLock<SlabAllocator>>,
 ) -> Result<usize, Error> {
 	// select a random health socket
 	let state = proxy_state.get(proxy_entry);
@@ -537,8 +539,9 @@ pub fn process_proxy_outbound(
 		}
 	};
 
+	let mut ctx = ApiContext::new(async_connections.clone(), inbound.clone(), slabs.clone());
+
 	// set async
-	let mut ctx = ApiContext::new(async_connections.clone(), inbound.clone());
 	ctx.set_async()?;
 
 	// send the first request

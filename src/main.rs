@@ -109,7 +109,6 @@ fn main() -> Result<(), Error> {
 							);
 						}
 					};
-
 					let file = match spl.next() {
 						Some(file) => file.to_string(),
 						None => {
@@ -474,6 +473,31 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
+	let content_upload_slab_size = match args.is_present("content_upload_slab_size") {
+		true => args.value_of("content_upload_slab_size").unwrap().parse()?,
+		false => match file_args.is_present("content_upload_slab_size") {
+			true => file_args
+				.value_of("content_upload_slab_size")
+				.unwrap()
+				.parse()?,
+			false => 1_024,
+		},
+	};
+
+	let content_upload_slab_count = match args.is_present("content_upload_slab_count") {
+		true => args
+			.value_of("content_upload_slab_count")
+			.unwrap()
+			.parse()?,
+		false => match file_args.is_present("content_upload_slab_count") {
+			true => file_args
+				.value_of("content_upload_slab_count")
+				.unwrap()
+				.parse()?,
+			false => 1_024,
+		},
+	};
+
 	let show_request_headers = match args.is_present("show_request_headers") {
 		true => true,
 		false => file_args.is_present("show_request_headers"),
@@ -490,6 +514,8 @@ fn main() -> Result<(), Error> {
 	};
 
 	let config = HttpConfig {
+		content_upload_slab_count,
+		content_upload_slab_size,
 		temp_dir,
 		listeners,
 		fullchain_map,

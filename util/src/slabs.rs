@@ -34,6 +34,7 @@ pub struct SlabAllocator {
 	data: Vec<u8>,
 	slab_size: u64,
 	first_free: u64,
+	free_count: u64,
 }
 
 // Format
@@ -48,6 +49,7 @@ impl SlabAllocator {
 			data,
 			slab_size,
 			first_free: 0,
+			free_count: slabs,
 		}
 	}
 
@@ -62,15 +64,29 @@ impl SlabAllocator {
 
 			let offset = (offset + 8).try_into()?;
 			let data = &mut self.data[offset..offset + self.slab_size as usize];
+			self.free_count = self.free_count.saturating_sub(1);
 			Ok(SlabMut { data, id })
 		}
 	}
 
 	pub fn free(&mut self, slab: &Slab) -> Result<(), Error> {
-		let offset = ((8 + self.slab_size) * slab.id).try_into()?;
+		self.free_id(slab.id)
+	}
+
+	pub fn free_id(&mut self, slab_id: u64) -> Result<(), Error> {
+		let offset = ((8 + self.slab_size) * slab_id).try_into()?;
 		self.data[offset..offset + 8].clone_from_slice(&self.first_free.to_be_bytes());
-		self.first_free = slab.id;
+		self.first_free = slab_id;
+		self.free_count += 1;
 		Ok(())
+	}
+
+	pub fn slab_size(&self) -> u64 {
+		self.slab_size
+	}
+
+	pub fn free_count(&self) -> u64 {
+		self.free_count
 	}
 
 	pub fn get(&self, id: u64) -> Result<Slab, Error> {
