@@ -60,7 +60,6 @@ pub use native_tls;
 pub use nix;
 pub use num_enum;
 pub use num_format;
-pub use oneshot;
 pub use path_clean;
 pub use portpicker;
 pub use rand;

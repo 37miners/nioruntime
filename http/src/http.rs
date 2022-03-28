@@ -107,12 +107,18 @@ where
 		let mainlog = config.mainlog.replace("~", &home_dir);
 		let mainlog = path_clean(&mainlog);
 
+		let temp_dir = config.temp_dir.replace("~", &home_dir);
+
 		if std::fs::metadata(webroot.clone()).is_err() {
 			Self::init_webroot(&webroot)?;
 		}
 
 		if std::fs::metadata(mainlog.clone()).is_err() {
 			Self::init_mainlog(&mainlog)?;
+		}
+
+		if std::fs::metadata(temp_dir.clone()).is_err() {
+			Self::init_temp_dir(&temp_dir)?;
 		}
 
 		Ok(Self {
@@ -377,6 +383,8 @@ where
 			&format!("{}", from_utf8(&self.config.webroot)?)[..],
 		)?;
 
+		self.startup_line("temp_dir", &format!("{}", self.config.temp_dir))?;
+
 		self.startup_line(
 			"max_cache_files",
 			&format!(
@@ -487,7 +495,8 @@ where
 			)[..],
 		)?;
 
-		self.debug_flag("--show_headers", self.config.show_headers)?;
+		self.debug_flag("--show_request_headers", self.config.show_request_headers)?;
+		self.debug_flag("--show_response_headers", self.config.show_response_headers)?;
 		self.debug_flag("--debug", self.config.debug)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
@@ -501,6 +510,11 @@ where
 		fsutils::mkdir(&p.as_path().display().to_string());
 		File::create(mainlog)?;
 
+		Ok(())
+	}
+
+	fn init_temp_dir(temp_dir: &String) -> Result<(), Error> {
+		fsutils::mkdir(temp_dir);
 		Ok(())
 	}
 
@@ -579,10 +593,11 @@ where
 		connection_id: u128,
 		post_await_connections: &mut HashMap<u128, ApiContext>,
 		nbuf: &[u8],
+		temp_dir: &String,
 	) -> Result<(bool, usize), Error> {
 		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
 			Some(ctx) => {
-				let (rem, pushed) = ctx.push_bytes(nbuf)?;
+				let (rem, pushed) = ctx.push_bytes(nbuf, temp_dir)?;
 				(rem == 0, nbuf.len().saturating_sub(pushed))
 			}
 			None => {
@@ -648,7 +663,8 @@ where
 		let (was_post_await, overflow) = Self::process_post_await(
 			connection_id,
 			&mut thread_context.post_await_connections,
-			nbuf
+			nbuf,
+			&thread_context.temp_dir,
 		)?;
 
 		if was_post_await {
@@ -830,7 +846,7 @@ where
 
 		let (len, key) = match headers {
 			Some(headers) => {
-				if config.show_headers {
+				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
 				}
 				let range: Option<(usize, usize)> = if headers.has_range() {
@@ -920,6 +936,7 @@ where
 					&thread_context.async_connections,
 					&mut thread_context.post_await_connections,
 					conn_data,
+					&thread_context.temp_dir,
 				)?;
 
 				if !was_api && !was_proxy {
@@ -1009,6 +1026,7 @@ where
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
 		post_await_connections: &mut HashMap<u128, ApiContext>,
 		conn_data: &ConnectionData,
+		temp_dir: &String,
 	) -> Result<bool, Error> {
 		let api_config = lockr!(api_config)?;
 		if was_proxy {
@@ -1031,7 +1049,7 @@ where
 								(clen + headers_len, 0)
 							};
 							ctx.set_expected(clen)?;
-							ctx.push_bytes(&buf[headers_len..end])?;
+							ctx.push_bytes(&buf[headers_len..end], temp_dir)?;
 
 							if rem > 0 {
 								post_await_connections
@@ -1681,6 +1699,10 @@ where
 			None => response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[6]),
 		}
 
+		if config.show_response_headers {
+			warn!("HTTP Response Headers:\n{}", from_utf8(&response)?)?;
+		}
+
 		match chunk {
 			Some(chunk) => match range {
 				Some(range) => {
@@ -1971,7 +1993,7 @@ mod test {
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2075,7 +2097,7 @@ mod test {
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
 				..Default::default()
@@ -2204,7 +2226,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2301,7 +2323,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2416,7 +2438,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2535,7 +2557,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			connect_timeout: 2_000,
 			idle_timeout: 3_000,
@@ -2583,7 +2605,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
 			)],
-			show_headers: true,
+			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
@@ -2628,7 +2650,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			proxy_config: ProxyConfig {
 				extensions,
 				mappings: HashMap::new(),
@@ -2718,7 +2740,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2829,7 +2851,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -2930,7 +2952,7 @@ Content-Length: 10\r\n\
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -3047,7 +3069,7 @@ Content-Length: 30\r\n\
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -3211,7 +3233,7 @@ Content-Length: 30\r\n\
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			..Default::default()
 		};
 
@@ -3343,7 +3365,7 @@ Content-Length: 30\r\n\
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
 			)],
-			show_headers: true,
+			show_request_headers: true,
 			webroot: format!("{}/www1", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs1/mainlog.log", root_dir),
 			debug: true,
@@ -3382,7 +3404,7 @@ Content-Length: 30\r\n\
 			webroot: format!("{}/www2", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs2/mainlog.log", root_dir),
 			debug: true,
-			show_headers: true,
+			show_request_headers: true,
 			proxy_config: ProxyConfig {
 				extensions,
 				mappings: HashMap::new(),

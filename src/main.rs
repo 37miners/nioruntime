@@ -308,6 +308,15 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
+	let temp_dir = match args.is_present("temp_dir") {
+		true => args.value_of("temp_dir").unwrap(),
+		false => match file_args.is_present("temp_dir") {
+			true => file_args.value_of("temp_dir").unwrap(),
+			false => "~/.niohttpd/tmp",
+		},
+	}
+	.to_string();
+
 	let webroot = match args.is_present("webroot") {
 		true => args.value_of("webroot").unwrap(),
 		false => match file_args.is_present("webroot") {
@@ -465,9 +474,14 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
-	let show_headers = match args.is_present("show_headers") {
+	let show_request_headers = match args.is_present("show_request_headers") {
 		true => true,
-		false => file_args.is_present("show_headers"),
+		false => file_args.is_present("show_request_headers"),
+	};
+
+	let show_response_headers = match args.is_present("show_response_headers") {
+		true => true,
+		false => file_args.is_present("show_response_headers"),
 	};
 
 	let debug = match args.is_present("debug") {
@@ -476,10 +490,12 @@ fn main() -> Result<(), Error> {
 	};
 
 	let config = HttpConfig {
+		temp_dir,
 		listeners,
 		fullchain_map,
 		privkey_map,
-		show_headers,
+		show_request_headers,
+		show_response_headers,
 		listen_queue_size,
 		max_header_size,
 		max_header_entries,

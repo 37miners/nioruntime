@@ -21,10 +21,15 @@ args:
         long: threads
         takes_value: true
         value_name: threads
-    - show_headers:
+    - show_request_headers:
         help: Show Request Headers for each request. This setting must NOT be set in a production environment.
         short: r
-        long: show_headers
+        long: show_request_headers
+        takes_value: false
+    - show_response_headers:
+        help: Show Response Headers for each request. This setting must NOT be set in a production environment.
+        short: r
+        long: show_response_headers
         takes_value: false
     - debug:
         help: Show debugging information and continue to log to stdout. his setting must NOT be set in a production environment.
@@ -175,3 +180,9 @@ args:
         takes_value: true
         value_name: fullchain
         multiple: true
+    - temp_dir:
+        help: The directory to store temporary files.
+        short: q
+        long: temp_dir
+        takes_value: true
+        value_name: temp_dir

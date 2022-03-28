@@ -29,8 +29,10 @@ use std::fs::{remove_file, File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::mpsc::channel;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -324,6 +326,7 @@ pub struct ThreadContext {
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
 	pub health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
 	pub webroot: Vec<u8>,
+	pub temp_dir: String,
 }
 
 impl ThreadContext {
@@ -361,7 +364,7 @@ impl ThreadContext {
 
 		let health_check_connections = HashMap::new();
 
-		let webroot = std::str::from_utf8(&config.webroot).unwrap().to_string();
+		let webroot = std::str::from_utf8(&config.webroot)?.to_string();
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
 			None => PathBuf::new(),
@@ -372,6 +375,8 @@ impl ThreadContext {
 
 		let webroot = webroot.replace("~", &home_dir);
 		let webroot = path_clean(&webroot).as_bytes().to_vec();
+
+		let temp_dir = config.temp_dir.replace("~", &home_dir);
 
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
@@ -388,6 +393,7 @@ impl ThreadContext {
 			proxy_state,
 			health_check_connections,
 			webroot,
+			temp_dir,
 		})
 	}
 }
@@ -1001,7 +1007,9 @@ pub struct HttpConfig {
 	pub idle_timeout: u128,
 	pub mime_map: Vec<(String, String)>,
 	pub proxy_config: ProxyConfig,
-	pub show_headers: bool,
+	pub temp_dir: String,
+	pub show_request_headers: bool,
+	pub show_response_headers: bool,
 	pub debug: bool,
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
@@ -1027,6 +1035,7 @@ impl Default for HttpConfig {
 			max_header_entries: 1_000,
 			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
 			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
+			temp_dir: "~/.niohttp/tmp".to_string(),
 			mainlog_max_age: 6 * 60 * 60 * 1000,
 			mainlog_max_size: 1024 * 1024 * 1,
 			max_cache_files: 1_000,
@@ -1039,7 +1048,8 @@ impl Default for HttpConfig {
 			cache_recheck_fs_millis: 3_000, // 3 seconds
 			connect_timeout: 30_000,        // 30 seconds
 			idle_timeout: 60_000,           // 1 minute
-			show_headers: false,            // debug: show headers
+			show_request_headers: false,    // debug: show request headers
+			show_response_headers: false,   // debug: show response headers
 			debug: false,                   // general debugging including log to stdout
 			error_page: "/error.html".as_bytes().to_vec(),
 			evh_config: EventHandlerConfig::default(),
@@ -1340,7 +1350,11 @@ impl ApiContext {
 		Ok(())
 	}
 
-	pub fn push_bytes(&mut self, buffer: &[u8]) -> Result<(usize, usize), Error> {
+	pub fn push_bytes(
+		&mut self,
+		buffer: &[u8],
+		temp_dir: &String,
+	) -> Result<(usize, usize), Error> {
 		if self.rem == 0 || buffer.len() == 0 {
 			return Ok((self.rem, 0));
 		}
@@ -1360,9 +1374,8 @@ impl ApiContext {
 			None => {
 				let r: [u8; 16] = rand::random();
 				let r: &[u8] = &r[0..16];
-				let file = format!("/tmp/nioruntime.{}", base58::ToBase58::to_base58(r));
+				let file = format!("{}/nioruntime.{}", temp_dir, base58::ToBase58::to_base58(r));
 				self.temp_file = Some(file.clone());
-				File::create(&file)?;
 				file
 			}
 		};
@@ -1371,11 +1384,26 @@ impl ApiContext {
 		let buf: Vec<u8> = buf.to_vec();
 		let rem = self.rem;
 
+		let (seqsend, seqrecv) = channel::<()>();
+
 		std::thread::spawn(move || -> Result<(), Error> {
+			// first we obtain the lock for this API context
+			let send = lockw!(send)?;
+
+			// once we are locked, we notify the calling thread to continue.
+			// this ensures the file is first created (pull bytes also uses this lock)
+			// and it also ensures the order of the data is kept intact.
+			seqsend.send(()).map_err(|e| {
+				let error: Error = ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
+				error
+			})?;
+			if !Path::new(&file).exists() {
+				File::create(&file)?;
+			}
 			let mut file = OpenOptions::new().write(true).append(true).open(file)?;
+
 			file.write_all(&buf)?;
 			if rem == 0 {
-				let send = lockw!(send)?;
 				match &*send {
 					Some(send) => {
 						send.send(()).map_err(|e| {
@@ -1390,6 +1418,8 @@ impl ApiContext {
 
 			Ok(())
 		});
+
+		seqrecv.recv()?;
 
 		Ok((self.rem, pushed))
 	}
