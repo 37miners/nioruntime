@@ -498,7 +498,7 @@ fn main() -> Result<(), Error> {
 					threads,
 					..Default::default()
 				},
-				show_headers,
+				show_request_headers: show_headers,
 				proxy_config: ProxyConfig {
 					extensions,
 					mappings,
