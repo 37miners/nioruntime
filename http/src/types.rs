@@ -1327,27 +1327,105 @@ impl ApiContext {
 		self.expected.saturating_sub(self.offset)
 	}
 
+	pub fn copy_bytes(&mut self, dst: String) -> Result<(), Error> {
+		let recv = {
+			let mut sender = lockw!(self.send)?;
+			let cur_size = match self.slab_ids.len() {
+				0 => match &self.temp_file {
+					Some(file) => {
+						match std::fs::metadata(file) {
+							Ok(metadata) => metadata.len().try_into()?,
+							Err(_e) => {
+								// sometimes we get here before the
+								// file was created it means 0 length
+								0
+							}
+						}
+					}
+					None => 0,
+				},
+				_ => *lockr!(self.slab_woffset)?,
+			};
+
+			if cur_size < self.expected {
+				let send: SyncSender<()>;
+				let recv: Receiver<()>;
+				(send, recv) = sync_channel(1);
+				*sender = Some(send);
+				Some(recv)
+			} else {
+				None
+			}
+		};
+
+		match recv {
+			Some(receive) => {
+				receive.recv()?;
+			}
+			None => {}
+		}
+
+		match self.slab_ids.len() {
+			0 => match &self.temp_file {
+				Some(file) => {
+					std::fs::copy(file, dst)?;
+				}
+				None => {
+					return Err(
+						ErrorKind::InternalError("Expected temp file to exist".into()).into(),
+					)
+				}
+			},
+			_ => {
+				let mut i = 0;
+				let mut buf_itt = 0;
+				File::create(dst.clone())?;
+				let mut file = OpenOptions::new().write(true).append(true).open(dst)?;
+				loop {
+					let slab = i / self.slab_size;
+					let slab_offset = i % self.slab_size;
+					let slaballocator = lockr!(self.slaballocator)?;
+					let slab = slaballocator.get(self.slab_ids[slab])?;
+
+					let mut len = self.slab_size.saturating_sub(slab_offset);
+					if len + buf_itt > self.expected {
+						len = self.expected.saturating_sub(buf_itt);
+					}
+
+					file.write(&slab.data[slab_offset..(slab_offset + len)])?;
+
+					buf_itt += len;
+					i += len;
+					if buf_itt >= self.expected {
+						break;
+					}
+				}
+			}
+		}
+
+		// make sure pull_bytes cannot be called. (either/or)
+		self.offset = self.expected;
+
+		Ok(())
+	}
+
 	// note that pull bytes potentially blocks. It must only be called in a thread outside of the
-	// main server loop.
+	// main server loop. TODO: add thread local variable to ensure it's not called in the
+	// server loop.
 	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
 		let recv = {
 			let mut sender = lockw!(self.send)?;
 			let cur_size = match self.slab_ids.len() {
 				0 => match &self.temp_file {
 					Some(file) => {
-						let metadata = match std::fs::metadata(file) {
-							Ok(metadata) => metadata,
-							Err(e) => {
-								warn!("metadata returned: {}", e)?;
-								return Err(ErrorKind::IOError(
-									"could not read file metadata".to_string(),
-								)
-								.into());
+						match std::fs::metadata(file) {
+							Ok(metadata) => metadata.len().try_into()?,
+							Err(_e) => {
+								// sometimes we get here before the
+								// file was created it means 0 length
+								0
 							}
-						};
-
-						let cur_size: usize = metadata.len().try_into()?;
-						cur_size
+						}
 					}
 					None => 0,
 				},
@@ -1481,9 +1559,6 @@ impl ApiContext {
 			// first we obtain the lock for this API context
 			let send = lockw!(send)?;
 
-			// once we are locked, we notify the calling thread to continue.
-			// this ensures the file is first created (pull bytes also uses this lock)
-			// and it also ensures the order of the data is kept intact.
 			seqsend.send(()).map_err(|e| {
 				let error: Error = ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
 				error
@@ -1503,8 +1578,8 @@ impl ApiContext {
 					if !Path::new(&file).exists() {
 						File::create(&file)?;
 					}
-					let mut file = OpenOptions::new().write(true).append(true).open(file)?;
 
+					let mut file = OpenOptions::new().write(true).append(true).open(file)?;
 					file.write_all(&buf)?;
 				}
 				_ => {
