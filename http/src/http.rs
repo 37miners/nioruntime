@@ -250,7 +250,10 @@ where
 		self.show_config()?;
 
 		set_config_option!(Settings::Level, true)?;
-		info!("{}", "Server started!".cyan())?;
+                let server_startup = format!(
+                        "Server started in {} ms.", self.config.start.elapsed().as_millis()
+                );
+		info!("{}", server_startup.cyan())?;
 		set_config_option!(Settings::LineNum, true)?;
 		if !self.config.debug {
 			set_config_option!(Settings::Stdout, false)?;

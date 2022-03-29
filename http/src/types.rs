@@ -989,6 +989,7 @@ impl Default for ProxyConfig {
 
 #[derive(Clone)]
 pub struct HttpConfig {
+	pub start: Instant,
 	pub listeners: Vec<(ListenerType, SocketAddr)>,
 	pub fullchain_map: HashMap<u16, String>,
 	pub privkey_map: HashMap<u16, String>,
@@ -1027,6 +1028,7 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
 	fn default() -> Self {
 		Self {
+			start: Instant::now(),
 			proxy_config: ProxyConfig::default(),
 			listeners: vec![(
 				ListenerType::Plain,

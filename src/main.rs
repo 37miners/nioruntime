@@ -28,6 +28,7 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Instant;
 
 info!();
 
@@ -37,6 +38,7 @@ pub mod built_info {
 }
 
 fn main() -> Result<(), Error> {
+	let start = Instant::now();
 	#[allow(deprecated)]
 	let yml = load_yaml!("nio.yml");
 	#[allow(deprecated)]
@@ -519,6 +521,7 @@ fn main() -> Result<(), Error> {
 	};
 
 	let config = HttpConfig {
+		start,
 		content_upload_slab_count,
 		content_upload_slab_size,
 		temp_dir,
