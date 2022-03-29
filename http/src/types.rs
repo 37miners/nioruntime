@@ -1328,94 +1328,94 @@ impl ApiContext {
 	// note that pull bytes potentially blocks. It must only be called in a thread outside of the
 	// main server loop.
 	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-		match &self.temp_file {
-			Some(file) => {
-				let recv = {
-					let mut sender = lockw!(self.send)?;
-
-					let cur_size = match self.slab_ids.len() {
-						0 => {
-							let metadata = match std::fs::metadata(file) {
-								Ok(metadata) => metadata,
-								Err(e) => {
-									warn!("metadata returned: {}", e)?;
-									return Err(ErrorKind::IOError(
-										"could not read file metadata".to_string(),
-									)
-									.into());
-								}
-							};
-
-							let cur_size: usize = metadata.len().try_into()?;
-							cur_size
-						}
-						_ => *lockr!(self.slab_woffset)?,
-					};
-
-					if cur_size < self.expected {
-						let send: SyncSender<()>;
-						let recv: Receiver<()>;
-						(send, recv) = sync_channel(1);
-						*sender = Some(send);
-						Some(recv)
-					} else {
-						None
-					}
-				};
-
-				match recv {
-					Some(receive) => {
-						receive.recv()?;
-					}
-					_ => {}
-				};
-
-				let mut requested = self.expected.saturating_sub(self.offset);
-				if requested > buf.len() {
-					requested = buf.len();
-				}
-
-				match self.slab_ids.len() {
-					0 => {
-						let mut file = OpenOptions::new().read(true).open(file)?;
-						file.seek(SeekFrom::Start(self.offset.try_into()?))?;
-						file.read_exact(&mut buf[0..requested])?;
-						self.offset += requested;
-						Ok(requested)
-					}
-					_ => {
-						let mut i = self.offset;
-						let mut buf_itt = 0;
-						loop {
-							let slab = i / self.slab_size;
-							let slab_offset = i % self.slab_size;
-							let slaballocator = lockr!(self.slaballocator)?;
-							let slab = slaballocator.get(self.slab_ids[slab])?;
-
-							let mut len = self.slab_size.saturating_sub(slab_offset);
-							if len + buf_itt > requested {
-								len = requested.saturating_sub(buf_itt);
+		let recv = {
+			let mut sender = lockw!(self.send)?;
+			let cur_size = match self.slab_ids.len() {
+				0 => match &self.temp_file {
+					Some(file) => {
+						let metadata = match std::fs::metadata(file) {
+							Ok(metadata) => metadata,
+							Err(e) => {
+								warn!("metadata returned: {}", e)?;
+								return Err(ErrorKind::IOError(
+									"could not read file metadata".to_string(),
+								)
+								.into());
 							}
+						};
 
-							buf[buf_itt..(buf_itt + len)]
-								.clone_from_slice(&slab.data[slab_offset..(slab_offset + len)]);
-
-							buf_itt += len;
-							i += len;
-							if buf_itt >= requested {
-								break;
-							}
-						}
-						self.offset += requested;
-						Ok(requested)
+						let cur_size: usize = metadata.len().try_into()?;
+						cur_size
 					}
-				}
+					None => 0,
+				},
+				_ => *lockr!(self.slab_woffset)?,
+			};
+
+			if cur_size < self.expected {
+				let send: SyncSender<()>;
+				let recv: Receiver<()>;
+				(send, recv) = sync_channel(1);
+				*sender = Some(send);
+				Some(recv)
+			} else {
+				None
 			}
-			None => Ok(0),
+		};
+
+		match recv {
+			Some(receive) => {
+				receive.recv()?;
+			}
+			None => {}
+		}
+
+		let mut requested = self.expected.saturating_sub(self.offset);
+		if requested > buf.len() {
+			requested = buf.len();
+		}
+
+		match self.slab_ids.len() {
+			0 => match &self.temp_file {
+				Some(file) => {
+					let mut file = OpenOptions::new().read(true).open(file)?;
+					file.seek(SeekFrom::Start(self.offset.try_into()?))?;
+					file.read_exact(&mut buf[0..requested])?;
+					self.offset += requested;
+					Ok(requested)
+				}
+				None => Ok(0),
+			},
+			_ => {
+				let mut i = self.offset;
+				let mut buf_itt = 0;
+				loop {
+					let slab = i / self.slab_size;
+					let slab_offset = i % self.slab_size;
+					let slaballocator = lockr!(self.slaballocator)?;
+					let slab = slaballocator.get(self.slab_ids[slab])?;
+
+					let mut len = self.slab_size.saturating_sub(slab_offset);
+					if len + buf_itt > requested {
+						len = requested.saturating_sub(buf_itt);
+					}
+
+					buf[buf_itt..(buf_itt + len)]
+						.clone_from_slice(&slab.data[slab_offset..(slab_offset + len)]);
+
+					buf_itt += len;
+					i += len;
+					if buf_itt >= requested {
+						break;
+					}
+				}
+				self.offset += requested;
+				Ok(requested)
+			}
 		}
 	}
 
-	pub fn set_expected(&mut self, expected: usize) -> Result<(), Error> {
+	pub fn set_expected(&mut self, expected: usize, temp_dir: &String) -> Result<(), Error> {
 		self.expected = expected;
 		self.rem = expected;
 
@@ -1435,16 +1435,21 @@ impl ApiContext {
 				let slab = slaballocator.allocate()?;
 				self.slab_ids.push(slab.id);
 			}
+		} else {
+			let r: [u8; 16] = rand::random();
+			let r: &[u8] = &r[0..16];
+			let file = format!("{}/nioruntime.{}", temp_dir, base58::ToBase58::to_base58(r));
+			warn!(
+				"content too big ({} bytes) to use in memory slabs. Using temp file: '{}'",
+				expected, file
+			)?;
+			self.temp_file = Some(file.clone());
 		}
 
 		Ok(())
 	}
 
-	pub fn push_bytes(
-		&mut self,
-		buffer: &[u8],
-		temp_dir: &String,
-	) -> Result<(usize, usize), Error> {
+	pub fn push_bytes(&mut self, buffer: &[u8]) -> Result<(usize, usize), Error> {
 		if self.rem == 0 || buffer.len() == 0 {
 			return Ok((self.rem, 0));
 		}
@@ -1459,17 +1464,6 @@ impl ApiContext {
 
 		self.rem = self.rem.saturating_sub(buf.len());
 
-		let file = match &self.temp_file {
-			Some(file) => file.clone(),
-			None => {
-				let r: [u8; 16] = rand::random();
-				let r: &[u8] = &r[0..16];
-				let file = format!("{}/nioruntime.{}", temp_dir, base58::ToBase58::to_base58(r));
-				self.temp_file = Some(file.clone());
-				file
-			}
-		};
-
 		let send = self.send.clone();
 		let buf: Vec<u8> = buf.to_vec();
 		let rem = self.rem;
@@ -1477,6 +1471,7 @@ impl ApiContext {
 		let slab_size = self.slab_size;
 		let slaballocator = self.slaballocator.clone();
 		let slab_woffset = self.slab_woffset.clone();
+		let temp_file = self.temp_file.clone();
 
 		let (seqsend, seqrecv) = channel::<()>();
 
@@ -1494,6 +1489,15 @@ impl ApiContext {
 
 			match slab_ids.len() {
 				0 => {
+					let file = match temp_file {
+						Some(file) => file.clone(),
+						None => {
+							return Err(ErrorKind::InternalError(
+								"Expected temp file to be created.".into(),
+							)
+							.into());
+						}
+					};
 					if !Path::new(&file).exists() {
 						File::create(&file)?;
 					}
@@ -1549,7 +1553,6 @@ impl ApiContext {
 
 			Ok(())
 		});
-
 		seqrecv.recv()?;
 
 		Ok((self.rem, pushed))

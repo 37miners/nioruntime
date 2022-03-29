@@ -606,15 +606,16 @@ fn main() -> Result<(), Error> {
 			let mut buf = vec![];
 			buf.resize(content_len, 0u8);
 			let len = ctx.pull_bytes(&mut buf)?;
-			warn!(
-				"Debug post handler read {} bytes: {}",
-				len,
-				std::str::from_utf8(&buf[0..len])?
-			)?;
+
+			let display_str = match std::str::from_utf8(&buf[0..len]) {
+				Ok(display_str) => display_str.to_string(),
+				Err(_) => format!("[{} bytes of non-utf8data]", len),
+			};
+			warn!("Debug post handler read {} bytes: {}", len, display_str,)?;
 			let response = format!(
 				"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\nPost_Data was: {}",
-				len + 15,
-				std::str::from_utf8(&buf[0..len])?
+				display_str.len() + 15,
+				display_str
 			);
 			conn_data.write(response.as_bytes())?;
 			ctx.async_complete()?;

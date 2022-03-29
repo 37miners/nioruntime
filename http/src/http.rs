@@ -610,11 +610,10 @@ where
 		connection_id: u128,
 		post_await_connections: &mut HashMap<u128, ApiContext>,
 		nbuf: &[u8],
-		temp_dir: &String,
 	) -> Result<(bool, usize), Error> {
 		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
 			Some(ctx) => {
-				let (rem, pushed) = ctx.push_bytes(nbuf, temp_dir)?;
+				let (rem, pushed) = ctx.push_bytes(nbuf)?;
 				(rem == 0, nbuf.len().saturating_sub(pushed))
 			}
 			None => {
@@ -682,7 +681,6 @@ where
 			connection_id,
 			&mut thread_context.post_await_connections,
 			nbuf,
-			&thread_context.temp_dir,
 		)?;
 
 		if was_post_await {
@@ -1073,19 +1071,25 @@ where
 					if clen > 0 {
 						let headers_len = headers.len();
 						let buf_len = buf.len();
-
+						let rem = if clen + headers_len > buf_len {
+							(headers_len + clen).saturating_sub(buf_len)
+						} else {
+							0
+						};
+						if clen > 0 {
+							ctx.set_expected(clen, temp_dir)?;
+						}
 						if buf_len > headers_len {
-							let (end, rem) = if clen + headers_len > buf_len {
-								(buf_len, (headers_len + clen).saturating_sub(buf_len))
+							let end = if clen + headers_len > buf_len {
+								buf_len
 							} else {
-								(clen + headers_len, 0)
+								clen + headers_len
 							};
-							ctx.set_expected(clen)?;
-							ctx.push_bytes(&buf[headers_len..end], temp_dir)?;
-							if rem > 0 {
-								post_await_connections
-									.insert(conn_data.get_connection_id(), ctx.clone());
-							}
+							ctx.push_bytes(&buf[headers_len..end])?;
+						}
+						if rem > 0 {
+							post_await_connections
+								.insert(conn_data.get_connection_id(), ctx.clone());
 						}
 					}
 					(api_handler)(conn_data, &headers, &mut ctx)?;
