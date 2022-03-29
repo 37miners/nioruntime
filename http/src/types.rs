@@ -1266,6 +1266,7 @@ pub struct ApiContext {
 	slab_ids: Vec<u64>,
 	slab_size: usize,
 	slab_woffset: Arc<RwLock<usize>>,
+	is_proxy: bool,
 }
 
 impl ApiContext {
@@ -1273,6 +1274,7 @@ impl ApiContext {
 		async_connections: Arc<RwLock<HashSet<u128>>>,
 		conn_data: ConnectionData,
 		slaballocator: Arc<RwLock<SlabAllocator>>,
+		is_proxy: bool,
 	) -> Self {
 		Self {
 			async_connections,
@@ -1286,7 +1288,12 @@ impl ApiContext {
 			slab_ids: vec![],
 			slab_size: 0,
 			slab_woffset: Arc::new(RwLock::new(0)),
+			is_proxy,
 		}
+	}
+
+	pub fn is_proxy(&self) -> bool {
+		self.is_proxy
 	}
 
 	pub fn set_async(&mut self) -> Result<(), Error> {
@@ -1323,6 +1330,10 @@ impl ApiContext {
 		}
 		self.conn_data.async_complete()?;
 		Ok(())
+	}
+
+	pub fn update_offset(&mut self, amt: usize) {
+		self.offset += amt;
 	}
 
 	pub fn remaining(&self) -> usize {
@@ -1497,35 +1508,42 @@ impl ApiContext {
 		}
 	}
 
-	pub fn set_expected(&mut self, expected: usize, temp_dir: &String) -> Result<(), Error> {
+	pub fn set_expected(
+		&mut self,
+		expected: usize,
+		temp_dir: &String,
+		is_proxy: bool,
+	) -> Result<(), Error> {
 		self.expected = expected;
 		self.rem = expected;
 
-		let mut slaballocator = lockw!(self.slaballocator)?;
+		if !is_proxy {
+			let mut slaballocator = lockw!(self.slaballocator)?;
 
-		let free_count = slaballocator.free_count() as usize;
-		let slab_size = slaballocator.slab_size() as usize;
-		let size_available = free_count * slab_size;
-		self.slab_size = slab_size;
+			let free_count = slaballocator.free_count() as usize;
+			let slab_size = slaballocator.slab_size() as usize;
+			let size_available = free_count * slab_size;
+			self.slab_size = slab_size;
 
-		if size_available >= expected {
-			let mut slabs_needed = expected / slab_size;
-			if expected % slab_size > 0 {
-				slabs_needed += 1;
+			if size_available >= expected {
+				let mut slabs_needed = expected / slab_size;
+				if expected % slab_size > 0 {
+					slabs_needed += 1;
+				}
+				for _ in 0..slabs_needed {
+					let slab = slaballocator.allocate()?;
+					self.slab_ids.push(slab.id);
+				}
+			} else {
+				let r: [u8; 16] = rand::random();
+				let r: &[u8] = &r[0..16];
+				let file = format!("{}/nioruntime.{}", temp_dir, base58::ToBase58::to_base58(r));
+				warn!(
+					"content too big ({} bytes) to use in memory slabs. Using temp file: '{}'",
+					expected, file
+				)?;
+				self.temp_file = Some(file.clone());
 			}
-			for _ in 0..slabs_needed {
-				let slab = slaballocator.allocate()?;
-				self.slab_ids.push(slab.id);
-			}
-		} else {
-			let r: [u8; 16] = rand::random();
-			let r: &[u8] = &r[0..16];
-			let file = format!("{}/nioruntime.{}", temp_dir, base58::ToBase58::to_base58(r));
-			warn!(
-				"content too big ({} bytes) to use in memory slabs. Using temp file: '{}'",
-				expected, file
-			)?;
-			self.temp_file = Some(file.clone());
 		}
 
 		Ok(())

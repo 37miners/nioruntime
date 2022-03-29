@@ -305,7 +305,7 @@ pub fn process_proxy_outbound(
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
 	slabs: &Arc<RwLock<SlabAllocator>>,
-) -> Result<usize, Error> {
+) -> Result<ApiContext, Error> {
 	// select a random health socket
 	let state = proxy_state.get(proxy_entry);
 	let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
@@ -315,7 +315,27 @@ pub fn process_proxy_outbound(
 			if len == 0 {
 				// 503 service unavailable
 				inbound.write(HTTP_ERROR_503)?;
-				return Ok(buffer.len());
+
+				// we still read the remaining data on this connection
+				let mut ctx = ApiContext::new(
+					async_connections.clone(),
+					inbound.clone(),
+					slabs.clone(),
+					true,
+				);
+
+				let clen = headers.content_len()?;
+				let headers_len = headers.len();
+				let buf_len = buffer.len();
+				let end = if clen + headers_len > buf_len {
+					buf_len
+				} else {
+					clen + headers_len
+				};
+				let rem = end.saturating_sub(headers_len);
+				ctx.set_expected(rem, &"".to_string(), true)?;
+
+				return Ok(ctx);
 			} else {
 				match &proxy_entry.proxy_rotation {
 					ProxyRotation::Random => {
@@ -539,28 +559,32 @@ pub fn process_proxy_outbound(
 		}
 	};
 
-	let mut ctx = ApiContext::new(async_connections.clone(), inbound.clone(), slabs.clone());
+	let mut ctx = ApiContext::new(
+		async_connections.clone(),
+		inbound.clone(),
+		slabs.clone(),
+		true,
+	);
+
+	let clen = headers.content_len()?;
+	let headers_len = headers.len();
+	let buf_len = buffer.len();
+	let end = if clen + headers_len > buf_len {
+		buf_len
+	} else {
+		clen + headers_len
+	};
+	let rem = end.saturating_sub(headers_len);
+
+	ctx.set_expected(rem, &"".to_string(), true)?;
 
 	// set async
 	ctx.set_async()?;
 
 	// send the first request
-	let end = send_first_request(headers, &proxy_info.proxy_conn, buffer)?;
+	proxy_info.proxy_conn.write(&buffer[0..end])?;
 
-	Ok(end)
-}
-
-fn send_first_request(
-	headers: &HttpHeaders,
-	conn_data: &ConnectionData,
-	buffer: &[u8],
-) -> Result<usize, Error> {
-	let len = headers.len();
-	// TODO: deal with Content-Length / Transfer-Encoding in request
-
-	conn_data.write(&buffer[0..len])?;
-
-	Ok(len)
+	Ok(ctx)
 }
 
 pub fn connect_outbound(

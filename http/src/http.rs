@@ -612,12 +612,31 @@ where
 	fn process_post_await(
 		connection_id: u128,
 		post_await_connections: &mut HashMap<u128, ApiContext>,
+		proxy_connections: &mut HashMap<u128, ProxyInfo>,
 		nbuf: &[u8],
 	) -> Result<(bool, usize), Error> {
 		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
 			Some(ctx) => {
-				let (rem, pushed) = ctx.push_bytes(nbuf)?;
-				(rem == 0, nbuf.len().saturating_sub(pushed))
+				if ctx.is_proxy() {
+					let remaining = ctx.remaining();
+					let rem = remaining.saturating_sub(nbuf.len());
+					let overflow = if rem == 0 {
+						nbuf.len().saturating_sub(remaining)
+					} else {
+						0
+					};
+					match proxy_connections.get(&connection_id) {
+						Some(proxy_info) => proxy_info.proxy_conn.write(nbuf)?,
+						None => error!("expected connection data on conn_id={}", connection_id)?,
+					}
+
+					ctx.update_offset(nbuf.len().saturating_sub(overflow));
+
+					(rem == 0, overflow)
+				} else {
+					let (rem, pushed) = ctx.push_bytes(nbuf)?;
+					(rem == 0, nbuf.len().saturating_sub(pushed))
+				}
 			}
 			None => {
 				return Ok((false, 0));
@@ -683,6 +702,7 @@ where
 		let (was_post_await, overflow) = Self::process_post_await(
 			connection_id,
 			&mut thread_context.post_await_connections,
+                        &mut thread_context.proxy_connections,
 			nbuf,
 		)?;
 
@@ -838,6 +858,81 @@ where
 		Ok(())
 	}
 
+	fn process_proxy_request(
+		conn_data: &ConnectionData,
+		config: &HttpConfig,
+		headers: &HttpHeaders,
+		buffer: &[u8],
+		evh_params: &EvhParams,
+		proxy_connections: &mut HashMap<u128, ProxyInfo>,
+		active_connections: &mut HashMap<u128, ConnectionInfo>,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+		post_await_connections: &mut HashMap<u128, ApiContext>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
+		remote_peer: &Option<SocketAddr>,
+		now: SystemTime,
+	) -> Result<bool, Error> {
+		let mut proxy_entry = None;
+		match config.proxy_config.extensions.get(headers.extension()) {
+			Some(entry) => proxy_entry = Some(entry),
+			None => {}
+		}
+
+		if proxy_entry.is_none() {
+			match config.proxy_config.mappings.get(headers.get_uri()) {
+				Some(entry) => proxy_entry = Some(entry),
+				None => {}
+			}
+		}
+
+		Ok(match proxy_entry {
+			Some(proxy_entry) => {
+				let clen = headers.content_len()?;
+				let headers_len = headers.len();
+				let buf_len = buffer.len();
+
+				match process_proxy_outbound(
+					conn_data,
+					&headers,
+					config,
+					&proxy_entry,
+					buffer,
+					evh_params,
+					proxy_connections,
+					active_connections,
+					idle_proxy_connections,
+					proxy_state,
+					async_connections,
+					&remote_peer,
+					now,
+					slabs,
+				) {
+					Ok(ctx) => {
+						if clen > 0 {
+							let rem = if clen + headers_len > buf_len {
+								(headers_len + clen).saturating_sub(buf_len)
+							} else {
+								0
+							};
+							if rem > 0 {
+								post_await_connections
+									.insert(conn_data.get_connection_id(), ctx.clone());
+							}
+						}
+					}
+					Err(e) => {
+						warn!("Error while communicating with proxy: {}", e.kind(),)?;
+						conn_data.write(HTTP_ERROR_502)?;
+					}
+				};
+				true
+			}
+			None => false,
+		})
+	}
+
 	fn process_buffer(
 		conn_data: &ConnectionData,
 		buffer: &[u8],
@@ -928,49 +1023,22 @@ where
 				};
 				let mut key = None;
 
-				let was_proxy = {
-					let mut proxy_entry = None;
-					match config.proxy_config.extensions.get(headers.extension()) {
-						Some(entry) => proxy_entry = Some(entry),
-						None => {}
-					}
-
-					if proxy_entry.is_none() {
-						match config.proxy_config.mappings.get(headers.get_uri()) {
-							Some(entry) => proxy_entry = Some(entry),
-							None => {}
-						}
-					}
-
-					match proxy_entry {
-						Some(proxy_entry) => {
-							match process_proxy_outbound(
-								conn_data,
-								&headers,
-								config,
-								&proxy_entry,
-								buffer,
-								evh_params,
-								&mut thread_context.proxy_connections,
-								&mut thread_context.active_connections,
-								&mut thread_context.idle_proxy_connections,
-								&mut thread_context.proxy_state,
-								async_connections,
-								remote_peer,
-								now,
-								slabs,
-							) {
-								Ok(_) => {}
-								Err(e) => {
-									warn!("Error while communicating with proxy: {}", e.kind(),)?;
-									conn_data.write(HTTP_ERROR_502)?;
-								}
-							}
-							true
-						}
-						None => false,
-					}
-				};
+				let was_proxy = Self::process_proxy_request(
+					conn_data,
+					config,
+					&headers,
+					buffer,
+					evh_params,
+					&mut thread_context.proxy_connections,
+					&mut thread_context.active_connections,
+					&mut thread_context.idle_proxy_connections,
+					&mut thread_context.proxy_state,
+					&mut thread_context.post_await_connections,
+					async_connections,
+					slabs,
+					remote_peer,
+					now,
+				)?;
 
 				// check for api mapping/extension
 				let was_api = Self::process_api(
@@ -1092,6 +1160,7 @@ where
 						async_connections.clone(),
 						conn_data.clone(),
 						slabs.clone(),
+						false,
 					);
 					if clen > 0 {
 						let headers_len = headers.len();
@@ -1102,7 +1171,7 @@ where
 							0
 						};
 						if clen > 0 {
-							ctx.set_expected(clen, temp_dir)?;
+							ctx.set_expected(clen, temp_dir, false)?;
 						}
 						if buf_len > headers_len {
 							let end = if clen + headers_len > buf_len {
@@ -1392,7 +1461,12 @@ where
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
 
-		let mut ctx = ApiContext::new(async_connections.clone(), conn_data.clone(), slabs.clone());
+		let mut ctx = ApiContext::new(
+			async_connections.clone(),
+			conn_data.clone(),
+			slabs.clone(),
+			false,
+		);
 
 		ctx.set_async()?;
 		let mut ctx = ctx.clone();
@@ -3721,6 +3795,163 @@ Content-Length: 30\r\n\
 		}
 
 		assert!(bytes_find(&buf[0..len_sum], "msg1234".as_bytes()).is_some());
+
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_proxy_post() -> Result<(), Error> {
+		let root_dir = "./.test_proxy_post.nio";
+		setup_test_dir(root_dir)?;
+
+		let port1 = 17990;
+		let port2 = 17991;
+
+		let config1 = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+			)],
+			show_request_headers: true,
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
+			debug: true,
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut extensions = HashMap::new();
+		extensions.insert(
+			"html".as_bytes().to_vec(),
+			ProxyEntry::multi_socket_addr(
+				vec![
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+						1,
+					),
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..]).unwrap(),
+						1,
+					),
+				],
+				100,
+				Some(HealthCheck {
+					check_secs: 3,
+					path: "/".to_string(),
+					expect_text: "n".to_string(),
+				}),
+				ProxyRotation::Random,
+				10,
+				1,
+			),
+		);
+
+		let config2 = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
+			debug: true,
+			show_request_headers: true,
+			proxy_config: ProxyConfig {
+				extensions,
+				mappings: HashMap::new(),
+			},
+			evh_config: EventHandlerConfig {
+				threads: 1,
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let mut http1 = HttpServer::new(config1).unwrap();
+		let mut http2 = HttpServer::new(config2).unwrap();
+
+		let mut mappings = HashSet::new();
+		mappings.insert("/api_proxy_post.html".as_bytes().to_vec());
+		http1.set_api_handler(move |conn_data, _headers, ctx| {
+			warn!("got an api call")?;
+
+			ctx.set_async()?;
+			let mut ctx = ctx.clone();
+			let conn_data = conn_data.clone();
+			std::thread::spawn(move || -> Result<(), Error> {
+				let mut buf = vec![];
+				buf.resize(100, 0u8);
+				let len = ctx.pull_bytes(&mut buf)?;
+				conn_data.write(
+					format!("200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n\r\nContent: {}", len + 9, std::str::from_utf8(&buf[0..len])?).as_bytes(),
+				)?;
+				ctx.async_complete()?;
+
+				Ok(())
+			});
+			Ok(())
+		})?;
+		http1.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+
+		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http2.set_api_config(HttpApiConfig {
+			..Default::default()
+		})?;
+
+		http1.start()?;
+		http2.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?)?;
+		strm.write(b"POST /api_proxy_post.html HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabcdefghij")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("abcdefghij").is_some(), true);
+
+		http1.stop()?;
+		http2.stop()?;
 
 		tear_down_test_dir(root_dir)?;
 
