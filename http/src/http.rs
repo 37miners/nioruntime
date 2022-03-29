@@ -820,6 +820,24 @@ where
 		Ok(())
 	}
 
+	fn check_expect_100_continue(
+		headers: &HttpHeaders,
+		conn_data: &ConnectionData,
+	) -> Result<(), Error> {
+		match headers.get_header_value(&"Expect".to_string())? {
+			Some(values) => {
+				for value in values {
+					if value == "100-continue" {
+						conn_data.write(HTTP_CONTINUE_100)?;
+					}
+				}
+			}
+			None => {}
+		}
+
+		Ok(())
+	}
+
 	fn process_buffer(
 		conn_data: &ConnectionData,
 		buffer: &[u8],
@@ -873,6 +891,9 @@ where
 				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
 				}
+
+				Self::check_expect_100_continue(&headers, conn_data)?;
+
 				let range: Option<(usize, usize)> = if headers.has_range() {
 					let range = headers.get_header_value(&"Range".to_string())?;
 					match range {

@@ -128,6 +128,8 @@ Connection: keep-alive\r\n\
 \r\n\
 Hello\r\n";
 
+pub const HTTP_CONTINUE_100: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+
 pub const HTTP_ERROR_400: &[u8] = b"HTTP/1.1 400 Bad request\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
