@@ -513,6 +513,11 @@ fn main() -> Result<(), Error> {
 		false => file_args.is_present("debug"),
 	};
 
+	let debug_post = match args.is_present("debug_post") {
+		true => true,
+		false => file_args.is_present("debug_post"),
+	};
+
 	let config = HttpConfig {
 		content_upload_slab_count,
 		content_upload_slab_size,
@@ -540,6 +545,7 @@ fn main() -> Result<(), Error> {
 		mainlog_max_size,
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
+		debug_post,
 		evh_config: EventHandlerConfig {
 			threads,
 			housekeeper_frequency,
@@ -580,7 +586,42 @@ fn main() -> Result<(), Error> {
 	})?;
 
 	let mut http = HttpServer::new(config)?;
-	http.set_api_handler(move |_, _, _| Ok(()))?;
+
+	if debug_post {
+		let mut mappings = std::collections::HashSet::new();
+		mappings.insert("/post".as_bytes().to_vec());
+		http.set_api_config(nioruntime_http::HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+	}
+
+	http.set_api_handler(move |conn_data, headers, ctx| {
+		ctx.set_async()?;
+
+		let content_len = headers.content_len()?;
+		let conn_data = conn_data.clone();
+		let mut ctx = ctx.clone();
+		std::thread::spawn(move || -> Result<(), Error> {
+			let mut buf = vec![];
+			buf.resize(content_len, 0u8);
+			let len = ctx.pull_bytes(&mut buf)?;
+			warn!(
+				"Debug post handler read {} bytes: {}",
+				len,
+				std::str::from_utf8(&buf[0..len])?
+			)?;
+			let response = format!(
+				"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\nPost_Data was: {}",
+				len + 15,
+				std::str::from_utf8(&buf[0..len])?
+			);
+			conn_data.write(response.as_bytes())?;
+			ctx.async_complete()?;
+			Ok(())
+		});
+		Ok(())
+	})?;
 	http.start()?;
 	std::thread::park();
 	Ok(())

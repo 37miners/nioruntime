@@ -22,19 +22,24 @@ args:
         takes_value: true
         value_name: threads
     - show_request_headers:
-        help: Show Request Headers for each request. This setting must NOT be set in a production environment.
+        help: Show Request Headers for each request. This flag must NOT be set in a production environment.
         short: r
         long: show_request_headers
         takes_value: false
     - show_response_headers:
-        help: Show Response Headers for each request. This setting must NOT be set in a production environment.
+        help: Show Response Headers for each request. This flag must NOT be set in a production environment.
         short: r
         long: show_response_headers
         takes_value: false
     - debug:
-        help: Show debugging information and continue to log to stdout. his setting must NOT be set in a production environment.
+        help: Show debugging information and continue to log to stdout. This flag must NOT be set in a production environment.
         short: d
         long: debug
+        takes_value: false
+    - debug_post:
+        help: Show debugging information for post requests. The debug configuration maps the url /post to a dummy api handler for testing purposes. This flag must NOT be set in a production environment.
+        short: q
+        long: debug_post
         takes_value: false
     - listen_queue_size:
         help: The size of the tcp listen queue. This limits the number of unaccepted connections in the tcp backlog. The default value is 1,000.

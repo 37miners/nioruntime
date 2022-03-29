@@ -598,7 +598,7 @@ mod test {
 	}
 
 	#[test]
-	fn test_partial() -> Result<(), Error> {
+	fn test_partial1() -> Result<(), Error> {
 		crate::test::test::init_logger()?;
 		let mut cache = HttpCache::new(3, 3, 16, 0.99)?;
 

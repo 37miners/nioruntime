@@ -107,7 +107,6 @@ where
 
 		let mainlog = config.mainlog.replace("~", &home_dir);
 		let mainlog = path_clean(&mainlog);
-
 		let temp_dir = config.temp_dir.replace("~", &home_dir);
 
 		if std::fs::metadata(webroot.clone()).is_err() {
@@ -515,6 +514,7 @@ where
 		self.debug_flag("--show_request_headers", self.config.show_request_headers)?;
 		self.debug_flag("--show_response_headers", self.config.show_response_headers)?;
 		self.debug_flag("--debug", self.config.debug)?;
+		self.debug_flag("--debug_post", self.config.debug_post)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
 
@@ -2031,6 +2031,7 @@ mod test {
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2135,6 +2136,7 @@ mod test {
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			evh_config: EventHandlerConfig {
@@ -2264,6 +2266,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2361,6 +2364,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2476,6 +2480,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2595,6 +2600,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
 			)],
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
@@ -2647,6 +2653,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
@@ -2688,6 +2695,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			proxy_config: ProxyConfig {
@@ -2778,6 +2786,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2889,6 +2898,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -2990,6 +3000,7 @@ Content-Length: 10\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -3107,6 +3118,7 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -3271,6 +3283,7 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
@@ -3407,6 +3420,7 @@ Content-Length: 30\r\n\
 			show_request_headers: true,
 			webroot: format!("{}/www1", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs1/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
 				threads: 1,
@@ -3442,6 +3456,7 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www2", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs2/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			proxy_config: ProxyConfig {
@@ -3588,6 +3603,7 @@ Content-Length: 30\r\n\
 
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
 			..Default::default()
