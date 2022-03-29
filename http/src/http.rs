@@ -1008,6 +1008,7 @@ where
 								}
 								ErrorKind::HttpError405(_) => {
 									conn_data.write(HTTP_ERROR_405)?;
+									conn_data.close()?;
 								}
 								ErrorKind::HttpError403(_) => {
 									conn_data.write(HTTP_ERROR_403)?;
