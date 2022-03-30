@@ -4035,7 +4035,6 @@ Content-Length: 30\r\n\
 		}
 
 		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
-		warn!("fullresponse='{}'", full_response);
 		assert_eq!(full_response.find("hello").is_some(), true);
 
 		http1.stop()?;
