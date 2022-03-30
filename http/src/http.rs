@@ -612,7 +612,6 @@ where
 	fn process_post_await(
 		connection_id: u128,
 		post_await_connections: &mut HashMap<u128, ApiContext>,
-		proxy_connections: &mut HashMap<u128, ProxyInfo>,
 		nbuf: &[u8],
 	) -> Result<(bool, usize), Error> {
 		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
@@ -625,16 +624,21 @@ where
 					} else {
 						0
 					};
-					match proxy_connections.get(&connection_id) {
-						Some(proxy_info) => proxy_info.proxy_conn.write(nbuf)?,
+					match ctx.proxy_conn() {
+						Some(proxy_conn) => proxy_conn.write(nbuf)?,
 						None => error!("expected connection data on conn_id={}", connection_id)?,
 					}
 
 					ctx.update_offset(nbuf.len().saturating_sub(overflow));
-
+					if rem == 0 {
+						ctx.async_complete()?;
+					}
 					(rem == 0, overflow)
 				} else {
 					let (rem, pushed) = ctx.push_bytes(nbuf)?;
+					if rem == 0 {
+						ctx.async_complete()?;
+					}
 					(rem == 0, nbuf.len().saturating_sub(pushed))
 				}
 			}
@@ -693,16 +697,13 @@ where
 			}
 			None => {}
 		}
-
                 let is_async = {
                         let async_connections = lockr!(thread_context.async_connections)?;
                         async_connections.get(&connection_id).is_some()
                 };
-
 		let (was_post_await, overflow) = Self::process_post_await(
 			connection_id,
 			&mut thread_context.post_await_connections,
-                        &mut thread_context.proxy_connections,
 			nbuf,
 		)?;
 
@@ -1161,6 +1162,7 @@ where
 						conn_data.clone(),
 						slabs.clone(),
 						false,
+						None,
 					);
 					if clen > 0 {
 						let headers_len = headers.len();
@@ -1466,6 +1468,7 @@ where
 			conn_data.clone(),
 			slabs.clone(),
 			false,
+			None,
 		);
 
 		ctx.set_async()?;
@@ -1912,7 +1915,6 @@ where
 		thread_context
 			.health_check_connections
 			.remove(&connection_id);
-
 		match thread_context.proxy_connections.remove(&connection_id) {
 			Some(proxy_info) => {
 				match thread_context
@@ -3841,11 +3843,7 @@ Content-Length: 30\r\n\
 					),
 				],
 				100,
-				Some(HealthCheck {
-					check_secs: 3,
-					path: "/".to_string(),
-					expect_text: "n".to_string(),
-				}),
+				None,
 				ProxyRotation::Random,
 				10,
 				1,
@@ -3879,7 +3877,6 @@ Content-Length: 30\r\n\
 		let mut mappings = HashSet::new();
 		mappings.insert("/api_proxy_post.html".as_bytes().to_vec());
 		http1.set_api_handler(move |conn_data, _headers, ctx| {
-			warn!("got an api call")?;
 
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -3889,7 +3886,7 @@ Content-Length: 30\r\n\
 				buf.resize(100, 0u8);
 				let len = ctx.pull_bytes(&mut buf)?;
 				conn_data.write(
-					format!("200 Ok HTTP/1.1\r\nConnection: close\r\nContent-Length: {}\r\n\r\nContent: {}", len + 9, std::str::from_utf8(&buf[0..len])?).as_bytes(),
+					format!("200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\nContent: {}", len + 9, std::str::from_utf8(&buf[0..len])?).as_bytes(),
 				)?;
 				ctx.async_complete()?;
 
@@ -3949,6 +3946,47 @@ Content-Length: 30\r\n\
 
 		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
 		assert_eq!(full_response.find("abcdefghij").is_some(), true);
+		sleep(Duration::from_millis(5000));
+
+		strm.write(b"POST /api_proxy_post.html HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nabcdqq")?;
+		sleep(Duration::from_millis(1000));
+		strm.write(b"ghiq")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		assert_eq!(full_response.find("abcdqqghiq").is_some(), true);
 
 		http1.stop()?;
 		http2.stop()?;

@@ -1267,6 +1267,7 @@ pub struct ApiContext {
 	slab_size: usize,
 	slab_woffset: Arc<RwLock<usize>>,
 	is_proxy: bool,
+	proxy_conn: Option<ConnectionData>,
 }
 
 impl ApiContext {
@@ -1275,6 +1276,7 @@ impl ApiContext {
 		conn_data: ConnectionData,
 		slaballocator: Arc<RwLock<SlabAllocator>>,
 		is_proxy: bool,
+		proxy_conn: Option<ConnectionData>,
 	) -> Self {
 		Self {
 			async_connections,
@@ -1289,7 +1291,12 @@ impl ApiContext {
 			slab_size: 0,
 			slab_woffset: Arc::new(RwLock::new(0)),
 			is_proxy,
+			proxy_conn,
 		}
+	}
+
+	pub fn proxy_conn(&self) -> Option<&ConnectionData> {
+		self.proxy_conn.as_ref()
 	}
 
 	pub fn is_proxy(&self) -> bool {

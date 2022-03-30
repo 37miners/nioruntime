@@ -70,7 +70,6 @@ pub fn process_proxy_inbound(
 							warn!("proxy request generated error: {}", e)?;
 						}
 					}
-
 					// if complete, call async complete
 					if is_complete && !is_close {
 						conn_data.async_complete()?;
@@ -78,9 +77,9 @@ pub fn process_proxy_inbound(
 				}
 				None => {
 					warn!(
-						"no proxy for id = {}, nbuf='{}'",
+						"no proxy for id = {}, nbuf.len()='{}'",
 						conn_data.get_connection_id(),
-						std::str::from_utf8(nbuf)?
+						nbuf.len(),
 					)?;
 				}
 			}
@@ -322,6 +321,7 @@ pub fn process_proxy_outbound(
 					inbound.clone(),
 					slabs.clone(),
 					true,
+					None,
 				);
 
 				let clen = headers.content_len()?;
@@ -334,6 +334,7 @@ pub fn process_proxy_outbound(
 				};
 				let rem = end.saturating_sub(headers_len);
 				ctx.set_expected(rem, &"".to_string(), true)?;
+				ctx.set_async()?;
 
 				return Ok(ctx);
 			} else {
@@ -564,6 +565,7 @@ pub fn process_proxy_outbound(
 		inbound.clone(),
 		slabs.clone(),
 		true,
+		Some(proxy_info.proxy_conn.clone()),
 	);
 
 	let clen = headers.content_len()?;
@@ -574,11 +576,8 @@ pub fn process_proxy_outbound(
 	} else {
 		clen + headers_len
 	};
-	let rem = end.saturating_sub(headers_len);
-
+	let rem = clen.saturating_sub(end.saturating_sub(headers_len));
 	ctx.set_expected(rem, &"".to_string(), true)?;
-
-	// set async
 	ctx.set_async()?;
 
 	// send the first request
