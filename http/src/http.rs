@@ -3876,22 +3876,33 @@ Content-Length: 30\r\n\
 
 		let mut mappings = HashSet::new();
 		mappings.insert("/api_proxy_post.html".as_bytes().to_vec());
-		http1.set_api_handler(move |conn_data, _headers, ctx| {
-
-			ctx.set_async()?;
-			let mut ctx = ctx.clone();
-			let conn_data = conn_data.clone();
-			std::thread::spawn(move || -> Result<(), Error> {
-				let mut buf = vec![];
-				buf.resize(100, 0u8);
-				let len = ctx.pull_bytes(&mut buf)?;
-				conn_data.write(
-					format!("200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\nContent: {}", len + 9, std::str::from_utf8(&buf[0..len])?).as_bytes(),
-				)?;
-				ctx.async_complete()?;
-
-				Ok(())
-			});
+		mappings.insert("/api_proxy_post2.html".as_bytes().to_vec());
+		http1.set_api_handler(move |conn_data, headers, ctx| {
+                        match headers.get_method() {
+                            HttpMethod::Get => {
+                                conn_data.write(
+                                    b"200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: 7\r\n\r\nhello\r\n"
+                                )?;
+                            },
+                            _ => {
+			        ctx.set_async()?;
+			        let mut ctx = ctx.clone();
+			        let conn_data = conn_data.clone();
+			        std::thread::spawn(move || -> Result<(), Error> {
+				    let mut buf = vec![];
+				    buf.resize(100, 0u8);
+				    let len = ctx.pull_bytes(&mut buf)?;
+				    conn_data.write(
+					format!(
+                                            "200 Ok HTTP/1.1\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\nContent: {}",
+                                            len + 9, std::str::from_utf8(&buf[0..len])?
+                                        ).as_bytes(),
+				    )?;
+				    ctx.async_complete()?;
+                                    Ok(())
+			        });
+                            },
+                        }
 			Ok(())
 		})?;
 		http1.set_api_config(HttpApiConfig {
@@ -3988,9 +3999,47 @@ Content-Length: 30\r\n\
 		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
 		assert_eq!(full_response.find("abcdqqghiq").is_some(), true);
 
+		strm.write(b"GET /api_proxy_post2.html HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(10000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+
+			let mut do_break = false;
+			for i in 3..len_sum {
+				if buf[i - 3] == '\r' as u8
+					&& buf[i - 2] == '\n' as u8
+					&& buf[i - 1] == '\r' as u8
+					&& buf[i] == '\n' as u8
+				{
+					let str = std::str::from_utf8(&buf[0..len_sum])?;
+					let index = str.find("Content-Length: ");
+					let index = index.unwrap();
+					let str = &str[index + 16..];
+					let end = str.find("\r").unwrap();
+					let mut len: usize = str[0..end].parse()?;
+					len += i + 1;
+					if len_sum >= len {
+						do_break = true;
+						break;
+					}
+				}
+			}
+			assert!(len != 0);
+			if do_break {
+				break;
+			}
+		}
+
+		let full_response = std::str::from_utf8(&buf[0..len_sum])?;
+		warn!("fullresponse='{}'", full_response);
+		assert_eq!(full_response.find("hello").is_some(), true);
+
 		http1.stop()?;
 		http2.stop()?;
-
 		tear_down_test_dir(root_dir)?;
 
 		Ok(())
