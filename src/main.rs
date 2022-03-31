@@ -37,7 +37,16 @@ pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-fn main() -> Result<(), Error> {
+fn main() {
+	match real_main() {
+		Ok(_) => {}
+		Err(e) => {
+			println!("Startup error: {} Halting!", e.inner());
+		}
+	}
+}
+
+fn real_main() -> Result<(), Error> {
 	let start = Instant::now();
 	#[allow(deprecated)]
 	let yml = load_yaml!("nio.yml");

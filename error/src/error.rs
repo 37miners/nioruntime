@@ -252,6 +252,10 @@ impl Error {
 	pub fn backtrace(&self) -> Option<&Backtrace> {
 		self.inner.backtrace()
 	}
+
+	pub fn inner(&self) -> String {
+		self.inner.to_string()
+	}
 }
 
 impl From<ErrorKind> for Error {
