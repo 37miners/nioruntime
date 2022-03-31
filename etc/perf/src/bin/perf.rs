@@ -761,7 +761,11 @@ fn main() -> Result<(), Error> {
 			(qps.floor() as u64).to_formatted_string(&Locale::en),
 			qps_decimal
 		);
-		let avglat = { (total_lats as f64 / 1_000_000 as f64) / total_messages as f64 };
+		let avglat = if websocket {
+			(total_lats as f64 / 1_000_000 as f64) / (total_messages / 2) as f64
+		} else {
+			(total_lats as f64 / 1_000_000 as f64) / total_messages as f64
+		};
 
 		info_no_ts!("{}", SEPARATOR)?;
 		info!(
