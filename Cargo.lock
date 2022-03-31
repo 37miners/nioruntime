@@ -1184,6 +1184,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_derive",
+ "sha-1",
  "sha2 0.10.2",
  "signature",
  "subtle",

@@ -18,7 +18,9 @@ use crate::proxy::{
 	process_proxy_outbound, socket_connect,
 };
 use crate::types::*;
+use crate::websocket::{process_websocket_data, WsHandler};
 use include_dir::include_dir;
+use nioruntime_deps::base64;
 use nioruntime_deps::bytefmt;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
 use nioruntime_deps::colored::Colorize;
@@ -35,6 +37,7 @@ use nioruntime_deps::nix::sys::socket::{
 use nioruntime_deps::num_format::{Locale, ToFormattedString};
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
+use nioruntime_deps::sha1::Sha1;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::TLSServerConfig;
@@ -78,6 +81,7 @@ pub struct HttpServer<ApiHandler> {
 	_listeners: Vec<TcpListener>,
 	api_config: Arc<RwLock<HttpApiConfig>>,
 	api_handler: Option<Pin<Box<ApiHandler>>>,
+	ws_handler: Option<Pin<Box<WsHandler>>>,
 	evh_params: Option<EvhParams>,
 }
 
@@ -126,6 +130,7 @@ where
 			_listeners: vec![],
 			api_config: Arc::new(RwLock::new(HttpApiConfig::default())),
 			api_handler: None,
+			ws_handler: None,
 			evh_params: None,
 		})
 	}
@@ -165,9 +170,13 @@ where
 
 		let api_config = self.api_config.clone();
 		let api_handler = self.api_handler.clone();
+                let ws_handler = self.ws_handler.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			Self::process_on_read(
+                        Self::init_user_data(user_data, &config1)?;
+                        let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
+			match Self::process_on_read(
+                                thread_context,
 				&conn_data,
 				buf,
 				ctx,
@@ -177,8 +186,17 @@ where
 				&api_handler,
 				&evh_params,
 				&slabs,
-				user_data,
-			)
+                                ws_handler.as_ref(),
+			) {
+                            Ok(_) => {},
+                            Err(e) => {
+                                error!("on_read returned error: {}", e)?;
+                            }
+                        }
+
+                        Self::update_thread_context(thread_context, &config1, &cache)?;
+
+                        Ok(())
 		})?;
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
 			Self::process_on_accept(conn_data, ctx, &config2, user_data)
@@ -259,6 +277,11 @@ where
 			set_config_option!(Settings::Stdout, false)?;
 		}
 
+		Ok(())
+	}
+
+	pub fn set_ws_handler(&mut self, ws_handler: WsHandler) -> Result<(), Error> {
+		self.ws_handler = Some(Box::pin(ws_handler));
 		Ok(())
 	}
 
@@ -518,6 +541,7 @@ where
 		self.debug_flag("--show_response_headers", self.config.show_response_headers)?;
 		self.debug_flag("--debug", self.config.debug)?;
 		self.debug_flag("--debug_post", self.config.debug_post)?;
+		self.debug_flag("--debug_websocket", self.config.debug_websocket)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
 
@@ -655,6 +679,7 @@ where
 
 	#[rustfmt::skip]
 	fn process_on_read(
+                thread_context: &mut ThreadContext,
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		ctx: &mut ConnectionContext,
@@ -664,11 +689,9 @@ where
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		evh_params: &EvhParams,
 		slabs: &Arc<RwLock<SlabAllocator>>,
-		user_data: &mut Box<dyn Any + Send + Sync>,
+                ws_handler: Option<&Pin<Box<WsHandler>>>,
 	) -> Result<(), Error> {
 		let now = SystemTime::now();
-		Self::init_user_data(user_data, config)?;
-		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 		Self::process_async(ctx, thread_context, conn_data)?;
 		Self::update_conn_info(thread_context, conn_data, now)?;
 
@@ -724,6 +747,7 @@ where
                                 	config,
                                 	api_handler,
 					slabs,
+                                        ws_handler,
                         	)?;
 			}
 			return Ok(());
@@ -751,7 +775,7 @@ where
 			loop {
 				let amt = Self::process_buffer(
 					conn_data, buffer, config, cache, api_config, thread_context, api_handler,
-					evh_params, now, remote_peer, slabs,
+					evh_params, now, remote_peer, slabs, ws_handler,
 				)?;
 				if amt == 0 {
 					break;
@@ -779,6 +803,7 @@ where
 				config,
 				api_handler,
 				slabs,
+                                ws_handler,
 			)?;
 		}
 
@@ -799,6 +824,7 @@ where
 		config: &HttpConfig,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
 	) -> Result<(), Error> {
 		let mut offset = 0;
 		loop {
@@ -821,6 +847,7 @@ where
 				now,
 				remote_peer,
 				slabs,
+				ws_handler,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -934,6 +961,71 @@ where
 		})
 	}
 
+	fn send_websocket_handshake_response(
+		conn_data: &ConnectionData,
+		key: &String,
+		sha1: &mut Sha1,
+	) -> Result<(), Error> {
+		let hash = format!("{}{}", key, WEBSOCKET_GUID);
+		sha1.update(hash.as_bytes());
+		let b = sha1.clone().finalize();
+		let msg = format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                        base64::encode(b),
+                );
+		let response = msg.as_bytes();
+		conn_data.write(response)?;
+		Ok(())
+	}
+
+	fn check_websocket(
+		conn_data: &ConnectionData,
+		headers: Option<&HttpHeaders>,
+		ws_connections: &mut HashSet<u128>,
+		buffer: &[u8],
+		sha1: &mut Sha1,
+		ws_handler: &WsHandler,
+	) -> Result<(bool, usize), Error> {
+		let connection_id = conn_data.get_connection_id();
+
+		Ok(match ws_connections.get(&connection_id).is_some() {
+			true => {
+				let (close, len) = process_websocket_data(conn_data, buffer, ws_handler)?;
+				if close {
+					conn_data.close()?;
+				}
+				(true, len)
+			}
+			false => match headers {
+				Some(headers) => match headers.get_header_value(&"Upgrade".to_string())?
+					== Some(vec!["websocket".to_string()])
+				{
+					true => {
+						let sec_key = headers.get_header_value(&"Sec-WebSocket-Key".to_string())?;
+						match sec_key {
+							Some(sec_key) => {
+								if sec_key.len() > 0 {
+									ws_connections.insert(connection_id);
+									Self::send_websocket_handshake_response(
+										conn_data,
+										&sec_key[0],
+										sha1,
+									)?;
+									(true, headers.len())
+								} else {
+									(false, 0)
+								}
+							}
+							None => (false, 0),
+						}
+					}
+					false => (false, 0),
+				},
+				None => (false, 0),
+			},
+		})
+	}
+
 	fn process_buffer(
 		conn_data: &ConnectionData,
 		buffer: &[u8],
@@ -946,9 +1038,29 @@ where
 		now: SystemTime,
 		remote_peer: &Option<SocketAddr>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
 	) -> Result<usize, Error> {
 		let mime_map = &thread_context.mime_map;
 		let async_connections = &thread_context.async_connections;
+
+		match ws_handler {
+			Some(ws_handler) => {
+				let (is_ws, len) = Self::check_websocket(
+					conn_data,
+					None,
+					&mut thread_context.ws_connections,
+					buffer,
+					&mut thread_context.sha1,
+					&ws_handler,
+				)?;
+
+				if is_ws {
+					return Ok(len);
+				}
+			}
+			None => {}
+		}
+
 		let headers = match HttpHeaders::new(
 			buffer,
 			config,
@@ -986,6 +1098,29 @@ where
 			Some(headers) => {
 				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
+				}
+
+				match ws_handler {
+					Some(ws_handler) => {
+						let (is_ws, len) = Self::check_websocket(
+							conn_data,
+							Some(&headers),
+							&mut thread_context.ws_connections,
+							buffer,
+							&mut thread_context.sha1,
+							&ws_handler,
+						)?;
+						if is_ws {
+							return Ok(len);
+						}
+					}
+					None => {}
+				}
+
+				if headers.content_len()? > config.max_content_len {
+					conn_data.write(HTTP_ERROR_413)?;
+					conn_data.close()?;
+					return Ok(0);
 				}
 
 				Self::check_expect_100_continue(&headers, conn_data)?;
@@ -1131,7 +1266,13 @@ where
 			None => (0, None),
 		};
 
-		Self::update_thread_context(thread_context, key, config, cache)?;
+		match key {
+			Some(key) => {
+				let ch = &mut thread_context.cache_hits;
+				ch.insert_raw(&key, &[0u8; 16])?;
+			}
+			None => {}
+		}
 
 		Ok(len)
 	}
@@ -1204,17 +1345,11 @@ where
 	#[rustfmt::skip]
 	fn update_thread_context(
 		thread_context: &mut ThreadContext,
-		key: Option<[u8; 32]>,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
-		let ch = &mut thread_context.cache_hits;
-		if key.is_some() {
-			let key = key.unwrap();
-			ch.insert_raw(&key, &[0u8; 16])?;
-		}
-
 		if thread_context.instant.elapsed().as_millis() > config.process_cache_update {
+                        let ch = &mut thread_context.cache_hits;
 			let mut cache = lockw!(cache)?;
 			let itr = ch.iter_raw();
 			for (k, _v) in itr { cache.bring_to_front(k.try_into()?)?; }
@@ -1940,6 +2075,8 @@ where
 			}
 			None => {}
 		}
+
+		thread_context.ws_connections.remove(&connection_id);
 
 		// async connections should be removed by user, but if left to this point, we remove.
 		// we don't want to block in the general case, so we try a read lock first.

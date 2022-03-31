@@ -81,6 +81,10 @@ args:
         short: v
         long: http
         takes_value: false
+    - websocket:
+        help: test against websockets
+        long: websocket
+        takes_value: false
     - port:
         help: tcp port to bind/connect to. Default is 8092.
         short: y

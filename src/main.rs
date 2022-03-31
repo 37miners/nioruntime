@@ -20,7 +20,7 @@ use nioruntime_deps::fsutils;
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::EventHandlerConfig;
-use nioruntime_http::{HttpConfig, HttpServer, ListenerType};
+use nioruntime_http::{send_websocket_message, HttpConfig, HttpServer, ListenerType};
 use nioruntime_log::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -500,6 +500,14 @@ fn main() -> Result<(), Error> {
 		},
 	};
 
+	let max_content_len = match args.is_present("max_content_len") {
+		true => args.value_of("max_content_len").unwrap().parse()?,
+		false => match file_args.is_present("max_content_len") {
+			true => file_args.value_of("max_content_len").unwrap().parse()?,
+			false => 1_048_576,
+		},
+	};
+
 	let show_request_headers = match args.is_present("show_request_headers") {
 		true => true,
 		false => file_args.is_present("show_request_headers"),
@@ -520,10 +528,16 @@ fn main() -> Result<(), Error> {
 		false => file_args.is_present("debug_post"),
 	};
 
+	let debug_websocket = match args.is_present("debug_websocket") {
+		true => true,
+		false => file_args.is_present("debug_websocket"),
+	};
+
 	let config = HttpConfig {
 		start,
 		content_upload_slab_count,
 		content_upload_slab_size,
+		max_content_len,
 		temp_dir,
 		listeners,
 		fullchain_map,
@@ -549,6 +563,7 @@ fn main() -> Result<(), Error> {
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
 		debug_post,
+		debug_websocket,
 		evh_config: EventHandlerConfig {
 			threads,
 			housekeeper_frequency,
@@ -596,6 +611,18 @@ fn main() -> Result<(), Error> {
 		http.set_api_config(nioruntime_http::HttpApiConfig {
 			mappings,
 			..Default::default()
+		})?;
+	}
+
+	if debug_websocket {
+		http.set_ws_handler(move |conn_data, message| {
+			debug!(
+				"conn[{}] received a websocket message: {:?}",
+				conn_data.get_connection_id(),
+				message
+			)?;
+			send_websocket_message(conn_data, &message)?;
+			Ok(true)
 		})?;
 	}
 

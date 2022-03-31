@@ -23,12 +23,10 @@ args:
         value_name: threads
     - show_request_headers:
         help: Show Request Headers for each request. This flag must NOT be set in a production environment.
-        short: r
         long: show_request_headers
         takes_value: false
     - show_response_headers:
         help: Show Response Headers for each request. This flag must NOT be set in a production environment.
-        short: r
         long: show_response_headers
         takes_value: false
     - debug:
@@ -38,12 +36,14 @@ args:
         takes_value: false
     - debug_post:
         help: Show debugging information for post requests. The debug configuration maps the url /post to a dummy api handler for testing purposes. This flag must NOT be set in a production environment.
-        short: q
         long: debug_post
+        takes_value: false
+    - debug_websocket:
+        help: Show debugging information for websocket requests. The debug configuration creates a dummy websocket handler for testing purposes. This flag must NOT be set in a production environment.
+        long: debug_websocket
         takes_value: false
     - listen_queue_size:
         help: The size of the tcp listen queue. This limits the number of unaccepted connections in the tcp backlog. The default value is 1,000.
-        short: q
         long: listen_queue_size
         takes_value: true
         value_name: listen_queue_size
@@ -79,7 +79,6 @@ args:
         value_name: webroot
     - max_cache_files:
         help: The maximum number of files that can be in the cache at any given time. Note that this is subject to the load factor. So if the max_cache_files is set to 1,000 and the load factor is 0.75, that means only 750 files can be in the cache at any given time. The default value is 100.
-        short: q
         long: max_cache_files
         takes_value: true
         value_name: max_cache_files
@@ -91,7 +90,6 @@ args:
         value_name: max_cache_chunks
     - cache_chunk_size:
         help: The size of the slab "chunks". The default is 262,144 bytes.
-        short: q
         long: cache_chunk_size
         takes_value: true
         value_name: cache_chunk_size
@@ -157,7 +155,6 @@ args:
         value_name: housekeeper_frequency
     - mainlog:
         help: The location of the main log file. This file contains errors and debugging information only.
-        short: q
         long: mainlog
         takes_value: true
         value_name: mainlog
@@ -187,19 +184,21 @@ args:
         multiple: true
     - temp_dir:
         help: The directory to store temporary files.
-        short: q
         long: temp_dir
         takes_value: true
         value_name: temp_dir
     - content_upload_slab_count:
         help: The number of slabs in the slab allocator that is used for content uploads (POSTs). The default is 10240.
         long: content_upload_slab_count
-        short: q
         takes_value: true
         value_name: content_upload_slab_count
     - content_upload_slab_size:
         help: The size of the slabs used by the slab allocator for content uploads (POSTs). The default is 1024.
         long: content_upload_slab_size
-        short: q
         takes_value: true
         value_name: content_upload_slab_size
+    - max_content_len:
+        help: The maximum size of the Content-Length header. This limits the size of file uploads. The default value is 1 mb.
+        long: max_content_len
+        takes_value: true
+        value_name: max_content_len

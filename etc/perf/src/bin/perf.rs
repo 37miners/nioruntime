@@ -17,6 +17,10 @@ const SEPARATOR: &str =
 //123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890
 //         1         2         3         4         5         6         7         8         9
 
+const SIMPLE_WS_MESSAGE: &[u8] = &[130, 1, 1]; // binary data with a single byte of data, unmasked
+const CLIENT_WS_HANDSHAKE: &[u8] =
+	"GET /perfsocklet HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: x\r\n\r\n".as_bytes();
+
 use clap::load_yaml;
 use clap::App;
 use colored::Colorize;
@@ -24,8 +28,8 @@ use native_tls::TlsConnector;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::*;
 use nioruntime_http::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ListenerType, ProxyConfig, ProxyEntry,
-	ProxyRotation, Upstream,
+	build_messages, HealthCheck, HttpApiConfig, HttpConfig, HttpServer, ListenerType, ProxyConfig,
+	ProxyEntry, ProxyRotation, Upstream,
 };
 use nioruntime_log::*;
 use nioruntime_util::bytes_find;
@@ -573,6 +577,7 @@ fn main() -> Result<(), Error> {
 	}
 	if is_client {
 		let http = args.is_present("http");
+		let websocket = args.is_present("websocket");
 
 		let delay = match args.is_present("delay") {
 			true => args.value_of("delay").unwrap().parse()?,
@@ -680,6 +685,7 @@ fn main() -> Result<(), Error> {
 						port,
 						http,
 						show_response,
+						websocket,
 						path,
 						header,
 					) {
@@ -786,21 +792,28 @@ fn run_thread(
 	port: u16,
 	http: bool,
 	show_response: bool,
+	websocket: bool,
 	path: String,
 	header: Option<String>,
 ) -> Result<u128, Error> {
 	let mut rbuf = vec![];
 	let mut wbuf = vec![];
 	if http {
-		let request_string = format!(
-			"GET {} HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n{}\r\n",
-			path,
-			match header {
-				Some(header) => format!("{}\r\n", header),
-				None => "".to_string(),
-			}
-		);
-		wbuf = request_string.as_bytes().to_vec();
+		let mut xbuf = if websocket {
+			SIMPLE_WS_MESSAGE.to_vec()
+		} else {
+			let ret = format!(
+				"GET {} HTTP/1.1\r\nHost: localhost:80\r\nConnection: keep-alive\r\n{}\r\n",
+				path,
+				match header {
+					Some(header) => format!("{}\r\n", header),
+					None => "".to_string(),
+				}
+			);
+			ret.as_bytes().to_vec()
+		};
+
+		wbuf.append(&mut xbuf);
 		rbuf.resize(1000, 0u8);
 	} else {
 		let cap = if max > min { max } else { min };
@@ -837,6 +850,58 @@ fn run_thread(
 	};
 	let mut x = 0;
 	let mut lat_sum = 0;
+
+	if websocket {
+		let _len = match stream {
+			Some(ref mut stream) => stream.write(CLIENT_WS_HANDSHAKE)?,
+			None => match tls_stream {
+				Some(ref mut tls_stream) => tls_stream.write(CLIENT_WS_HANDSHAKE)?,
+				None => {
+					return Err(
+						ErrorKind::ApplicationError("no streams configured".to_string()).into(),
+					);
+				}
+			},
+		};
+
+		let mut offset = 0;
+		let mut found = false;
+		let mut buf1 = [0u8; 350].to_vec();
+		let mut buf2 = [0u8; 350].to_vec();
+		loop {
+			let len = match stream {
+				Some(ref mut stream) => stream.read(&mut buf2)?,
+				None => match tls_stream {
+					Some(ref mut tls_stream) => tls_stream.read(&mut buf2)?,
+					None => {
+						return Err(ErrorKind::ApplicationError(
+							"no streams configured".to_string(),
+						)
+						.into());
+					}
+				},
+			};
+
+			let _ = &buf1[offset..(offset + len)].clone_from_slice(&buf2[0..len]);
+			for i in 3..(len + offset) {
+				if buf1[i] == '\n' as u8
+					&& buf1[i - 1] == '\r' as u8
+					&& buf1[i - 2] == '\n' as u8
+					&& buf1[i - 3] == '\r' as u8
+				{
+					// handshake completed.
+					found = true;
+					break;
+				}
+			}
+
+			if found {
+				break;
+			}
+			offset += len;
+		}
+	}
+
 	loop {
 		let r: usize = rand::random();
 		let r = if max <= min { 0 } else { r % (max - min) };
@@ -870,9 +935,21 @@ fn run_thread(
 				},
 			};
 			len_sum += len;
-			trace!("len={},len_sum={}", len, len_sum)?;
 
-			if http {
+			if websocket {
+				let mut websocket_message_found = false;
+				let messages = build_messages(&rbuf[..len_sum])?;
+				for message in messages.0 {
+					websocket_message_found = true;
+					if show_response {
+						debug!("message: {:?}", message)?;
+					}
+				}
+
+				if websocket_message_found {
+					break;
+				}
+			} else if http {
 				let mut do_break = false;
 				for i in 3..len_sum {
 					if rbuf[i - 3] == '\r' as u8

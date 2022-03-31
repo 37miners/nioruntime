@@ -13,10 +13,12 @@
 // limitations under the License
 
 use nioruntime_deps::base58;
+use nioruntime_deps::digest::Digest;
 use nioruntime_deps::dirs;
 use nioruntime_deps::lazy_static::lazy_static;
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
+use nioruntime_deps::sha1::Sha1;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
@@ -118,6 +120,8 @@ pub const HTTP20_BYTES: &[u8] = "HTTP/2.0".as_bytes();
 pub const KEEP_ALIVE_BYTES: &[u8] = "keep-alive".as_bytes();
 pub const CLOSE_BYTES: &[u8] = "close".as_bytes();
 
+pub const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
 pub const _SIMPLE: &[u8] = b"HTTP/1.1 200 Ok\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
@@ -152,11 +156,10 @@ pub const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 12\r\n\
+Content-Length: 11\r\n\
 Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Connection: close\r\n\
-\r\n\
-Not found.\r\n";
+Connection: close\r\n\r\n\
+Not found\r\n";
 
 pub const HTTP_ERROR_405: &[u8] = b"HTTP/1.1 405 Method not supported\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
@@ -166,6 +169,15 @@ Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
 Method Not supported.\r\n";
+
+pub const HTTP_ERROR_413: &[u8] = b"HTTP/1.1 413 Request Entity Too Large\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
+Content-Type: text/html\r\n\
+Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 25\r\n\
+Connection: close\r\n\r\n\
+Request Entity Too Large\r\n";
 
 pub const HTTP_ERROR_431: &[u8] = b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
@@ -330,8 +342,10 @@ pub struct ThreadContext {
 	pub post_await_connections: HashMap<u128, ApiContext>,
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
 	pub health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
+	pub ws_connections: HashSet<u128>,
 	pub webroot: Vec<u8>,
 	pub temp_dir: String,
+	pub sha1: Sha1,
 }
 
 impl ThreadContext {
@@ -399,6 +413,8 @@ impl ThreadContext {
 			health_check_connections,
 			webroot,
 			temp_dir,
+			sha1: Sha1::new(),
+			ws_connections: HashSet::new(),
 		})
 	}
 }
@@ -778,6 +794,12 @@ impl<'a> HttpHeaders<'a> {
 
 		loop {
 			if i > config.max_header_size {
+				for j in 0..key_offset {
+					key_buf[j] = 0;
+				}
+				for j in 0..value_offset {
+					value_buf[j] = 0;
+				}
 				return Err(
 					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
 				);
@@ -791,18 +813,43 @@ impl<'a> HttpHeaders<'a> {
 					if i == 0 {
 						// there is a valid no header case
 						if buffer_len < 2 {
+							for j in 0..key_offset {
+								key_buf[j] = 0;
+							}
+							for j in 0..value_offset {
+								value_buf[j] = 0;
+							}
+
 							return Ok(None);
 						}
 
 						if buffer[0] == '\r' as u8 && buffer[1] == '\n' as u8 {
+							for j in 0..key_offset {
+								key_buf[j] = 0;
+							}
+							for j in 0..value_offset {
+								value_buf[j] = 0;
+							}
 							// no headers
 							return Ok(Some((i + 2, range)));
 						}
+					}
+					for j in 0..key_offset {
+						key_buf[j] = 0;
+					}
+					for j in 0..value_offset {
+						value_buf[j] = 0;
 					}
 					return Err(ErrorKind::HttpError400("Bad request: 1".into()).into());
 				}
 
 				if key_offset >= key_buf.len() {
+					for j in 0..key_offset {
+						key_buf[j] = 0;
+					}
+					for j in 0..value_offset {
+						value_buf[j] = 0;
+					}
 					return Err(
 						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
 					);
@@ -815,6 +862,12 @@ impl<'a> HttpHeaders<'a> {
 				proc_key = false;
 			} else if buffer[i] != '\r' as u8 && buffer[i] != '\n' as u8 {
 				if value_offset >= value_buf.len() {
+					for j in 0..key_offset {
+						key_buf[j] = 0;
+					}
+					for j in 0..value_offset {
+						value_buf[j] = 0;
+					}
 					return Err(
 						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
 					);
@@ -830,17 +883,36 @@ impl<'a> HttpHeaders<'a> {
 				}
 				match header_map.get_raw(&key_buf) {
 					Some(value) => {
-						if value.len() + 4 + value_offset > config.max_header_value_len {
-							return Err(ErrorKind::HttpError431(
-								"Request Header Fields Too Large".into(),
-							)
-							.into());
+						let mut offset = 0;
+						loop {
+							let value_len =
+								u32::from_be_bytes(value[offset..(offset + 4)].try_into()?)
+									as usize;
+							if value_len == 0 {
+								break;
+							}
+							if offset + value_len + 4 + value_offset > config.max_header_value_len {
+								for j in 0..key_offset {
+									key_buf[j] = 0;
+								}
+								for j in 0..value_offset {
+									value_buf[j] = 0;
+								}
+								return Err(ErrorKind::HttpError431(
+									"Request Header Fields Too Large".into(),
+								)
+								.into());
+							}
+							(&mut value_buf[value_offset..(value_offset + 4)])
+								.clone_from_slice(&(value_len as u32).to_be_bytes());
+							(&mut value_buf[(value_offset + 4)..(value_offset + 4 + value_len)])
+								.clone_from_slice(&value[(offset + 4)..(offset + 4 + value_len)]);
+							value_offset += value_len + 4;
+							offset += value_len + 4;
 						}
-						value_buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
-						value_buf.extend_from_slice(value);
+
 						header_map
 							.insert_raw(&key_buf, &value_buf[0..config.max_header_value_len])?;
-						value_buf.resize(config.max_header_value_len, 0u8);
 					}
 					None => {
 						header_map.insert_raw(&key_buf, &value_buf)?;
@@ -866,6 +938,13 @@ impl<'a> HttpHeaders<'a> {
 				}
 			}
 			i += 1;
+		}
+
+		for j in 0..key_offset {
+			key_buf[j] = 0;
+		}
+		for j in 0..value_offset {
+			value_buf[j] = 0;
 		}
 
 		Ok(None)
@@ -996,6 +1075,7 @@ pub struct HttpConfig {
 	pub fullchain_map: HashMap<u16, String>,
 	pub privkey_map: HashMap<u16, String>,
 	pub listen_queue_size: usize,
+	pub max_content_len: usize,
 	pub max_header_size: usize,
 	pub max_header_entries: usize,
 	pub max_header_name_len: usize,
@@ -1018,6 +1098,7 @@ pub struct HttpConfig {
 	pub show_response_headers: bool,
 	pub debug: bool,
 	pub debug_post: bool,
+	pub debug_websocket: bool,
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
 	pub mainlog_max_size: u64,
@@ -1052,6 +1133,7 @@ impl Default for HttpConfig {
 			max_cache_chunks: 100,
 			max_bring_to_front: 1_000,
 			cache_chunk_size: 1024 * 1024,
+			max_content_len: 1024 * 1024,
 			content_upload_slab_count: 1024 * 10,
 			content_upload_slab_size: 1024,
 			max_load_factor: 0.9,
@@ -1063,6 +1145,8 @@ impl Default for HttpConfig {
 			show_request_headers: false,    // debug: show request headers
 			show_response_headers: false,   // debug: show response headers
 			debug_post: false, // debug: dummy post request handler (note: we just display the flag here,
+			// /src/main.rs responsible for creating it.
+			debug_websocket: false, // debug: dummy websocket handler (note: we just display the flag here,
 			// /src/main.rs responsible for creating it.
 			debug: false, // general debugging including log to stdout
 			error_page: "/error.html".as_bytes().to_vec(),
