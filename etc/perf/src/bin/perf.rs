@@ -19,7 +19,7 @@ const SEPARATOR: &str =
 
 const SIMPLE_WS_MESSAGE: &[u8] = &[130, 1, 1]; // binary data with a single byte of data, unmasked
 const CLIENT_WS_HANDSHAKE: &[u8] =
-	"GET /perfsocklet HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: x\r\n\r\n".as_bytes();
+	"GET /perf HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: x\r\n\r\n".as_bytes();
 
 use clap::load_yaml;
 use clap::App;
@@ -710,7 +710,11 @@ fn main() -> Result<(), Error> {
 
 			i += 1;
 			let nanos = start_itt.elapsed().as_nanos();
-			let total_messages: u64 = (threads * count).try_into().unwrap_or(0);
+			let total_messages: u64 = if websocket {
+				(2 * threads * count).try_into().unwrap_or(0)
+			} else {
+				(threads * count).try_into().unwrap_or(0)
+			};
 			let qps: f64 = (total_messages as f64 / nanos as f64) * 1_000_000_000 as f64;
 			let qps_decimal: f64 = qps - (qps.floor() as f64);
 			let qps_decimal = &qps_decimal.to_string()[1..];
@@ -744,7 +748,11 @@ fn main() -> Result<(), Error> {
 		}
 
 		let nanos = start.elapsed().as_nanos();
-		let total_messages: u64 = (threads * count * itt).try_into().unwrap_or(0);
+		let total_messages: u64 = if websocket {
+			(2 * threads * count * itt).try_into().unwrap_or(0)
+		} else {
+			(threads * count * itt).try_into().unwrap_or(0)
+		};
 		let qps: f64 = (total_messages as f64 / nanos as f64) * 1_000_000_000 as f64;
 		let qps_decimal: f64 = qps - (qps.floor() as f64);
 		let qps_decimal = &qps_decimal.to_string()[1..];
