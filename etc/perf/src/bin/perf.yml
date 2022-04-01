@@ -110,7 +110,6 @@ args:
         value_name: sleep
     - delay:
         help: how long to sleep between connects (MacOS testing)
-        short: dy
         long: delay
         takes_value: true
         value_name: delay

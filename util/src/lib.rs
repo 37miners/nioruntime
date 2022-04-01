@@ -18,7 +18,7 @@ mod macros;
 pub mod ser;
 pub mod slabs;
 mod static_hash;
-pub mod step_allocator;
+mod step_allocator;
 pub mod threadpool;
 
 pub use nioruntime_deps;
@@ -32,3 +32,5 @@ pub use crate::byte_utils::{
 	bytes_eq, bytes_find, bytes_parse_number, bytes_parse_number_header, bytes_parse_number_hex,
 };
 pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
+
+pub use crate::step_allocator::{StepAllocator, StepAllocatorConfig};

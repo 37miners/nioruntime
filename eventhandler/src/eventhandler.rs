@@ -21,13 +21,13 @@ use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::{lockr, lockw, lockwp};
-use nioruntime_util::{StaticHash, StaticHashConfig};
+use nioruntime_util::{StaticHash, StaticHashConfig, StepAllocator, StepAllocatorConfig};
 use rustls::{
 	Certificate, ClientConfig, ClientConnection, PrivateKey, RootCertStore, ServerConfig,
 	ServerConnection,
 };
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
@@ -92,6 +92,9 @@ use std::os::windows::io::AsRawSocket;
 
 warn!();
 
+const SIZEOF_USIZE: usize = std::mem::size_of::<usize>();
+const SIZEOF_U128: usize = std::mem::size_of::<u128>();
+
 const MAX_EVENTS: i32 = 100;
 #[cfg(target_os = "windows")]
 const WINSOCK_BUF_SIZE: winapi::c_int = 100_000_000;
@@ -114,7 +117,7 @@ type Handle = RawFd;
 #[cfg(windows)]
 type Handle = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionContext {
 	pub buffer: Vec<u8>,
 	pub is_async_complete: bool,
@@ -651,6 +654,37 @@ where
 		Ok(())
 	}
 
+	fn insert_step_allocator(
+		connection_info: EventConnectionInfo,
+		step_allocator: &mut StepAllocator,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		tid: usize,
+	) -> Result<(), Error> {
+		let handle = connection_info.get_handle(tid);
+		let id = connection_info.get_connection_id();
+		let next = match step_allocator.next() {
+			Some(next) => next,
+			None => {
+				step_allocator.step(&ConnectionHashData::new());
+				step_allocator.next().unwrap()
+			}
+		};
+
+		let connection_hash_data = next.data_as_mut::<ConnectionHashData>().unwrap();
+		connection_hash_data.connection_info = Some(connection_info);
+		connection_hash_data.connection_context = Some(ConnectionContext::new());
+
+		connection_index_handle_map.insert_raw(
+			&handle.to_be_bytes(),
+			&(next.index() as usize).to_be_bytes(),
+		)?;
+
+		connection_index_id_map
+			.insert_raw(&id.to_be_bytes(), &(next.index() as usize).to_be_bytes())?;
+		Ok(())
+	}
+
 	fn start_thread(
 		&self,
 		guarded_data: Arc<RwLock<GuardedData>>,
@@ -661,30 +695,36 @@ where
 		let callbacks = Arc::new(RwLock::new(self.callbacks.clone()));
 		let events = Arc::new(RwLock::new(HashSet::new()));
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
-		let mut connection_id_map = StaticHash::new(StaticHashConfig {
+
+		let mut step_allocator = StepAllocator::new(StepAllocatorConfig::default());
+		let mut connection_index_handle_map = StaticHash::new(StaticHashConfig {
 			max_entries: self.config.max_handle_numeric_value,
-			key_len: 16,
-			entry_len: HANDLE_SIZE,
-			max_load_factor: 0.99,
+			key_len: HANDLE_SIZE,
+			entry_len: SIZEOF_USIZE,
+			max_load_factor: 1.0,
 			iterator: false,
 		})?;
 
-		let mut connection_handle_map = HashMap::new();
-		let context_map = HashMap::new();
+		let mut connection_index_id_map = StaticHash::new(StaticHashConfig {
+			max_entries: self.config.max_handle_numeric_value,
+			key_len: SIZEOF_U128,
+			entry_len: SIZEOF_USIZE,
+			max_load_factor: 1.0,
+			iterator: false,
+		})?;
 
 		let config = self.config.clone();
 
 		// add the wakeup handle to all hashtables
 		let connection_info =
 			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None, None);
-		let connection_id = connection_info.get_connection_id();
-		connection_handle_map.insert(wakeup.wakeup_handle_read, connection_info.clone());
-		let handle_info = HandleInfo::new(connection_id, 0);
-		let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
-		handle_info.to_bytes(&mut handle_info_bytes)?;
-		connection_id_map.insert_raw(
-			&connection_id.to_be_bytes(),
-			&wakeup.wakeup_handle_read.to_be_bytes(),
+
+		Self::insert_step_allocator(
+			connection_info.clone(),
+			&mut step_allocator,
+			&mut connection_index_handle_map,
+			&mut connection_index_id_map,
+			ctx.tid,
 		)?;
 
 		ctx.input_events.insert(Event {
@@ -693,18 +733,18 @@ where
 		});
 
 		let ctx = Arc::new(RwLock::new(ctx));
-		let connection_handle_map = Arc::new(RwLock::new(connection_handle_map));
-		let connection_id_map = Arc::new(RwLock::new(connection_id_map));
-		let context_map = Arc::new(RwLock::new(context_map));
+		let connection_index_handle_map = Arc::new(RwLock::new(connection_index_handle_map));
+		let connection_index_id_map = Arc::new(RwLock::new(connection_index_id_map));
+		let step_allocator = Arc::new(RwLock::new(step_allocator));
 		let stopped = self.stopped.clone();
 
 		std::thread::spawn(move || -> Result<(), Error> {
 			loop {
 				let events = events.clone();
 				let ctx = ctx.clone();
-				let connection_id_map = connection_id_map.clone();
-				let connection_handle_map = connection_handle_map.clone();
-				let context_map = context_map.clone();
+				let connection_index_handle_map = connection_index_handle_map.clone();
+				let connection_index_id_map = connection_index_id_map.clone();
+				let step_allocator = step_allocator.clone();
 				let callbacks = callbacks.clone();
 				let callbacks_clone = callbacks.clone();
 				let wakeup = wakeup.clone();
@@ -712,9 +752,10 @@ where
 				let jh = std::thread::spawn(move || -> Result<(), Error> {
 					let mut events: &mut HashSet<Event> = &mut *lockwp!(events);
 					let mut ctx = &mut *lockwp!(ctx);
-					let mut connection_id_map = &mut *lockwp!(connection_id_map);
-					let mut connection_handle_map = &mut *lockwp!(connection_handle_map);
-					let mut context_map = &mut *lockwp!(context_map);
+					let mut connection_index_handle_map =
+						&mut *lockwp!(connection_index_handle_map);
+					let mut connection_index_id_map = &mut *lockwp!(connection_index_id_map);
+					let mut step_allocator = &mut *lockwp!(step_allocator);
 					let callbacks = &mut *lockwp!(callbacks);
 
 					let mut stop = false;
@@ -727,9 +768,9 @@ where
 						&mut events,
 						&wakeup,
 						&callbacks,
-						&mut connection_id_map,
-						&mut connection_handle_map,
-						&mut context_map,
+						&mut connection_index_handle_map,
+						&mut connection_index_id_map,
+						&mut step_allocator,
 						next,
 					) {
 						Ok(do_stop) => {
@@ -751,9 +792,9 @@ where
 							&mut events,
 							&wakeup,
 							&callbacks,
-							&mut connection_id_map,
-							&mut connection_handle_map,
-							&mut context_map,
+							&mut connection_index_handle_map,
+							&mut connection_index_id_map,
+							&mut step_allocator,
 							0,
 						) {
 							Ok(do_stop) => {
@@ -842,9 +883,9 @@ where
 		events: &mut HashSet<Event>,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		start: usize,
 	) -> Result<bool, Error> {
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
@@ -853,10 +894,10 @@ where
 			let stop = Self::process_new(
 				ctx,
 				config,
-				connection_id_map,
-				connection_handle_map,
+				connection_index_handle_map,
+				connection_index_id_map,
+				step_allocator,
 				wakeup,
-				context_map,
 				callbacks,
 			)?;
 			if stop {
@@ -895,9 +936,9 @@ where
 						ctx,
 						config,
 						callbacks,
-						connection_id_map,
-						connection_handle_map,
-						context_map,
+						connection_index_handle_map,
+						connection_index_id_map,
+						step_allocator,
 						wakeup,
 					);
 
@@ -921,9 +962,9 @@ where
 					ctx,
 					config,
 					callbacks,
-					connection_id_map,
-					connection_handle_map,
-					context_map,
+					connection_index_handle_map,
+					connection_index_id_map,
+					step_allocator,
 					wakeup,
 				)?,
 				EventType::Error => Self::process_error_event(
@@ -931,9 +972,9 @@ where
 					ctx,
 					config,
 					callbacks,
-					connection_id_map,
-					connection_handle_map,
-					context_map,
+					connection_index_handle_map,
+					connection_index_id_map,
+					step_allocator,
 					wakeup,
 				)?,
 				EventType::Accept => {} // accepts are returned as read.
@@ -951,9 +992,9 @@ where
 				ctx,
 				config,
 				callbacks,
-				connection_id_map,
-				connection_handle_map,
-				context_map,
+				connection_index_handle_map,
+				connection_index_id_map,
+				step_allocator,
 				wakeup,
 			);
 
@@ -981,13 +1022,35 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
-		let connection_info = match connection_handle_map.get(&event.handle) {
-			Some(connection_info) => connection_info,
+		let connection_info = match connection_index_handle_map.get_raw(&event.handle.to_be_bytes())
+		{
+			Some(index) => {
+				let index = usize::from_be_bytes(index.try_into()?);
+				match step_allocator.get(index)?.data_as::<ConnectionHashData>() {
+					Some(connection_hash_data) => match &connection_hash_data.connection_info {
+						Some(connection_info) => connection_info,
+						None => {
+							return Err(ErrorKind::HandleNotFoundError(format!(
+								"Connection handle was not found for event: {:?}",
+								event
+							))
+							.into());
+						}
+					},
+					None => {
+						return Err(ErrorKind::HandleNotFoundError(format!(
+							"Connection handle was not found for event: {:?}",
+							event
+						))
+						.into())
+					}
+				}
+			}
 			None => {
 				return Err(ErrorKind::HandleNotFoundError(format!(
 					"Connection handle was not found for event: {:?}",
@@ -996,14 +1059,15 @@ where
 				.into())
 			}
 		};
+
 		Self::close_connection(
 			config,
 			connection_info.get_connection_id(),
 			ctx,
 			callbacks,
-			connection_id_map,
-			connection_handle_map,
-			context_map,
+			connection_index_handle_map,
+			connection_index_id_map,
+			step_allocator,
 			wakeup,
 			false,
 		)?;
@@ -1016,24 +1080,64 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event)?;
 
 		let x: Option<(u128, Handle)> = {
-			let connection_info = match connection_handle_map.get(&event.handle) {
-				Some(connection_info) => connection_info,
-				None => {
-					return Err(ErrorKind::HandleNotFoundError(format!(
-						"Connection handle was not found for event: {:?}",
-						event
-					))
-					.into())
-				}
-			};
+			let (connection_info, connection_context) =
+				match connection_index_handle_map.get_raw(&event.handle.to_be_bytes()) {
+					Some(index) => {
+						let index = usize::from_be_bytes(index.try_into()?);
+						match step_allocator
+							.get_mut(index)?
+							.data_as_mut::<ConnectionHashData>()
+						{
+							Some(connection_hash_data) => match &mut connection_hash_data
+								.connection_info
+							{
+								Some(connection_info) => {
+									match &mut connection_hash_data.connection_context {
+										Some(connection_context) => {
+											(connection_info, connection_context)
+										}
+										None => {
+											return Err(ErrorKind::HandleNotFoundError(format!(
+												"Connection handle was not found for event: {:?}",
+												event
+											))
+											.into());
+										}
+									}
+								}
+								None => {
+									return Err(ErrorKind::HandleNotFoundError(format!(
+										"Connection handle was not found for event: {:?}",
+										event
+									))
+									.into());
+								}
+							},
+							None => {
+								return Err(ErrorKind::HandleNotFoundError(format!(
+									"Connection handle was not found for event: {:?}",
+									event
+								))
+								.into())
+							}
+						}
+					}
+					None => {
+						return Err(ErrorKind::HandleNotFoundError(format!(
+							"Connection handle was not found for event: {:?}",
+							event
+						))
+						.into())
+					}
+				};
 
 			let handle = event.handle;
 
@@ -1047,7 +1151,6 @@ where
 							wakeup,
 							callbacks,
 							&c.tls_server_config,
-							context_map,
 						)? {
 							break;
 						}
@@ -1060,7 +1163,14 @@ where
 					let mut sat_count = 0;
 					loop {
 						set_errno(Errno(0));
-						len = Self::process_read(&c, ctx, wakeup, callbacks, config, context_map)?;
+						len = Self::process_read(
+							&c,
+							ctx,
+							wakeup,
+							callbacks,
+							config,
+							connection_context,
+						)?;
 						debug!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							ctx.saturating_handles.remove(&c.get_handle());
@@ -1105,9 +1215,9 @@ where
 					id,
 					ctx,
 					callbacks,
-					connection_id_map,
-					connection_handle_map,
-					context_map,
+					connection_index_handle_map,
+					connection_index_id_map,
+					step_allocator,
 					wakeup,
 					true,
 				)?;
@@ -1123,87 +1233,100 @@ where
 		id: u128,
 		ctx: &mut Context,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 		close_handle: bool,
 	) -> Result<(), Error> {
-		let handle_bytes = connection_id_map.remove_raw(&id.to_be_bytes());
-		let connection_context = context_map.remove(&id);
+		let index_bytes = connection_index_id_map.remove_raw(&id.to_be_bytes());
+		match index_bytes {
+			Some(index_bytes) => {
+				let index = usize::from_be_bytes(index_bytes.try_into()?);
+				match step_allocator
+					.get_mut(index)?
+					.data_as_mut::<ConnectionHashData>()
+				{
+					Some(connection_hash_data) => match &mut connection_hash_data.connection_info {
+						Some(connection_info) => {
+							let handle = connection_info.get_handle(ctx.tid);
+							connection_index_handle_map.remove_raw(&handle.to_be_bytes());
+							let handle_as_usize: usize = handle.try_into()?;
+							ctx.filter_set.set(handle_as_usize, false);
 
-		match handle_bytes {
-			Some(handle_bytes) => {
-				#[cfg(windows)]
-				let handle = u64::from_be_bytes(handle_bytes.try_into()?);
-				#[cfg(unix)]
-				let handle = i32::from_be_bytes(handle_bytes.try_into()?);
-				let connection_info = connection_handle_map.remove(&handle);
-				match connection_info {
-					Some(connection_info) => match connection_info {
-						EventConnectionInfo::ReadWriteConnection(ref c) => {
-							{
-								ctx.input_events.remove(&Event {
-									handle,
-									etype: EventType::Read,
-								});
-								ctx.input_events.remove(&Event {
-									handle,
-									etype: EventType::Write,
-								});
-								ctx.input_events.remove(&Event {
-									handle,
-									etype: EventType::Accept,
-								});
-								ctx.saturating_handles.remove(&handle);
-								{
-									let mut write_status = lockw!(c.write_status)?;
-									(*write_status).set_is_closed();
-									(*write_status).write_buffer.truncate(0);
-								}
-								{
-									let mut cur_connections = lockw!(ctx.cur_connections)?;
-									*cur_connections = (*cur_connections).saturating_sub(1);
-								}
-							}
-							match callbacks.on_close.as_ref() {
-								Some(on_close) => match connection_context {
-									Some(mut connection_context) => (on_close)(
-										&ConnectionData::new(
-											connection_info.get_read_write_connection_info()?,
-											&ctx.guarded_data,
-											&wakeup,
-											ctx.tid,
-										),
-										&mut connection_context,
-										&mut ctx.user_data,
-									)?,
-									None => error!("no context found for id = {}", id)?,
-								},
-								None => warn!("no on_close callback")?,
-							}
+							match connection_info {
+								EventConnectionInfo::ReadWriteConnection(ref c) => {
+									{
+										ctx.input_events.remove(&Event {
+											handle,
+											etype: EventType::Read,
+										});
+										ctx.input_events.remove(&Event {
+											handle,
+											etype: EventType::Write,
+										});
+										ctx.input_events.remove(&Event {
+											handle,
+											etype: EventType::Accept,
+										});
+										ctx.saturating_handles.remove(&handle);
+										{
+											let mut write_status = lockw!(c.write_status)?;
+											(*write_status).set_is_closed();
+											(*write_status).write_buffer.truncate(0);
+										}
+										{
+											let mut cur_connections = lockw!(ctx.cur_connections)?;
+											*cur_connections = (*cur_connections).saturating_sub(1);
+										}
+									}
+									match callbacks.on_close.as_ref() {
+										Some(on_close) => {
+											match connection_hash_data.connection_context.as_mut() {
+												Some(mut connection_context) => (on_close)(
+													&ConnectionData::new(
+														connection_info
+															.get_read_write_connection_info()?,
+														&ctx.guarded_data,
+														&wakeup,
+														ctx.tid,
+													),
+													&mut connection_context,
+													&mut ctx.user_data,
+												)?,
+												None => error!("no context found for id = {}", id)?,
+											}
+										}
+										None => warn!("no on_close callback")?,
+									}
 
-							if close_handle {
-								#[cfg(unix)]
-								unsafe {
-									libc::close(handle);
+									if close_handle {
+										#[cfg(unix)]
+										unsafe {
+											libc::close(handle);
+										}
+										#[cfg(windows)]
+										unsafe {
+											ws2_32::closesocket(handle);
+										}
+									}
 								}
-								#[cfg(windows)]
-								unsafe {
-									ws2_32::closesocket(handle);
-								}
+								_ => warn!("listener closed!")?,
 							}
 						}
-						_ => warn!("listener closed!")?,
+						None => {
+							error!("expected connection_info for {}", id)?;
+						}
 					},
-					None => warn!("no connection info for handle: {}", handle)?,
+					None => {
+						error!("expected connection_hash_data for {}", id)?;
+					}
 				}
 
-				let handle_as_usize: usize = handle.try_into()?;
-				ctx.filter_set.set(handle_as_usize, false);
+				step_allocator.free_index(index)?;
 			}
 			None => {
-				warn!("Tried to close a connection that does not exist: {}", id)?;
+				error!("expected index_bytes for id = {}", id)?;
 			}
 		}
 
@@ -1217,7 +1340,6 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		tls_server_config: &Option<ServerConfig>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
 	) -> Result<bool, Error> {
 		#[cfg(unix)]
 		let handle = unsafe {
@@ -1349,7 +1471,6 @@ where
 				None => error!("no handler for on_accept!")?,
 			};
 
-			context_map.insert(connection_info.get_connection_id(), connection_context);
 			ctx.accepted_connections.push(connection_info);
 			Ok(true)
 		} else {
@@ -1369,7 +1490,7 @@ where
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		config: &EventHandlerConfig,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_context: &mut ConnectionContext,
 	) -> Result<isize, Error> {
 		debug!("read event on {:?}", connection_info)?;
 		let (len, do_read_now) = match connection_info.tls_server {
@@ -1411,7 +1532,7 @@ where
 				callbacks,
 				ctx,
 				config,
-				context_map,
+				connection_context,
 			)?;
 		}
 
@@ -1519,7 +1640,7 @@ where
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_context: &mut ConnectionContext,
 	) -> Result<(), Error> {
 		if len >= 0 {
 			debug!("read {:?}", &ctx.buffer[0..len.try_into()?])?;
@@ -1536,21 +1657,16 @@ where
 				Some(on_read) => {
 					let connection_data =
 						ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
-					let connection_context =
-						context_map.get_mut(&connection_info.get_connection_id());
-					match connection_context {
-						Some(connection_context) => match (on_read)(
-							connection_data,
-							&ctx.buffer[0..len.try_into()?],
-							connection_context,
-							&mut ctx.user_data,
-						) {
-							Ok(_) => {}
-							Err(e) => {
-								warn!("on_read Callback resulted in error: {}", e)?;
-							}
-						},
-						None => warn!("connection context not found!")?,
+					match (on_read)(
+						connection_data,
+						&ctx.buffer[0..len.try_into()?],
+						connection_context,
+						&mut ctx.user_data,
+					) {
+						Ok(_) => {}
+						Err(e) => {
+							warn!("on_read Callback resulted in error: {}", e)?;
+						}
 					}
 				}
 				None => {
@@ -1573,23 +1689,50 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("in process write for event: {:?}", event)?;
 
 		let mut to_remove = vec![];
 
-		let mut connection_info = match connection_handle_map.get_mut(&event.handle) {
-			Some(connection_info) => connection_info,
-			None => {
-				// connection already disconnected.
-				debug!("Connection handle was not found for event: {:?}", event)?;
-				return Ok(());
-			}
-		};
+		let mut connection_info =
+			match connection_index_handle_map.get_raw(&event.handle.to_be_bytes()) {
+				Some(index) => {
+					let index = usize::from_be_bytes(index.try_into()?);
+					match step_allocator
+						.get_mut(index)?
+						.data_as_mut::<ConnectionHashData>()
+					{
+						Some(connection_hash_data) => match &connection_hash_data.connection_info {
+							Some(connection_info) => connection_info,
+							None => {
+								return Err(ErrorKind::HandleNotFoundError(format!(
+									"Connection handle was not found for event: {:?}",
+									event
+								))
+								.into());
+							}
+						},
+						None => {
+							return Err(ErrorKind::HandleNotFoundError(format!(
+								"Connection handle was not found for event: {:?}",
+								event
+							))
+							.into())
+						}
+					}
+				}
+				None => {
+					return Err(ErrorKind::HandleNotFoundError(format!(
+						"Connection handle was not found for event: {:?}",
+						event
+					))
+					.into())
+				}
+			};
 
 		match &mut connection_info {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => {
@@ -1642,9 +1785,9 @@ where
 				rem,
 				ctx,
 				callbacks,
-				connection_id_map,
-				connection_handle_map,
-				context_map,
+				connection_index_handle_map,
+				connection_index_id_map,
+				step_allocator,
 				wakeup,
 				true,
 			)?;
@@ -2066,10 +2209,10 @@ where
 	fn process_new(
 		ctx: &mut Context,
 		_config: &EventHandlerConfig,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
-		context_map: &mut HashMap<u128, ConnectionContext>,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 	) -> Result<bool, Error> {
 		let stop = {
@@ -2089,15 +2232,19 @@ where
 				ctx.add_pending, ctx.tid
 			)?;
 
-			Self::process_pending(ctx, connection_id_map, connection_handle_map, context_map)?;
+			Self::process_pending(
+				ctx,
+				connection_index_handle_map,
+				connection_index_id_map,
+				step_allocator,
+			)?;
 			ctx.add_pending.clear();
 
 			Self::process_nwrites(
 				ctx,
-				connection_id_map,
-				connection_handle_map,
+				connection_index_id_map,
+				step_allocator,
 				wakeup,
-				context_map,
 				callbacks,
 			)?;
 			ctx.nwrites.clear();
@@ -2123,85 +2270,105 @@ where
 
 	fn process_nwrites(
 		ctx: &mut Context,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
-		context_map: &mut HashMap<u128, ConnectionContext>,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
-			match connection_id_map.get_raw(&connection_id.to_be_bytes()) {
-				Some(handle) => {
-					#[cfg(windows)]
-					let handle = u64::from_be_bytes(handle.try_into()?);
-					#[cfg(unix)]
-					let handle = i32::from_be_bytes(handle.try_into()?);
-					match connection_handle_map.get_mut(&handle) {
-						Some(conn_info) => match conn_info {
-							EventConnectionInfo::ReadWriteConnection(item) => {
-								let mut async_complete = false;
-								{
-									let mut write_status = lockw!(item.write_status)?;
-									if (*write_status).write_buffer.len() == 0
-										&& !(*write_status).is_closed() && (*write_status)
-										.async_complete()
-									{
-										async_complete = true;
+			let (connection_info, connection_context) = match connection_index_id_map
+				.get_raw(&connection_id.to_be_bytes())
+			{
+				Some(index) => {
+					let index = usize::from_be_bytes(index.try_into()?);
+					match step_allocator
+						.get_mut(index)?
+						.data_as_mut::<ConnectionHashData>()
+					{
+						Some(connection_hash_data) => match &connection_hash_data.connection_info {
+							Some(connection_info) => {
+								match &mut connection_hash_data.connection_context {
+									Some(connection_context) => {
+										(connection_info, connection_context)
+									}
+									None => {
+										return Err(ErrorKind::HandleNotFoundError(format!(
+											"Connection info was not found for id : {}",
+											connection_id
+										))
+										.into());
 									}
 								}
-
-								if async_complete {
-									match callbacks.on_read.as_ref() {
-										Some(on_read) => {
-											let connection_data = ConnectionData::new(
-												item,
-												&ctx.guarded_data,
-												&wakeup,
-												ctx.tid,
-											);
-											let connection_context =
-												context_map.get_mut(&item.get_connection_id());
-											match connection_context {
-												Some(connection_context) => {
-													connection_context.is_async_complete = true;
-													match (on_read)(
-														connection_data,
-														&ctx.buffer[0..0],
-														connection_context,
-														&mut ctx.user_data,
-													) {
-														Ok(_) => {}
-														Err(e) => {
-															warn!("on_read Callback resulted in error: {}", e)?;
-														}
-													}
-													connection_context.is_async_complete = false;
-												}
-												None => warn!("connection context not found!")?,
-											}
-										}
-										None => warn!("no onread handler found")?,
-									}
-								}
-
-								ctx.input_events.insert(Event {
-									handle: item.handle,
-									etype: EventType::Write,
-								});
 							}
-							EventConnectionInfo::ListenerConnection(item) => {
-								warn!("Got a write request on listener: {:?}", item)?;
+							None => {
+								return Err(ErrorKind::HandleNotFoundError(format!(
+									"Connection info was not found for id : {}",
+									connection_id
+								))
+								.into());
 							}
 						},
 						None => {
-							warn!("Handle not found for connection_id: {}", connection_id)?;
+							return Err(ErrorKind::HandleNotFoundError(format!(
+								"Connection hash_data was not found for id: {}",
+								connection_id
+							))
+							.into())
 						}
 					}
 				}
 				None => {
+					// connection already closed
 					debug!("Attempt to write on closed connection: {:?}", connection_id)?;
-				} // connection already disconnected
+					return Ok(());
+				}
+			};
+
+			match connection_info {
+				EventConnectionInfo::ReadWriteConnection(item) => {
+					let mut async_complete = false;
+					{
+						let mut write_status = lockw!(item.write_status)?;
+						if (*write_status).write_buffer.len() == 0
+							&& !(*write_status).is_closed()
+							&& (*write_status).async_complete()
+						{
+							async_complete = true;
+						}
+					}
+
+					if async_complete {
+						match callbacks.on_read.as_ref() {
+							Some(on_read) => {
+								let connection_data =
+									ConnectionData::new(&item, &ctx.guarded_data, &wakeup, ctx.tid);
+								connection_context.is_async_complete = true;
+								match (on_read)(
+									connection_data,
+									&ctx.buffer[0..0],
+									connection_context,
+									&mut ctx.user_data,
+								) {
+									Ok(_) => {}
+									Err(e) => {
+										warn!("on_read Callback resulted in error: {}", e)?;
+									}
+								}
+								connection_context.is_async_complete = false;
+							}
+							None => warn!("no onread handler found")?,
+						}
+					}
+
+					ctx.input_events.insert(Event {
+						handle: item.handle,
+						etype: EventType::Write,
+					});
+				}
+				EventConnectionInfo::ListenerConnection(item) => {
+					warn!("Got a write request on listener: {:?}", item)?;
+				}
 			}
 		}
 
@@ -2210,21 +2377,22 @@ where
 
 	fn process_pending(
 		ctx: &mut Context,
-		connection_id_map: &mut StaticHash<(), ()>,
-		connection_handle_map: &mut HashMap<Handle, EventConnectionInfo>,
-		context_map: &mut HashMap<u128, ConnectionContext>,
+		connection_index_handle_map: &mut StaticHash<(), ()>,
+		connection_index_id_map: &mut StaticHash<(), ()>,
+		step_allocator: &mut StepAllocator,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
 		for pending in &ctx.add_pending {
+			Self::insert_step_allocator(
+				pending.clone(),
+				step_allocator,
+				connection_index_handle_map,
+				connection_index_id_map,
+				ctx.tid,
+			)?;
+
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					connection_id_map
-						.insert_raw(&item.id.to_be_bytes(), &item.handle.to_be_bytes())?;
-					connection_handle_map.insert(item.handle, pending.clone());
-					if context_map.get(&item.id).is_none() {
-						// clients will not have a context_map entry yet.
-						context_map.insert(item.id, ConnectionContext::new());
-					}
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
@@ -2235,10 +2403,6 @@ where
 					});
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					connection_id_map
-						.insert_raw(&item.id.to_be_bytes(), &item.handles[ctx.tid].to_be_bytes())?;
-					connection_handle_map.insert(item.handles[ctx.tid], pending.clone());
-
 					let handle_info = HandleInfo::new(item.id, 0);
 					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
 					handle_info.to_bytes(&mut handle_info_bytes)?;
@@ -2304,6 +2468,21 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 		}
 	};
 	Ok(len.try_into().unwrap_or(0))
+}
+
+#[derive(Clone)]
+pub struct ConnectionHashData {
+	connection_info: Option<EventConnectionInfo>,
+	connection_context: Option<ConnectionContext>,
+}
+
+impl ConnectionHashData {
+	pub fn new() -> Self {
+		Self {
+			connection_info: None,
+			connection_context: None,
+		}
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -2509,6 +2688,12 @@ impl Debug for ListenerConnection {
 	}
 }
 
+impl ListenerConnection {
+	fn get_handle(&self, tid: usize) -> Handle {
+		self.handles[tid]
+	}
+}
+
 #[derive(Clone, Debug)]
 enum EventConnectionInfo {
 	ListenerConnection(ListenerConnection),
@@ -2560,8 +2745,8 @@ impl EventConnectionInfo {
 
 	fn get_handle(&self, tid: usize) -> Handle {
 		match self {
-			EventConnectionInfo::ListenerConnection(c) => c.handles[tid],
-			EventConnectionInfo::ReadWriteConnection(c) => c.handle,
+			EventConnectionInfo::ListenerConnection(c) => c.get_handle(tid),
+			EventConnectionInfo::ReadWriteConnection(c) => c.get_handle(),
 		}
 	}
 
