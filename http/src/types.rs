@@ -1396,25 +1396,32 @@ impl ApiContext {
 	pub fn async_complete(&mut self) -> Result<(), Error> {
 		// remove the temp file, if it exists
 		// free slabs
-		match &self.temp_file {
-			Some(file) => {
-				if self.slab_ids.len() == 0 {
-					match remove_file(file) {
-						Ok(_) => {}
-						Err(e) => {
-							warn!("could not remove file: '{}' due to:  {}", file, e)?;
-						}
+		if self.slab_ids.len() == 0 {
+			match &self.temp_file {
+				Some(file) => match remove_file(file) {
+					Ok(_) => {}
+					Err(e) => {
+						warn!("could not remove file: '{}' due to:  {}", file, e)?;
 					}
-				} else {
-					let mut slaballocator = lockw!(self.slaballocator)?;
-					for id in &self.slab_ids {
-						slaballocator.free_id(*id)?;
-					}
-				}
+				},
+				None => {}
 			}
-			None => {}
+		} else {
+			let mut slaballocator = lockw!(self.slaballocator)?;
+			for id in &self.slab_ids {
+				slaballocator.free_id(*id)?;
+			}
 		}
 
+		{
+			let mut async_connections = lockw!(self.async_connections)?;
+			async_connections.remove(&self.conn_data.get_connection_id());
+		}
+		self.conn_data.async_complete()?;
+		Ok(())
+	}
+
+	pub(crate) fn async_complete_no_file(&mut self) -> Result<(), Error> {
 		{
 			let mut async_connections = lockw!(self.async_connections)?;
 			async_connections.remove(&self.conn_data.get_connection_id());
@@ -1546,7 +1553,6 @@ impl ApiContext {
 				None
 			}
 		};
-
 		match recv {
 			Some(receive) => {
 				receive.recv()?;

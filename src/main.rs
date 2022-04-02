@@ -645,10 +645,13 @@ fn real_main() -> Result<(), Error> {
 			let mut buf = vec![];
 			buf.resize(content_len, 0u8);
 			let len = ctx.pull_bytes(&mut buf)?;
-
-			let display_str = match std::str::from_utf8(&buf[0..len]) {
-				Ok(display_str) => display_str.to_string(),
-				Err(_) => format!("[{} bytes of non-utf8data]", len),
+			let display_str = if len > 10000 {
+				format!("[{} bytes of data]", len)
+			} else {
+				match std::str::from_utf8(&buf[0..len]) {
+					Ok(display_str) => display_str.to_string(),
+					Err(_) => format!("[{} bytes of non-utf8data]", len),
+				}
 			};
 			warn!("Debug post handler read {} bytes: {}", len, display_str,)?;
 			let response = format!(

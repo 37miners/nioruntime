@@ -661,7 +661,7 @@ where
 				} else {
 					let (rem, pushed) = ctx.push_bytes(nbuf)?;
 					if rem == 0 {
-						ctx.async_complete()?;
+						ctx.async_complete_no_file()?;
 					}
 					(rem == 0, nbuf.len().saturating_sub(pushed))
 				}
