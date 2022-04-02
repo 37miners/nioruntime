@@ -635,10 +635,10 @@ where
 
 	fn process_post_await(
 		connection_id: u128,
-		post_await_connections: &mut HashMap<u128, ApiContext>,
+		conn_info: &mut ConnectionInfo,
 		nbuf: &[u8],
 	) -> Result<(bool, usize), Error> {
-		let (rem, overflow) = match post_await_connections.get_mut(&connection_id) {
+		let (rem, overflow) = match conn_info.api_context.as_mut() {
 			Some(ctx) => {
 				if ctx.is_proxy() {
 					let remaining = ctx.remaining();
@@ -671,15 +671,14 @@ where
 			}
 		};
 		if rem {
-			post_await_connections.remove(&connection_id);
+			conn_info.api_context = None;
 		}
 
 		Ok((true, overflow))
 	}
 
-	#[rustfmt::skip]
 	fn process_on_read(
-                thread_context: &mut ThreadContext,
+		thread_context: &mut ThreadContext,
 		conn_data: &ConnectionData,
 		nbuf: &[u8],
 		ctx: &mut ConnectionContext,
@@ -689,7 +688,7 @@ where
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		evh_params: &EvhParams,
 		slabs: &Arc<RwLock<SlabAllocator>>,
-                ws_handler: Option<&Pin<Box<WsHandler>>>,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
 	) -> Result<(), Error> {
 		let now = SystemTime::now();
 		Self::process_async(ctx, thread_context, conn_data)?;
@@ -702,7 +701,10 @@ where
 
 		debug!(
 			"on_read[{}] = '{:?}', acc_handle={:?}, buffer_len={}",
-			connection_id, nbuf, conn_data.get_accept_handle(), buffer_len
+			connection_id,
+			nbuf,
+			conn_data.get_accept_handle(),
+			buffer_len
 		)?;
 
 		if buffer_len == 0 && nbuf.len() == 0 {
@@ -710,62 +712,89 @@ where
 			return Ok(());
 		}
 
-		match thread_context.health_check_connections.get(&connection_id) {
-			Some(_x) => {
-				process_health_check_response(
-					conn_data, nbuf, &mut thread_context.health_check_connections,
-					&mut thread_context.proxy_state,
-				)?;
-				return Ok(());
-			}
-			None => {}
-		}
-                let is_async = {
-                        let async_connections = lockr!(thread_context.async_connections)?;
-                        async_connections.get(&connection_id).is_some()
-                };
-		let (was_post_await, overflow) = Self::process_post_await(
-			connection_id,
-			&mut thread_context.post_await_connections,
-			nbuf,
-		)?;
+		let is_async = {
+			let async_connections = lockr!(thread_context.async_connections)?;
+			async_connections.get(&connection_id).is_some()
+		};
+		let (was_post_await, overflow) = {
+			let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+				Some(conn_info) => conn_info,
+				None => {
+					error!(
+						"Expected connection info for connection_id={}",
+						connection_id
+					)?;
+					return Err(ErrorKind::InternalError(
+						format!("No connection info for connection id {}", connection_id).into(),
+					)
+					.into());
+				}
+			};
+			Self::process_post_await(connection_id, conn_info, nbuf)?
+		};
 
 		if was_post_await {
 			if overflow > 0 {
 				let nbuf = &nbuf[nbuf.len().saturating_sub(overflow)..];
-                        	Self::process_sync(
-                                	conn_data,
-                                	evh_params,
-                                	nbuf,
-                                	buffer,
-                                	connection_id,
-                                	now,
-                                	thread_context,
-                                	remote_peer,
-                                	api_config,
-                                	cache,
-                                	config,
-                                	api_handler,
+				Self::process_sync(
+					conn_data,
+					evh_params,
+					nbuf,
+					buffer,
+					connection_id,
+					now,
+					thread_context,
+					remote_peer,
+					api_config,
+					cache,
+					config,
+					api_handler,
 					slabs,
-                                        ws_handler,
-                        	)?;
+					ws_handler,
+				)?;
 			}
 			return Ok(());
 		}
 
 		if !is_async {
-			match thread_context.proxy_connections.get(&connection_id) {
+			let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+				Some(conn_info) => conn_info,
+				None => {
+					error!(
+						"Expected connection info for connection_id={}",
+						connection_id
+					)?;
+					return Err(ErrorKind::InternalError(
+						format!("No connection info for connection id {}", connection_id).into(),
+					)
+					.into());
+				}
+			};
+
+			if process_health_check_response(
+				conn_info,
+				conn_data,
+				nbuf,
+				&mut thread_context.proxy_state,
+			)? {
+				return Ok(());
+			}
+
+			match &conn_info.proxy_info {
 				Some(_proxy_info) => {
 					process_proxy_inbound(
-						conn_data, nbuf, &mut thread_context.proxy_connections, &mut thread_context.proxy_state,
-						&mut thread_context.idle_proxy_connections, now,
+						conn_data,
+						nbuf,
+						conn_info,
+						&mut thread_context.proxy_state,
+						&mut thread_context.idle_proxy_connections,
+						now,
 					)?;
 					return Ok(());
 				}
 				None => {}
 			}
 		}
-
 
 		if is_async {
 			// it's async just append to the buffer and return
@@ -774,8 +803,18 @@ where
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
 				let amt = Self::process_buffer(
-					conn_data, buffer, config, cache, api_config, thread_context, api_handler,
-					evh_params, now, remote_peer, slabs, ws_handler,
+					conn_data,
+					buffer,
+					config,
+					cache,
+					api_config,
+					thread_context,
+					api_handler,
+					evh_params,
+					now,
+					remote_peer,
+					slabs,
+					ws_handler,
 				)?;
 				if amt == 0 {
 					break;
@@ -783,7 +822,9 @@ where
 				buffer.drain(..amt);
 
 				// if were now async, we must break
-				if lockr!(thread_context.async_connections)?.get(&connection_id).is_some()
+				if lockr!(thread_context.async_connections)?
+					.get(&connection_id)
+					.is_some()
 				{
 					break;
 				}
@@ -803,7 +844,7 @@ where
 				config,
 				api_handler,
 				slabs,
-                                ws_handler,
+				ws_handler,
 			)?;
 		}
 
@@ -892,16 +933,14 @@ where
 		headers: &HttpHeaders,
 		buffer: &[u8],
 		evh_params: &EvhParams,
-		proxy_connections: &mut HashMap<u128, ProxyInfo>,
-		active_connections: &mut HashMap<u128, ConnectionInfo>,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-		post_await_connections: &mut HashMap<u128, ApiContext>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		active_connections: &mut HashMap<u128, ConnectionInfo>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		remote_peer: &Option<SocketAddr>,
 		now: SystemTime,
-	) -> Result<bool, Error> {
+	) -> Result<(bool, Option<ApiContext>), Error> {
 		let mut proxy_entry = None;
 		match config.proxy_config.extensions.get(headers.extension()) {
 			Some(entry) => proxy_entry = Some(entry),
@@ -921,14 +960,13 @@ where
 				let headers_len = headers.len();
 				let buf_len = buffer.len();
 
-				match process_proxy_outbound(
+				let api_context = match process_proxy_outbound(
 					conn_data,
 					&headers,
 					config,
 					&proxy_entry,
 					buffer,
 					evh_params,
-					proxy_connections,
 					active_connections,
 					idle_proxy_connections,
 					proxy_state,
@@ -945,19 +983,23 @@ where
 								0
 							};
 							if rem > 0 {
-								post_await_connections
-									.insert(conn_data.get_connection_id(), ctx.clone());
+								Some(ctx.clone())
+							} else {
+								None
 							}
+						} else {
+							None
 						}
 					}
 					Err(e) => {
 						warn!("Error while communicating with proxy: {}", e.kind(),)?;
 						conn_data.write(HTTP_ERROR_502)?;
+						None
 					}
 				};
-				true
+				(true, api_context)
 			}
-			None => false,
+			None => (false, None),
 		})
 	}
 
@@ -981,14 +1023,12 @@ where
 	fn check_websocket(
 		conn_data: &ConnectionData,
 		headers: Option<&HttpHeaders>,
-		ws_connections: &mut HashSet<u128>,
+		conn_info: &mut ConnectionInfo,
 		buffer: &[u8],
 		sha1: &mut Sha1,
 		ws_handler: &WsHandler,
 	) -> Result<(bool, usize), Error> {
-		let connection_id = conn_data.get_connection_id();
-
-		Ok(match ws_connections.get(&connection_id).is_some() {
+		Ok(match conn_info.is_websocket {
 			true => {
 				let (close, len) = process_websocket_data(conn_data, buffer, ws_handler)?;
 				if close {
@@ -1005,7 +1045,7 @@ where
 						match sec_key {
 							Some(sec_key) => {
 								if sec_key.len() > 0 {
-									ws_connections.insert(connection_id);
+									conn_info.is_websocket = true;
 									Self::send_websocket_handshake_response(
 										conn_data,
 										&sec_key[0],
@@ -1042,13 +1082,28 @@ where
 	) -> Result<usize, Error> {
 		let mime_map = &thread_context.mime_map;
 		let async_connections = &thread_context.async_connections;
+		let connection_id = conn_data.get_connection_id();
 
 		match ws_handler {
 			Some(ws_handler) => {
+				let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+					Some(conn_info) => conn_info,
+					None => {
+						error!(
+							"Expected connection info for connection_id={}",
+							connection_id
+						)?;
+						return Err(ErrorKind::InternalError(
+							format!("No connection info for connection id {}", connection_id)
+								.into(),
+						)
+						.into());
+					}
+				};
 				let (is_ws, len) = Self::check_websocket(
 					conn_data,
 					None,
-					&mut thread_context.ws_connections,
+					conn_info,
 					buffer,
 					&mut thread_context.sha1,
 					&ws_handler,
@@ -1102,10 +1157,28 @@ where
 
 				match ws_handler {
 					Some(ws_handler) => {
+						let conn_info =
+							match thread_context.active_connections.get_mut(&connection_id) {
+								Some(conn_info) => conn_info,
+								None => {
+									error!(
+										"Expected connection info for connection_id={}",
+										connection_id
+									)?;
+									return Err(ErrorKind::InternalError(
+										format!(
+											"No connection info for connection id {}",
+											connection_id
+										)
+										.into(),
+									)
+									.into());
+								}
+							};
 						let (is_ws, len) = Self::check_websocket(
 							conn_data,
 							Some(&headers),
-							&mut thread_context.ws_connections,
+							conn_info,
 							buffer,
 							&mut thread_context.sha1,
 							&ws_handler,
@@ -1116,7 +1189,6 @@ where
 					}
 					None => {}
 				}
-
 				if headers.content_len()? > config.max_content_len {
 					conn_data.write(HTTP_ERROR_413)?;
 					conn_data.close()?;
@@ -1159,36 +1231,80 @@ where
 				};
 				let mut key = None;
 
-				let was_proxy = Self::process_proxy_request(
-					conn_data,
-					config,
-					&headers,
-					buffer,
-					evh_params,
-					&mut thread_context.proxy_connections,
-					&mut thread_context.active_connections,
-					&mut thread_context.idle_proxy_connections,
-					&mut thread_context.proxy_state,
-					&mut thread_context.post_await_connections,
-					async_connections,
-					slabs,
-					remote_peer,
-					now,
-				)?;
+				let was_proxy = {
+					let (was_proxy, api_context) = Self::process_proxy_request(
+						conn_data,
+						config,
+						&headers,
+						buffer,
+						evh_params,
+						&mut thread_context.idle_proxy_connections,
+						&mut thread_context.proxy_state,
+						async_connections,
+						&mut thread_context.active_connections,
+						slabs,
+						remote_peer,
+						now,
+					)?;
+
+					match api_context {
+						Some(api_context) => {
+							let conn_info =
+								match thread_context.active_connections.get_mut(&connection_id) {
+									Some(conn_info) => conn_info,
+									None => {
+										error!(
+											"Expected connection info for connection_id={}",
+											connection_id
+										)?;
+										return Err(ErrorKind::InternalError(
+											format!(
+												"No connection info for connection id {}",
+												connection_id
+											)
+											.into(),
+										)
+										.into());
+									}
+								};
+							conn_info.api_context = Some(api_context);
+						}
+						None => {}
+					}
+
+					was_proxy
+				};
 
 				// check for api mapping/extension
-				let was_api = Self::process_api(
-					buffer,
-					was_proxy,
-					&headers,
-					api_config,
-					api_handler,
-					&thread_context.async_connections,
-					&mut thread_context.post_await_connections,
-					conn_data,
-					&thread_context.temp_dir,
-					slabs,
-				)?;
+				let was_api = {
+					let conn_info = match thread_context.active_connections.get_mut(&connection_id)
+					{
+						Some(conn_info) => conn_info,
+						None => {
+							error!(
+								"Expected connection info for connection_id={}",
+								connection_id
+							)?;
+							return Err(ErrorKind::InternalError(
+								format!("No connection info for connection id {}", connection_id)
+									.into(),
+							)
+							.into());
+						}
+					};
+					Self::process_api(
+						buffer,
+						was_proxy,
+						&headers,
+						api_config,
+						api_handler,
+						&thread_context.async_connections,
+						conn_info,
+						conn_data,
+						&thread_context.temp_dir,
+						slabs,
+					)?
+				};
 
 				if !was_api && !was_proxy {
 					match Self::send_file(
@@ -1284,7 +1400,7 @@ where
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
-		post_await_connections: &mut HashMap<u128, ApiContext>,
+		conn_info: &mut ConnectionInfo,
 		conn_data: &ConnectionData,
 		temp_dir: &String,
 		slabs: &Arc<RwLock<SlabAllocator>>,
@@ -1323,8 +1439,7 @@ where
 							ctx.push_bytes(&buf[headers_len..end])?;
 						}
 						if rem > 0 {
-							post_await_connections
-								.insert(conn_data.get_connection_id(), ctx.clone());
+							conn_info.api_context = Some(ctx.clone());
 						}
 					}
 					(api_handler)(conn_data, &headers, &mut ctx)?;
@@ -2043,47 +2158,46 @@ where
 
 		let connection_id = conn_data.get_connection_id();
 
-		thread_context.active_connections.remove(&connection_id);
+		let conn_info = thread_context.active_connections.remove(&connection_id);
 
-		thread_context
-			.health_check_connections
-			.remove(&connection_id);
-		match thread_context.proxy_connections.remove(&connection_id) {
-			Some(proxy_info) => {
-				match thread_context
-					.idle_proxy_connections
-					.get_mut(&proxy_info.proxy_entry)
-				{
-					Some(map) => match map.get_mut(&proxy_info.sock_addr) {
-						Some(hashset) => {
-							hashset.remove(&proxy_info);
+		match conn_info {
+			Some(conn_info) => {
+				match conn_info.proxy_info {
+					Some(proxy_info) => {
+						match thread_context
+							.idle_proxy_connections
+							.get_mut(&proxy_info.proxy_entry)
+						{
+							Some(map) => match map.get_mut(&proxy_info.sock_addr) {
+								Some(hashset) => {
+									hashset.remove(&proxy_info);
+								}
+								None => {}
+							},
+							None => {}
 						}
-						None => {}
-					},
-					None => {}
-				}
 
-				let state = thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
-				match state {
-					Some(state) => {
-						state.cur_connections = state.cur_connections.saturating_sub(1);
+						let state = thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
+						match state {
+							Some(state) => {
+								state.cur_connections = state.cur_connections.saturating_sub(1);
+							}
+							None => {}
+						}
 					}
 					None => {}
 				}
-			}
-			None => {}
-		}
 
-		thread_context.ws_connections.remove(&connection_id);
-
-		let api_context = thread_context.post_await_connections.remove(&connection_id);
-		match api_context {
-			Some(api_context) => {
-				let mut post_status = lockw!(api_context.post_status)?;
-				(*post_status).is_disconnected = true;
-				match &(*post_status).send {
-					Some(send) => {
-						let _ = send.send(());
+				match conn_info.api_context {
+					Some(api_context) => {
+						let mut post_status = lockw!(api_context.post_status)?;
+						(*post_status).is_disconnected = true;
+						match &(*post_status).send {
+							Some(send) => {
+								let _ = send.send(());
+							}
+							None => {}
+						}
 					}
 					None => {}
 				}

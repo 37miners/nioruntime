@@ -22,6 +22,7 @@ use nioruntime_deps::sha1::Sha1;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
+use nioruntime_util::bytes_parse_number_header;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig};
 use nioruntime_util::{lockr, lockw};
@@ -79,6 +80,7 @@ pub const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
 pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked\r\n".as_bytes();
 
 pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
+pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
 pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 pub const BACK_R: &[u8] = "\r".as_bytes();
 
@@ -233,6 +235,10 @@ pub struct ConnectionInfo {
 	pub last_data: u128,
 	pub connection: u128,
 	pub conn_data: ConnectionData,
+	pub proxy_info: Option<ProxyInfo>,
+	pub api_context: Option<ApiContext>,
+	pub health_check_info: Option<(ProxyEntry, SocketAddr)>,
+	pub is_websocket: bool,
 }
 
 impl ConnectionInfo {
@@ -245,6 +251,10 @@ impl ConnectionInfo {
 			connection: now,
 			last_data: now,
 			conn_data,
+			proxy_info: None,
+			api_context: None,
+			health_check_info: None,
+			is_websocket: false,
 		}
 	}
 }
@@ -337,12 +347,8 @@ pub struct ThreadContext {
 	pub mime_map: HashMap<Vec<u8>, Vec<u8>>,
 	pub async_connections: Arc<RwLock<HashSet<u128>>>,
 	pub active_connections: HashMap<u128, ConnectionInfo>,
-	pub proxy_connections: HashMap<u128, ProxyInfo>,
 	pub idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
-	pub post_await_connections: HashMap<u128, ApiContext>,
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
-	pub health_check_connections: HashMap<u128, (ProxyEntry, SocketAddr)>,
-	pub ws_connections: HashSet<u128>,
 	pub webroot: Vec<u8>,
 	pub temp_dir: String,
 	pub sha1: Sha1,
@@ -381,8 +387,6 @@ impl ThreadContext {
 			idle_proxy_connections.insert(v.clone(), HashMap::new());
 		}
 
-		let health_check_connections = HashMap::new();
-
 		let webroot = std::str::from_utf8(&config.webroot)?.to_string();
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
@@ -406,15 +410,11 @@ impl ThreadContext {
 			mime_map: HashMap::new(),
 			async_connections: Arc::new(RwLock::new(HashSet::new())),
 			active_connections: HashMap::new(),
-			proxy_connections: HashMap::new(),
-			post_await_connections: HashMap::new(),
 			idle_proxy_connections,
 			proxy_state,
-			health_check_connections,
 			webroot,
 			temp_dir,
 			sha1: Sha1::new(),
-			ws_connections: HashSet::new(),
 		})
 	}
 }
@@ -450,6 +450,7 @@ pub struct HttpHeaders<'a> {
 	header_map: &'a StaticHash<(), ()>,
 	len: usize,
 	range: bool,
+	content_length: usize,
 }
 
 impl<'a> Display for HttpHeaders<'a> {
@@ -519,14 +520,14 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
-		let (len, range) = match Self::parse_headers(
+		let (len, range, content_length) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
 			header_map,
 			key_buf,
 			value_buf,
 		)? {
-			Some((noffset, range)) => (noffset + offset + 2, range),
+			Some((noffset, range, content_length)) => (noffset + offset + 2, range, content_length),
 			None => return Ok(None),
 		};
 
@@ -543,10 +544,13 @@ impl<'a> HttpHeaders<'a> {
 			header_map,
 			len,
 			range,
+			content_length,
 		}))
 	}
 
 	pub fn content_len(&self) -> Result<usize, Error> {
+		Ok(self.content_length)
+		/*
 		match self.get_header_value(&"Content-Length".to_string())? {
 			Some(clen) => {
 				if clen.len() >= 1 {
@@ -557,6 +561,7 @@ impl<'a> HttpHeaders<'a> {
 			}
 			None => Ok(0),
 		}
+				*/
 	}
 
 	pub fn extension(&self) -> &[u8] {
@@ -784,13 +789,14 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool)>, Error> {
+	) -> Result<Option<(usize, bool, usize)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
 		let mut key_offset = 0;
 		let mut value_offset = 4;
 		let mut range = false;
+		let mut content_length = 0;
 
 		loop {
 			if i > config.max_header_size {
@@ -831,7 +837,7 @@ impl<'a> HttpHeaders<'a> {
 								value_buf[j] = 0;
 							}
 							// no headers
-							return Ok(Some((i + 2, range)));
+							return Ok(Some((i + 2, range, content_length)));
 						}
 					}
 					for j in 0..key_offset {
@@ -880,6 +886,17 @@ impl<'a> HttpHeaders<'a> {
 
 				if bytes_eq(&key_buf[0..key_offset], RANGE_BYTES) {
 					range = true;
+				} else if bytes_eq(&key_buf[0..key_offset], CONTENT_LEN_BYTES) {
+					content_length = match bytes_parse_number_header(
+						buffer,
+						i.saturating_sub(key_offset).saturating_sub(value_offset),
+					) {
+						Some(content_length) => content_length,
+						None => {
+							warn!("could not parse Content-Length header")?;
+							0
+						}
+					};
 				}
 				match header_map.get_raw(&key_buf) {
 					Some(value) => {
@@ -934,7 +951,7 @@ impl<'a> HttpHeaders<'a> {
 				if i + 2 < buffer_len && buffer[i + 1] == '\r' as u8 && buffer[i + 2] == '\n' as u8
 				{
 					// end of headers
-					return Ok(Some(((i + 3), range)));
+					return Ok(Some(((i + 3), range, content_length)));
 				}
 			}
 			i += 1;

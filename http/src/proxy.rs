@@ -41,13 +41,12 @@ warn!();
 pub fn process_proxy_inbound(
 	conn_data: &ConnectionData,
 	nbuf: &[u8],
-	proxy_connections: &mut HashMap<u128, ProxyInfo>,
+	conn_info: &mut ConnectionInfo,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	now: SystemTime,
 ) -> Result<(), Error> {
-	let proxy_info = proxy_connections.get_mut(&conn_data.get_connection_id());
-	match proxy_info {
+	match conn_info.proxy_info.as_mut() {
 		Some(proxy_info) => {
 			let (is_complete, is_close, _end_response) = if proxy_info.buffer.len() > 0 {
 				proxy_info.buffer.extend_from_slice(nbuf);
@@ -167,23 +166,21 @@ pub fn set_last(
 }
 
 pub fn process_health_check_response(
+	conn_info: &mut ConnectionInfo,
 	conn_data: &ConnectionData,
 	nbuf: &[u8],
-	health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
 	let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-	let proxy_entry = health_check_connections.get(&conn_data.get_connection_id());
-
-	match proxy_entry {
+	match &conn_info.health_check_info {
 		Some((proxy_entry, sock_addr)) => {
 			match &proxy_entry.health_check {
 				Some(health_check) => {
 					// TODO: check cross boundry reply (unlikely, but possible)
 					if bytes_find(nbuf, health_check.expect_text.as_bytes()).is_some() {
-						match proxy_state.get_mut(proxy_entry) {
+						match proxy_state.get_mut(&proxy_entry) {
 							Some(_state) => {
-								set_last(now, now, sock_addr, proxy_entry, proxy_state)?;
+								set_last(now, now, &sock_addr, &proxy_entry, proxy_state)?;
 							}
 							None => {
 								warn!("unexpected none")?;
@@ -196,13 +193,10 @@ pub fn process_health_check_response(
 					warn!("unexepected none2")?;
 				}
 			}
+			Ok(true)
 		}
-		None => {
-			warn!("unexpected none3")?;
-		}
+		None => Ok(false),
 	}
-
-	Ok(())
 }
 
 pub fn check_complete(buffer: &[u8]) -> Result<(bool, bool, usize), Error> {
@@ -296,7 +290,6 @@ pub fn process_proxy_outbound(
 	proxy_entry: &ProxyEntry,
 	buffer: &[u8],
 	evh_params: &EvhParams,
-	proxy_connections: &mut HashMap<u128, ProxyInfo>,
 	active_connections: &mut HashMap<u128, ConnectionInfo>,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
@@ -493,15 +486,22 @@ pub fn process_proxy_outbound(
 
 	let proxy_info = match proxy_info {
 		Some(ref mut proxy_info) => {
-			match proxy_connections.get_mut(&proxy_info.proxy_conn.get_connection_id()) {
-				Some(proxy_info) => {
-					proxy_info.response_conn_data = Some(inbound.clone());
-					proxy_info.request_start_time = now.duration_since(UNIX_EPOCH)?.as_micros();
-				}
+			match active_connections.get_mut(&proxy_info.proxy_conn.get_connection_id()) {
+				Some(conn_info) => match conn_info.proxy_info.as_mut() {
+					Some(proxy_info) => {
+						proxy_info.response_conn_data = Some(inbound.clone());
+						proxy_info.request_start_time = now.duration_since(UNIX_EPOCH)?.as_micros();
+					}
+					None => {
+						return Err(
+							ErrorKind::InternalError("proxy connection not found".into()).into(),
+						);
+					}
+				},
 				None => {
 					return Err(
 						ErrorKind::InternalError("proxy connection not found".into()).into(),
-					)
+					);
 				}
 			}
 			proxy_info.clone()
@@ -549,12 +549,10 @@ pub fn process_proxy_outbound(
 				request_start_time: now.duration_since(UNIX_EPOCH)?.as_micros(),
 			};
 
-			proxy_connections.insert(conn_data.get_connection_id(), proxy_info.clone());
+			let mut connection_info = ConnectionInfo::new(conn_data.clone());
+			connection_info.proxy_info = Some(proxy_info.clone());
 
-			active_connections.insert(
-				conn_data.get_connection_id(),
-				ConnectionInfo::new(conn_data.clone()),
-			);
+			active_connections.insert(conn_data.get_connection_id(), connection_info);
 
 			proxy_info
 		}
@@ -680,7 +678,6 @@ pub fn process_health_check(
 							&upstream.sock_addr,
 							tid,
 							evh_params,
-							&mut thread_context.health_check_connections,
 							&mut thread_context.active_connections,
 							k,
 							&hc.path,
@@ -710,7 +707,6 @@ fn check(
 	sock_addr: &SocketAddr,
 	tid: usize,
 	evh_params: &EvhParams,
-	health_check_connections: &mut HashMap<u128, (ProxyEntry, SocketAddr)>,
 	active_connections: &mut HashMap<u128, ConnectionInfo>,
 	proxy_entry: &ProxyEntry,
 	path: &String,
@@ -719,16 +715,11 @@ fn check(
 	let mut health_check = HEALTH_CHECK_VEC[0].clone();
 	health_check.extend_from_slice(path.as_bytes());
 	health_check.extend_from_slice(&HEALTH_CHECK_VEC[1]);
-	health_check_connections.insert(
-		conn_data.get_connection_id(),
-		(proxy_entry.clone(), sock_addr.clone()),
-	);
 	conn_data.write(&health_check)?;
 
-	active_connections.insert(
-		conn_data.get_connection_id(),
-		ConnectionInfo::new(conn_data.clone()),
-	);
+	let mut connection_info = ConnectionInfo::new(conn_data.clone());
+	connection_info.health_check_info = Some((proxy_entry.clone(), sock_addr.clone()));
+	active_connections.insert(conn_data.get_connection_id(), connection_info);
 
 	Ok(true)
 }
