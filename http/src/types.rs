@@ -1338,6 +1338,23 @@ impl Default for HttpApiConfig {
 }
 
 #[derive(Clone)]
+pub(crate) struct PostStatus {
+	pub(crate) is_disconnected: bool,
+	slab_woffset: usize,
+	pub(crate) send: Option<SyncSender<()>>,
+}
+
+impl PostStatus {
+	fn new() -> Self {
+		Self {
+			is_disconnected: false,
+			slab_woffset: 0,
+			send: None,
+		}
+	}
+}
+
+#[derive(Clone)]
 pub struct ApiContext {
 	async_connections: Arc<RwLock<HashSet<u128>>>,
 	conn_data: ConnectionData,
@@ -1345,13 +1362,12 @@ pub struct ApiContext {
 	offset: usize,
 	expected: usize,
 	rem: usize,
-	send: Arc<RwLock<Option<SyncSender<()>>>>,
 	slaballocator: Arc<RwLock<SlabAllocator>>,
 	slab_ids: Vec<u64>,
 	slab_size: usize,
-	slab_woffset: Arc<RwLock<usize>>,
 	is_proxy: bool,
 	proxy_conn: Option<ConnectionData>,
+	pub(crate) post_status: Arc<RwLock<PostStatus>>,
 }
 
 impl ApiContext {
@@ -1369,11 +1385,10 @@ impl ApiContext {
 			offset: 0,
 			expected: 0,
 			rem: 0,
-			send: Arc::new(RwLock::new(None)),
 			slaballocator,
 			slab_ids: vec![],
 			slab_size: 0,
-			slab_woffset: Arc::new(RwLock::new(0)),
+			post_status: Arc::new(RwLock::new(PostStatus::new())),
 			is_proxy,
 			proxy_conn,
 		}
@@ -1396,6 +1411,17 @@ impl ApiContext {
 	pub fn async_complete(&mut self) -> Result<(), Error> {
 		// remove the temp file, if it exists
 		// free slabs
+		self.remove_file_and_free_slabs()?;
+
+		{
+			let mut async_connections = lockw!(self.async_connections)?;
+			async_connections.remove(&self.conn_data.get_connection_id());
+		}
+		self.conn_data.async_complete()?;
+		Ok(())
+	}
+
+	pub(crate) fn remove_file_and_free_slabs(&mut self) -> Result<(), Error> {
 		if self.slab_ids.len() == 0 {
 			match &self.temp_file {
 				Some(file) => match remove_file(file) {
@@ -1411,13 +1437,8 @@ impl ApiContext {
 			for id in &self.slab_ids {
 				slaballocator.free_id(*id)?;
 			}
+			self.slab_ids = vec![];
 		}
-
-		{
-			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove(&self.conn_data.get_connection_id());
-		}
-		self.conn_data.async_complete()?;
 		Ok(())
 	}
 
@@ -1440,7 +1461,7 @@ impl ApiContext {
 
 	pub fn copy_bytes(&mut self, dst: String) -> Result<(), Error> {
 		let recv = {
-			let mut sender = lockw!(self.send)?;
+			let mut post_status = lockw!(self.post_status)?;
 			let cur_size = match self.slab_ids.len() {
 				0 => match &self.temp_file {
 					Some(file) => {
@@ -1455,14 +1476,14 @@ impl ApiContext {
 					}
 					None => 0,
 				},
-				_ => *lockr!(self.slab_woffset)?,
+				_ => post_status.slab_woffset,
 			};
 
 			if cur_size < self.expected {
 				let send: SyncSender<()>;
 				let recv: Receiver<()>;
 				(send, recv) = sync_channel(1);
-				*sender = Some(send);
+				(*post_status).send = Some(send);
 				Some(recv)
 			} else {
 				None
@@ -1525,7 +1546,7 @@ impl ApiContext {
 	// server loop.
 	pub fn pull_bytes(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
 		let recv = {
-			let mut sender = lockw!(self.send)?;
+			let mut post_status = lockw!(self.post_status)?;
 			let cur_size = match self.slab_ids.len() {
 				0 => match &self.temp_file {
 					Some(file) => {
@@ -1540,14 +1561,14 @@ impl ApiContext {
 					}
 					None => 0,
 				},
-				_ => *lockr!(self.slab_woffset)?,
+				_ => post_status.slab_woffset,
 			};
 
 			if cur_size < self.expected {
 				let send: SyncSender<()>;
 				let recv: Receiver<()>;
 				(send, recv) = sync_channel(1);
-				*sender = Some(send);
+				(*post_status).send = Some(send);
 				Some(recv)
 			} else {
 				None
@@ -1558,6 +1579,15 @@ impl ApiContext {
 				receive.recv()?;
 			}
 			None => {}
+		}
+
+		{
+			let post_status = lockr!(self.post_status)?;
+			if (*post_status).is_disconnected {
+				return Err(
+					ErrorKind::ConnectionCloseError("Connection already closed".into()).into(),
+				);
+			}
 		}
 
 		let mut requested = self.expected.saturating_sub(self.offset);
@@ -1621,7 +1651,6 @@ impl ApiContext {
 			let slab_size = slaballocator.slab_size() as usize;
 			let size_available = free_count * slab_size;
 			self.slab_size = slab_size;
-
 			if size_available >= expected {
 				let mut slabs_needed = expected / slab_size;
 				if expected % slab_size > 0 {
@@ -1661,20 +1690,19 @@ impl ApiContext {
 
 		self.rem = self.rem.saturating_sub(buf.len());
 
-		let send = self.send.clone();
+		let post_status = self.post_status.clone();
 		let buf: Vec<u8> = buf.to_vec();
 		let rem = self.rem;
 		let slab_ids = self.slab_ids.clone();
 		let slab_size = self.slab_size;
 		let slaballocator = self.slaballocator.clone();
-		let slab_woffset = self.slab_woffset.clone();
 		let temp_file = self.temp_file.clone();
 
 		let (seqsend, seqrecv) = channel::<()>();
 
 		std::thread::spawn(move || -> Result<(), Error> {
 			// first we obtain the lock for this API context
-			let send = lockw!(send)?;
+			let mut post_status = lockw!(post_status)?;
 
 			seqsend.send(()).map_err(|e| {
 				let error: Error = ErrorKind::ApplicationError(format!("Send error: {}", e)).into();
@@ -1700,7 +1728,7 @@ impl ApiContext {
 					file.write_all(&buf)?;
 				}
 				_ => {
-					let slab_woffset_value = { *lockr!(slab_woffset)? };
+					let slab_woffset_value = post_status.slab_woffset;
 					let buf_len = buf.len();
 
 					let mut i = slab_woffset_value;
@@ -1726,14 +1754,13 @@ impl ApiContext {
 					}
 
 					{
-						let mut slab_woffset = lockw!(slab_woffset)?;
-						*slab_woffset += buf_len;
+						(*post_status).slab_woffset += buf_len;
 					}
 				}
 			}
 
 			if rem == 0 {
-				match &*send {
+				match &(*post_status).send {
 					Some(send) => {
 						send.send(()).map_err(|e| {
 							let error: Error =

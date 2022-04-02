@@ -1313,9 +1313,7 @@ where
 						} else {
 							0
 						};
-						if clen > 0 {
-							ctx.set_expected(clen, temp_dir, false)?;
-						}
+						ctx.set_expected(clen, temp_dir, false)?;
 						if buf_len > headers_len {
 							let end = if clen + headers_len > buf_len {
 								buf_len
@@ -2077,6 +2075,21 @@ where
 		}
 
 		thread_context.ws_connections.remove(&connection_id);
+
+		let api_context = thread_context.post_await_connections.remove(&connection_id);
+		match api_context {
+			Some(api_context) => {
+				let mut post_status = lockw!(api_context.post_status)?;
+				(*post_status).is_disconnected = true;
+				match &(*post_status).send {
+					Some(send) => {
+						let _ = send.send(());
+					}
+					None => {}
+				}
+			}
+			None => {}
+		}
 
 		// async connections should be removed by user, but if left to this point, we remove.
 		// we don't want to block in the general case, so we try a read lock first.

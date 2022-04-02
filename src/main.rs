@@ -19,8 +19,8 @@ use nioruntime_deps::dirs;
 use nioruntime_deps::fsutils;
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_err::{Error, ErrorKind};
-use nioruntime_evh::EventHandlerConfig;
-use nioruntime_http::{send_websocket_message, HttpConfig, HttpServer, ListenerType};
+use nioruntime_evh::{ConnectionData, EventHandlerConfig};
+use nioruntime_http::{send_websocket_message, ApiContext, HttpConfig, HttpServer, ListenerType};
 use nioruntime_log::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -642,24 +642,12 @@ fn real_main() -> Result<(), Error> {
 		let conn_data = conn_data.clone();
 		let mut ctx = ctx.clone();
 		std::thread::spawn(move || -> Result<(), Error> {
-			let mut buf = vec![];
-			buf.resize(content_len, 0u8);
-			let len = ctx.pull_bytes(&mut buf)?;
-			let display_str = if len > 10000 {
-				format!("[{} bytes of data]", len)
-			} else {
-				match std::str::from_utf8(&buf[0..len]) {
-					Ok(display_str) => display_str.to_string(),
-					Err(_) => format!("[{} bytes of non-utf8data]", len),
+			match pull_post_thread(content_len, &mut ctx, &conn_data) {
+				Ok(_) => {}
+				Err(e) => {
+					warn!("pull post generated error: {}", e)?;
 				}
-			};
-			warn!("Debug post handler read {} bytes: {}", len, display_str,)?;
-			let response = format!(
-				"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\nPost_Data was: {}",
-				display_str.len() + 15,
-				display_str
-			);
-			conn_data.write(response.as_bytes())?;
+			}
 			ctx.async_complete()?;
 			Ok(())
 		});
@@ -667,5 +655,31 @@ fn real_main() -> Result<(), Error> {
 	})?;
 	http.start()?;
 	std::thread::park();
+	Ok(())
+}
+
+fn pull_post_thread(
+	content_len: usize,
+	ctx: &mut ApiContext,
+	conn_data: &ConnectionData,
+) -> Result<(), Error> {
+	let mut buf = vec![];
+	buf.resize(content_len, 0u8);
+	let len = ctx.pull_bytes(&mut buf)?;
+	let display_str = if len > 10000 {
+		format!("[{} bytes of data]", len)
+	} else {
+		match std::str::from_utf8(&buf[0..len]) {
+			Ok(display_str) => display_str.to_string(),
+			Err(_) => format!("[{} bytes of non-utf8data]", len),
+		}
+	};
+	warn!("Debug post handler read {} bytes: {}", len, display_str,)?;
+	let response = format!(
+		"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\nPost_Data was: {}",
+		display_str.len() + 15,
+		display_str
+	);
+	conn_data.write(response.as_bytes())?;
 	Ok(())
 }

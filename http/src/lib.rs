@@ -21,7 +21,7 @@ mod websocket;
 
 pub use crate::http::HttpServer;
 pub use crate::types::{
-	HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ListenerType, ProxyConfig, ProxyEntry,
-	ProxyRotation, Upstream,
+	ApiContext, HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ListenerType, ProxyConfig,
+	ProxyEntry, ProxyRotation, Upstream,
 };
 pub use crate::websocket::{build_messages, send_websocket_message};
