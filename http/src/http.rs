@@ -1533,7 +1533,7 @@ where
 			return Ok(Some(key));
 		} else if !found {
 			let mut path2 = path.clone();
-			path2.extend_from_slice("/index.html".as_bytes());
+			path2.extend_from_slice(INDEX_HTML_BYTES);
 			let (found, need_update, key) = Self::try_send_cache(
 				conn_data,
 				config,
@@ -1566,7 +1566,7 @@ where
 		};
 
 		let (path, md) = if md.is_dir() {
-			path.extend_from_slice("/index.html".as_bytes());
+			path.extend_from_slice(INDEX_HTML_BYTES);
 			let md = match metadata(std::str::from_utf8(&path)?) {
 				Ok(md) => md,
 				Err(_e) => {

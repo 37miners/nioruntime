@@ -82,6 +82,7 @@ pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked\r\n
 pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
 pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
 pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
+pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
 pub const BACK_R: &[u8] = "\r".as_bytes();
 
 pub const GET_BYTES: &[u8] = "GET ".as_bytes();
