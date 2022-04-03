@@ -2248,8 +2248,6 @@ where
 		Self::init_user_data(user_data, config)?;
 		let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
 
-		debug!("housekeeping thread called")?;
-
 		process_health_check(thread_context, config, evh_params, tid)?;
 
 		for (_id, connection) in &thread_context.active_connections {

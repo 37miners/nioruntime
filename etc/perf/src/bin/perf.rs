@@ -826,7 +826,7 @@ fn run_thread(
 		};
 
 		wbuf.append(&mut xbuf);
-		rbuf.resize(1000, 0u8);
+		rbuf.resize(1_000_000, 0u8);
 	} else {
 		let cap = if max > min { max } else { min };
 		rbuf.resize(cap, 0u8);
@@ -1056,6 +1056,9 @@ fn run_thread(
 				break;
 			}
 
+			if len == 0 {
+				warn!("lensum={},wlen={}", len_sum, wlen)?;
+			}
 			assert!(len != 0);
 		}
 

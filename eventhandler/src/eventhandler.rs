@@ -1036,7 +1036,7 @@ where
 						Some(connection_info) => connection_info,
 						None => {
 							return Err(ErrorKind::HandleNotFoundError(format!(
-								"Connection handle was not found for event: {:?}",
+								"Connection handle was not found for event 1: {:?}",
 								event
 							))
 							.into());
@@ -1044,7 +1044,7 @@ where
 					},
 					None => {
 						return Err(ErrorKind::HandleNotFoundError(format!(
-							"Connection handle was not found for event: {:?}",
+							"Connection handle was not found for event 2: {:?}",
 							event
 						))
 						.into())
@@ -1053,7 +1053,7 @@ where
 			}
 			None => {
 				return Err(ErrorKind::HandleNotFoundError(format!(
-					"Connection handle was not found for event: {:?}",
+					"Connection handle was not found for event 3: {:?}",
 					event
 				))
 				.into())
@@ -1106,7 +1106,7 @@ where
 										}
 										None => {
 											return Err(ErrorKind::HandleNotFoundError(format!(
-												"Connection handle was not found for event: {:?}",
+												"Connection handle was not found for event 4: {:?}",
 												event
 											))
 											.into());
@@ -1115,7 +1115,7 @@ where
 								}
 								None => {
 									return Err(ErrorKind::HandleNotFoundError(format!(
-										"Connection handle was not found for event: {:?}",
+										"Connection handle was not found for event 5: {:?}",
 										event
 									))
 									.into());
@@ -1123,7 +1123,7 @@ where
 							},
 							None => {
 								return Err(ErrorKind::HandleNotFoundError(format!(
-									"Connection handle was not found for event: {:?}",
+									"Connection handle was not found for event 6: {:?}",
 									event
 								))
 								.into())
@@ -1132,7 +1132,7 @@ where
 					}
 					None => {
 						return Err(ErrorKind::HandleNotFoundError(format!(
-							"Connection handle was not found for event: {:?}",
+							"Connection handle was not found for event 7: {:?}",
 							event
 						))
 						.into())
@@ -1710,7 +1710,7 @@ where
 							Some(connection_info) => connection_info,
 							None => {
 								return Err(ErrorKind::HandleNotFoundError(format!(
-									"Connection handle was not found for event: {:?}",
+									"Connection handle was not found for event 8: {:?}",
 									event
 								))
 								.into());
@@ -1718,7 +1718,7 @@ where
 						},
 						None => {
 							return Err(ErrorKind::HandleNotFoundError(format!(
-								"Connection handle was not found for event: {:?}",
+								"Connection handle was not found for event 9: {:?}",
 								event
 							))
 							.into())
@@ -1727,7 +1727,7 @@ where
 				}
 				None => {
 					return Err(ErrorKind::HandleNotFoundError(format!(
-						"Connection handle was not found for event: {:?}",
+						"Connection handle was not found for event 10: {:?}",
 						event
 					))
 					.into())
