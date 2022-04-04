@@ -79,7 +79,10 @@ pub const CONTENT_LENGTH: &[u8] = "\r\nContent-Length: ".as_bytes();
 pub const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
 pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked\r\n".as_bytes();
 
+pub const UPGRADE_BYTES: &[u8] = "Upgrade".as_bytes();
+pub const WEBSOCKET_BYTES: &[u8] = "websocket".as_bytes();
 pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
+pub const EXPECT_BYTES: &[u8] = "Expect".as_bytes();
 pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
 pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
@@ -453,6 +456,8 @@ pub struct HttpHeaders<'a> {
 	header_map: &'a StaticHash<(), ()>,
 	len: usize,
 	range: bool,
+	expect: bool,
+	websocket_upgrade: bool,
 	content_length: usize,
 }
 
@@ -524,14 +529,20 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
-		let (len, range, content_length) = match Self::parse_headers(
+		let (len, range, content_length, websocket_upgrade, expect) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
 			header_map,
 			key_buf,
 			value_buf,
 		)? {
-			Some((noffset, range, content_length)) => (noffset + offset + 2, range, content_length),
+			Some((noffset, range, content_length, websocket_upgrade, expect)) => (
+				noffset + offset + 2,
+				range,
+				content_length,
+				websocket_upgrade,
+				expect,
+			),
 			None => return Ok(None),
 		};
 
@@ -548,28 +559,26 @@ impl<'a> HttpHeaders<'a> {
 			header_map,
 			len,
 			range,
+			expect,
+			websocket_upgrade,
 			content_length,
 		}))
 	}
 
 	pub fn content_len(&self) -> Result<usize, Error> {
 		Ok(self.content_length)
-		/*
-		match self.get_header_value(&"Content-Length".to_string())? {
-			Some(clen) => {
-				if clen.len() >= 1 {
-					Ok(clen[0].parse()?)
-				} else {
-					Ok(0)
-				}
-			}
-			None => Ok(0),
-		}
-				*/
 	}
 
 	pub fn extension(&self) -> &[u8] {
 		self.extension
+	}
+
+	pub fn has_websocket_upgrade(&self) -> bool {
+		self.websocket_upgrade
+	}
+
+	pub fn has_expect(&self) -> bool {
+		self.expect
 	}
 
 	pub fn has_range(&self) -> bool {
@@ -793,13 +802,15 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool, usize)>, Error> {
+	) -> Result<Option<(usize, bool, usize, bool, bool)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
 		let mut key_offset = 0;
 		let mut value_offset = 4;
 		let mut range = false;
+		let mut websocket_upgrade = false;
+		let mut expect = false;
 		let mut content_length = 0;
 
 		loop {
@@ -841,7 +852,13 @@ impl<'a> HttpHeaders<'a> {
 								value_buf[j] = 0;
 							}
 							// no headers
-							return Ok(Some((i + 2, range, content_length)));
+							return Ok(Some((
+								i + 2,
+								range,
+								content_length,
+								websocket_upgrade,
+								expect,
+							)));
 						}
 					}
 					for j in 0..key_offset {
@@ -901,7 +918,15 @@ impl<'a> HttpHeaders<'a> {
 							0
 						}
 					};
+				} else if value_offset > 4
+					&& bytes_eq(&key_buf[0..key_offset], UPGRADE_BYTES)
+					&& bytes_eq(&value_buf[4..value_offset], WEBSOCKET_BYTES)
+				{
+					websocket_upgrade = true;
+				} else if bytes_eq(&key_buf[0..key_offset], EXPECT_BYTES) {
+					expect = true;
 				}
+
 				match header_map.get_raw(&key_buf) {
 					Some(value) => {
 						let mut offset = 0;
@@ -955,7 +980,13 @@ impl<'a> HttpHeaders<'a> {
 				if i + 2 < buffer_len && buffer[i + 1] == '\r' as u8 && buffer[i + 2] == '\n' as u8
 				{
 					// end of headers
-					return Ok(Some(((i + 3), range, content_length)));
+					return Ok(Some((
+						(i + 3),
+						range,
+						content_length,
+						websocket_upgrade,
+						expect,
+					)));
 				}
 			}
 			i += 1;
