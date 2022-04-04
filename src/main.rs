@@ -599,7 +599,6 @@ fn real_main() -> Result<(), Error> {
 	let mut p = PathBuf::from(mainlog.clone());
 	p.pop();
 	fsutils::mkdir(&p.as_path().display().to_string());
-	File::create(mainlog.clone())?;
 
 	log_config!(LogConfig {
 		show_line_num: false,

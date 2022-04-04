@@ -24,6 +24,7 @@ use crate::rand::random;
 use std::convert::TryInto;
 use std::fs::{canonicalize, metadata, File, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -435,12 +436,18 @@ impl Log {
 		let has_rotated = false;
 
 		let file = match config.file_path.clone() {
-			Some(file_path) => Some(
-				OpenOptions::new()
-					.append(true)
-					.create(true)
-					.open(file_path)?,
-			),
+			Some(file_path) => {
+				if Path::new(&file_path).exists() {
+					Some(OpenOptions::new().append(true).open(file_path)?)
+				} else {
+					Some(
+						OpenOptions::new()
+							.append(true)
+							.create(true)
+							.open(file_path)?,
+					)
+				}
+			}
 			None => None,
 		};
 

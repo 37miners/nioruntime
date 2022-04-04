@@ -290,14 +290,20 @@ pub fn process_proxy_outbound(
 	proxy_entry: &ProxyEntry,
 	buffer: &[u8],
 	evh_params: &EvhParams,
-	active_connections: &mut HashMap<u128, ConnectionInfo>,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 	async_connections: &Arc<RwLock<HashSet<u128>>>,
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
 	slabs: &Arc<RwLock<SlabAllocator>>,
-) -> Result<ApiContext, Error> {
+) -> Result<
+	(
+		ApiContext,
+		Option<ConnectionInfo>,
+		Option<(ConnectionData, u128)>,
+	),
+	Error,
+> {
 	// select a random health socket
 	let state = proxy_state.get(proxy_entry);
 	let now_millis = now.duration_since(UNIX_EPOCH)?.as_millis();
@@ -329,7 +335,7 @@ pub fn process_proxy_outbound(
 				ctx.set_expected(rem, &"".to_string(), true)?;
 				ctx.set_async()?;
 
-				return Ok(ctx);
+				return Ok((ctx, None, None));
 			} else {
 				match &proxy_entry.proxy_rotation {
 					ProxyRotation::Random => {
@@ -484,28 +490,12 @@ pub fn process_proxy_outbound(
 		None => None,
 	};
 
-	let proxy_info = match proxy_info {
-		Some(ref mut proxy_info) => {
-			match active_connections.get_mut(&proxy_info.proxy_conn.get_connection_id()) {
-				Some(conn_info) => match conn_info.proxy_info.as_mut() {
-					Some(proxy_info) => {
-						proxy_info.response_conn_data = Some(inbound.clone());
-						proxy_info.request_start_time = now.duration_since(UNIX_EPOCH)?.as_micros();
-					}
-					None => {
-						return Err(
-							ErrorKind::InternalError("proxy connection not found".into()).into(),
-						);
-					}
-				},
-				None => {
-					return Err(
-						ErrorKind::InternalError("proxy connection not found".into()).into(),
-					);
-				}
-			}
-			proxy_info.clone()
-		}
+	let (proxy_info, nconn, update_info) = match proxy_info {
+		Some(ref mut proxy_info) => (
+			proxy_info.clone(),
+			None,
+			Some((inbound.clone(), proxy_info.proxy_conn.get_connection_id())),
+		),
 		None => {
 			let tid = inbound.tid();
 			let state = proxy_state.get_mut(proxy_entry);
@@ -552,9 +542,7 @@ pub fn process_proxy_outbound(
 			let mut connection_info = ConnectionInfo::new(conn_data.clone());
 			connection_info.proxy_info = Some(proxy_info.clone());
 
-			active_connections.insert(conn_data.get_connection_id(), connection_info);
-
-			proxy_info
+			(proxy_info, Some(connection_info), None)
 		}
 	};
 
@@ -580,8 +568,7 @@ pub fn process_proxy_outbound(
 
 	// send the first request
 	proxy_info.proxy_conn.write(&buffer[0..end])?;
-
-	Ok(ctx)
+	Ok((ctx, nconn, update_info))
 }
 
 pub fn connect_outbound(

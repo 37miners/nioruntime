@@ -224,7 +224,8 @@ Internal Server Error.\r\n";
 pub type Handle = RawFd;
 #[cfg(windows)]
 pub type Handle = u64;
-debug!();
+
+warn!();
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ListenerType {
@@ -232,6 +233,7 @@ pub enum ListenerType {
 	Plain,
 }
 
+#[derive(Debug)]
 pub struct ConnectionInfo {
 	pub last_data: u128,
 	pub connection: u128,
@@ -500,6 +502,7 @@ impl<'a> HttpHeaders<'a> {
 			Some((method, offset)) => (method, offset),
 			None => return Ok(None),
 		};
+
 		trace!("method={:?},offset={}", method, offset)?;
 		let (uri, extension, offset) = match Self::parse_uri(&buffer[offset..], config)? {
 			Some((uri, extension, noffset)) => (uri, extension, noffset + offset),
@@ -1355,7 +1358,7 @@ impl Default for HttpApiConfig {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PostStatus {
 	pub(crate) is_disconnected: bool,
 	slab_woffset: usize,
@@ -1372,7 +1375,7 @@ impl PostStatus {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ApiContext {
 	async_connections: Arc<RwLock<HashSet<u128>>>,
 	conn_data: ConnectionData,

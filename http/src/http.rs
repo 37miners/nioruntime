@@ -45,6 +45,7 @@ use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
 use nioruntime_util::slabs::SlabAllocator;
+use nioruntime_util::StaticHash;
 use nioruntime_util::{lockr, lockw};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -118,6 +119,7 @@ where
 		}
 
 		if std::fs::metadata(mainlog.clone()).is_err() {
+			println!("init mainlog");
 			Self::init_mainlog(&mainlog)?;
 		}
 
@@ -135,14 +137,15 @@ where
 		})
 	}
 
-	#[rustfmt::skip]
 	pub fn stop(&mut self) -> Result<(), Error> {
-		match &self.evh_params { Some(e) => e.stop()?, _ => {} }
+		match &self.evh_params {
+			Some(e) => e.stop()?,
+			_ => {}
+		}
 		self._listeners = vec![];
 		Ok(())
 	}
 
-	#[rustfmt::skip]
 	pub fn start(&mut self) -> Result<(), Error> {
 		let mut evh = EventHandler::new(self.config.evh_config)?;
 
@@ -170,13 +173,13 @@ where
 
 		let api_config = self.api_config.clone();
 		let api_handler = self.api_handler.clone();
-                let ws_handler = self.ws_handler.clone();
+		let ws_handler = self.ws_handler.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-                        Self::init_user_data(user_data, &config1)?;
-                        let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
-			match Self::process_on_read(
-                                thread_context,
+			Self::init_user_data(user_data, &config1)?;
+			let thread_context = user_data.downcast_mut::<ThreadContext>().unwrap();
+			let (nconns, nupdates) = match Self::process_on_read(
+				thread_context,
 				&conn_data,
 				buf,
 				ctx,
@@ -186,17 +189,47 @@ where
 				&api_handler,
 				&evh_params,
 				&slabs,
-                                ws_handler.as_ref(),
+				ws_handler.as_ref(),
 			) {
-                            Ok(_) => {},
-                            Err(e) => {
-                                error!("on_read returned error: {}", e)?;
-                            }
-                        }
+				Ok((nconns, nupdates)) => (nconns, nupdates),
+				Err(e) => {
+					error!("on_read returned error: {}", e)?;
+					(vec![], vec![])
+				}
+			};
+			for nconn in nconns {
+				thread_context
+					.active_connections
+					.insert(nconn.conn_data.get_connection_id(), nconn);
+			}
 
-                        Self::update_thread_context(thread_context, &config1, &cache)?;
+			for nupdate in nupdates {
+				match thread_context.active_connections.get_mut(&nupdate.1) {
+					Some(conn_info) => match conn_info.proxy_info.as_mut() {
+						Some(proxy_info) => {
+							let now = SystemTime::now();
+							proxy_info.response_conn_data = Some(nupdate.0.clone());
+							proxy_info.request_start_time =
+								now.duration_since(UNIX_EPOCH)?.as_micros();
+						}
+						None => {
+							return Err(ErrorKind::InternalError(
+								"proxy connection not found".into(),
+							)
+							.into());
+						}
+					},
+					None => {
+						return Err(
+							ErrorKind::InternalError("proxy connection not found".into()).into(),
+						);
+					}
+				}
+			}
 
-                        Ok(())
+			Self::update_thread_context(thread_context, &config1, &cache)?;
+
+			Ok(())
 		})?;
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
 			Self::process_on_accept(conn_data, ctx, &config2, user_data)
@@ -207,7 +240,7 @@ where
 		evh.set_on_panic(move || Ok(()))?;
 		evh.set_on_housekeep(move |user_data, tid| {
 			match Self::process_on_housekeeper(&config4, user_data, &evh_params_clone, tid) {
-				Ok(_) => {},
+				Ok(_) => {}
 				Err(e) => debug!("housekeeping generated error: {}", e)?,
 			}
 			Ok(())
@@ -236,29 +269,29 @@ where
 				let private_key_file = match self.config.privkey_map.get(&port) {
 					Some(private_key_file) => private_key_file.to_string(),
 					None => {
-                                		return Err(ErrorKind::Configuration(format!(
-                                        		"No privkey file specified for port {}",
-                                        		self.config.listeners[i].1.port()
-                                		)).into());
-					},
+						return Err(ErrorKind::Configuration(format!(
+							"No privkey file specified for port {}",
+							self.config.listeners[i].1.port()
+						))
+						.into());
+					}
 				};
 
-                                let certificates_file = match self.config.fullchain_map.get(&port) {
-                                        Some(certificates_file) => certificates_file.to_string(),
-                                        None => {
-                                		return Err(ErrorKind::Configuration(format!(
-                                        		"No fullchain file specified for port {}",
-                                        		self.config.listeners[i].1.port()
-                                		)).into());
-                                        },
-                                };
-
-				Some(
-					TLSServerConfig {
-						certificates_file,
-						private_key_file,
+				let certificates_file = match self.config.fullchain_map.get(&port) {
+					Some(certificates_file) => certificates_file.to_string(),
+					None => {
+						return Err(ErrorKind::Configuration(format!(
+							"No fullchain file specified for port {}",
+							self.config.listeners[i].1.port()
+						))
+						.into());
 					}
-				)
+				};
+
+				Some(TLSServerConfig {
+					certificates_file,
+					private_key_file,
+				})
 			} else {
 				None
 			};
@@ -268,9 +301,10 @@ where
 		self.show_config()?;
 
 		set_config_option!(Settings::Level, true)?;
-                let server_startup = format!(
-                        "Server started in {} ms.", self.config.start.elapsed().as_millis()
-                );
+		let server_startup = format!(
+			"Server started in {} ms.",
+			self.config.start.elapsed().as_millis()
+		);
 		info!("{}", server_startup.cyan())?;
 		set_config_option!(Settings::LineNum, true)?;
 		if !self.config.debug {
@@ -551,8 +585,8 @@ where
 	fn init_mainlog(mainlog: &String) -> Result<(), Error> {
 		let mut p = PathBuf::from(mainlog);
 		p.pop();
-		fsutils::mkdir(&p.as_path().display().to_string());
-		File::create(mainlog)?;
+		//fsutils::mkdir(&p.as_path().display().to_string());
+		//File::create(mainlog)?;
 
 		Ok(())
 	}
@@ -562,11 +596,16 @@ where
 		Ok(())
 	}
 
-	#[rustfmt::skip]
 	fn init_webroot(root_dir: &str) -> Result<(), Error> {
 		fsutils::mkdir(root_dir);
 		for file in include_dir!("$CARGO_MANIFEST_DIR/src/resources/www").files() {
-			let file_path = file.path().file_name().unwrap().to_str().unwrap().to_string();
+			let file_path = file
+				.path()
+				.file_name()
+				.unwrap()
+				.to_str()
+				.unwrap()
+				.to_string();
 			let root_dir = root_dir.to_string();
 			let contents = file.contents();
 			Self::create_file_from_bytes(file_path, root_dir, contents)?;
@@ -634,10 +673,43 @@ where
 	}
 
 	fn process_post_await(
-		connection_id: u128,
-		conn_info: &mut ConnectionInfo,
+		conn_data: &ConnectionData,
+		evh_params: &EvhParams,
 		nbuf: &[u8],
-	) -> Result<(bool, usize), Error> {
+		buffer: &mut Vec<u8>,
+		connection_id: u128,
+		now: SystemTime,
+		remote_peer: &Option<SocketAddr>,
+		api_config: &Arc<RwLock<HttpApiConfig>>,
+		cache: &Arc<RwLock<HttpCache>>,
+		config: &HttpConfig,
+		api_handler: &Option<Pin<Box<ApiHandler>>>,
+		slabs: &Arc<RwLock<SlabAllocator>>,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
+		thread_context: &mut ThreadContext,
+	) -> Result<
+		(
+			bool,
+			usize,
+			Vec<ConnectionInfo>,
+			Vec<(ConnectionData, u128)>,
+		),
+		Error,
+	> {
+		let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+			Some(conn_info) => conn_info,
+			None => {
+				error!(
+					"Expected connection info for connection_id={}",
+					connection_id
+				)?;
+				return Err(ErrorKind::InternalError(
+					format!("No connection info for connection id {}", connection_id).into(),
+				)
+				.into());
+			}
+		};
+
 		let (rem, overflow) = match conn_info.api_context.as_mut() {
 			Some(ctx) => {
 				if ctx.is_proxy() {
@@ -667,14 +739,47 @@ where
 				}
 			}
 			None => {
-				return Ok((false, 0));
+				return Ok((false, 0, vec![], vec![]));
 			}
 		};
 		if rem {
 			conn_info.api_context = None;
 		}
 
-		Ok((true, overflow))
+		let mut nconns = vec![];
+		let mut nupdates = vec![];
+		if overflow > 0 {
+			let nbuf = &nbuf[nbuf.len().saturating_sub(overflow)..];
+			(nconns, nupdates) = Self::process_sync(
+				conn_info,
+				conn_data,
+				evh_params,
+				nbuf,
+				buffer,
+				connection_id,
+				now,
+				remote_peer,
+				api_config,
+				cache,
+				config,
+				api_handler,
+				slabs,
+				ws_handler,
+				&mut thread_context.sha1,
+				&mut thread_context.cache_hits,
+				&mut thread_context.header_map,
+				&mut thread_context.key_buf,
+				&mut thread_context.value_buf,
+				&mut thread_context.webroot,
+				&mut thread_context.temp_dir,
+				&mut thread_context.idle_proxy_connections,
+				&mut thread_context.proxy_state,
+				&mut thread_context.mime_map,
+				&mut thread_context.async_connections,
+			)?;
+		}
+
+		Ok((true, overflow, nconns, nupdates))
 	}
 
 	fn process_on_read(
@@ -689,7 +794,7 @@ where
 		evh_params: &EvhParams,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
-	) -> Result<(), Error> {
+	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let now = SystemTime::now();
 		Self::process_async(ctx, thread_context, conn_data)?;
 		Self::update_conn_info(thread_context, conn_data, now)?;
@@ -704,80 +809,61 @@ where
 			connection_id,
 			nbuf,
 			conn_data.get_accept_handle(),
-			buffer_len
+			buffer_len,
 		)?;
 
 		if buffer_len == 0 && nbuf.len() == 0 {
 			// there's nothing to do
-			return Ok(());
+			return Ok((vec![], vec![]));
 		}
 
 		let is_async = {
 			let async_connections = lockr!(thread_context.async_connections)?;
 			async_connections.get(&connection_id).is_some()
 		};
-		let (was_post_await, overflow) = {
-			let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
-				Some(conn_info) => conn_info,
-				None => {
-					error!(
-						"Expected connection info for connection_id={}",
-						connection_id
-					)?;
-					return Err(ErrorKind::InternalError(
-						format!("No connection info for connection id {}", connection_id).into(),
-					)
-					.into());
-				}
-			};
-			Self::process_post_await(connection_id, conn_info, nbuf)?
-		};
+		let (was_post_await, _overflow, nconns, nupdates) = Self::process_post_await(
+			conn_data,
+			evh_params,
+			nbuf,
+			buffer,
+			connection_id,
+			now,
+			remote_peer,
+			api_config,
+			cache,
+			config,
+			api_handler,
+			slabs,
+			ws_handler,
+			thread_context,
+		)?;
 
 		if was_post_await {
-			if overflow > 0 {
-				let nbuf = &nbuf[nbuf.len().saturating_sub(overflow)..];
-				Self::process_sync(
-					conn_data,
-					evh_params,
-					nbuf,
-					buffer,
-					connection_id,
-					now,
-					thread_context,
-					remote_peer,
-					api_config,
-					cache,
-					config,
-					api_handler,
-					slabs,
-					ws_handler,
-				)?;
-			}
-			return Ok(());
+			return Ok((nconns, nupdates));
 		}
 
-		if !is_async {
-			let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
-				Some(conn_info) => conn_info,
-				None => {
-					error!(
-						"Expected connection info for connection_id={}",
-						connection_id
-					)?;
-					return Err(ErrorKind::InternalError(
-						format!("No connection info for connection id {}", connection_id).into(),
-					)
-					.into());
-				}
-			};
+		let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+			Some(conn_info) => conn_info,
+			None => {
+				error!(
+					"Expected connection info for connection_id={}",
+					connection_id
+				)?;
+				return Err(ErrorKind::InternalError(
+					format!("No connection info for connection id {}", connection_id).into(),
+				)
+				.into());
+			}
+		};
 
+		if !is_async {
 			if process_health_check_response(
 				conn_info,
 				conn_data,
 				nbuf,
 				&mut thread_context.proxy_state,
 			)? {
-				return Ok(());
+				return Ok((vec![], vec![]));
 			}
 
 			match &conn_info.proxy_info {
@@ -790,11 +876,14 @@ where
 						&mut thread_context.idle_proxy_connections,
 						now,
 					)?;
-					return Ok(());
+					return Ok((vec![], vec![]));
 				}
 				None => {}
 			}
 		}
+
+		let mut nconns = vec![];
+		let mut nupdates = vec![];
 
 		if is_async {
 			// it's async just append to the buffer and return
@@ -802,20 +891,46 @@ where
 		} else if buffer_len > 0 {
 			Self::append_buffer(nbuf, buffer)?;
 			loop {
-				let amt = Self::process_buffer(
+				let (amt, nconn, update_info) = Self::process_buffer(
+					conn_info,
 					conn_data,
 					buffer,
 					config,
 					cache,
 					api_config,
-					thread_context,
 					api_handler,
 					evh_params,
 					now,
 					remote_peer,
 					slabs,
 					ws_handler,
+					&mut thread_context.sha1,
+					&mut thread_context.cache_hits,
+					&mut thread_context.header_map,
+					&mut thread_context.key_buf,
+					&mut thread_context.value_buf,
+					&mut thread_context.webroot,
+					&mut thread_context.temp_dir,
+					&mut thread_context.idle_proxy_connections,
+					&mut thread_context.proxy_state,
+					&mut thread_context.mime_map,
+					&mut thread_context.async_connections,
 				)?;
+
+				match nconn {
+					Some(nconn) => {
+						nconns.push(nconn);
+					}
+					None => {}
+				}
+
+				match update_info {
+					Some(update_info) => {
+						nupdates.push(update_info);
+					}
+					None => {}
+				}
+
 				if amt == 0 {
 					break;
 				}
@@ -830,14 +945,14 @@ where
 				}
 			}
 		} else {
-			Self::process_sync(
+			let (mut ps_nconns, mut ps_nupdates) = Self::process_sync(
+				conn_info,
 				conn_data,
 				evh_params,
 				nbuf,
 				buffer,
 				connection_id,
 				now,
-				thread_context,
 				remote_peer,
 				api_config,
 				cache,
@@ -845,20 +960,33 @@ where
 				api_handler,
 				slabs,
 				ws_handler,
+				&mut thread_context.sha1,
+				&mut thread_context.cache_hits,
+				&mut thread_context.header_map,
+				&mut thread_context.key_buf,
+				&mut thread_context.value_buf,
+				&mut thread_context.webroot,
+				&mut thread_context.temp_dir,
+				&mut thread_context.idle_proxy_connections,
+				&mut thread_context.proxy_state,
+				&mut thread_context.mime_map,
+				&mut thread_context.async_connections,
 			)?;
+			nconns.append(&mut ps_nconns);
+			nupdates.append(&mut ps_nupdates);
 		}
 
-		Ok(())
+		Ok((nconns, nupdates))
 	}
 
 	fn process_sync(
+		conn_info: &mut ConnectionInfo,
 		conn_data: &ConnectionData,
 		evh_params: &EvhParams,
 		nbuf: &[u8],
 		buffer: &mut Vec<u8>,
 		connection_id: u128,
 		now: SystemTime,
-		thread_context: &mut ThreadContext,
 		remote_peer: &Option<SocketAddr>,
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		cache: &Arc<RwLock<HttpCache>>,
@@ -866,8 +994,21 @@ where
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
-	) -> Result<(), Error> {
+		sha1: &mut Sha1,
+		ch: &mut StaticHash<(), ()>,
+		header_map: &mut StaticHash<(), ()>,
+		key_buf: &mut Vec<u8>,
+		value_buf: &mut Vec<u8>,
+		webroot: &Vec<u8>,
+		temp_dir: &String,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
+	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
+		let mut nconns = vec![];
+		let mut nupdates = vec![];
 		loop {
 			let pbuf = &nbuf[offset..];
 			if pbuf.len() == 0 {
@@ -876,37 +1017,55 @@ where
 
 			// premptively try to process the incoming buffer without appending
 			// in many cases this will work and be faster
-			let amt = Self::process_buffer(
+			let (amt, nconn, update_info) = Self::process_buffer(
+				conn_info,
 				conn_data,
 				pbuf,
 				config,
 				cache,
 				api_config,
-				thread_context,
 				api_handler,
 				evh_params,
 				now,
 				remote_peer,
 				slabs,
 				ws_handler,
+				sha1,
+				ch,
+				header_map,
+				key_buf,
+				value_buf,
+				webroot,
+				temp_dir,
+				idle_proxy_connections,
+				proxy_state,
+				mime_map,
+				async_connections,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
 				break;
 			}
 
+			match nconn {
+				Some(nconn) => nconns.push(nconn),
+				None => {}
+			}
+
+			match update_info {
+				Some(update_info) => nupdates.push(update_info),
+				None => {}
+			}
+
 			offset += amt;
 
 			// if were now async, we must break
-			if lockr!(thread_context.async_connections)?
-				.get(&connection_id)
-				.is_some()
-			{
+			if lockr!(async_connections)?.get(&connection_id).is_some() {
 				Self::append_buffer(&nbuf[offset..], buffer)?;
 				break;
 			}
 		}
-		Ok(())
+		Ok((nconns, nupdates))
 	}
 
 	fn check_expect_100_continue(
@@ -936,11 +1095,18 @@ where
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		async_connections: &Arc<RwLock<HashSet<u128>>>,
-		active_connections: &mut HashMap<u128, ConnectionInfo>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		remote_peer: &Option<SocketAddr>,
 		now: SystemTime,
-	) -> Result<(bool, Option<ApiContext>), Error> {
+	) -> Result<
+		(
+			bool,
+			Option<ApiContext>,
+			Option<ConnectionInfo>,
+			Option<(ConnectionData, u128)>,
+		),
+		Error,
+	> {
 		let mut proxy_entry = None;
 		match config.proxy_config.extensions.get(headers.extension()) {
 			Some(entry) => proxy_entry = Some(entry),
@@ -960,14 +1126,13 @@ where
 				let headers_len = headers.len();
 				let buf_len = buffer.len();
 
-				let api_context = match process_proxy_outbound(
+				let (api_context, nconn, update_info) = match process_proxy_outbound(
 					conn_data,
 					&headers,
 					config,
 					&proxy_entry,
 					buffer,
 					evh_params,
-					active_connections,
 					idle_proxy_connections,
 					proxy_state,
 					async_connections,
@@ -975,7 +1140,7 @@ where
 					now,
 					slabs,
 				) {
-					Ok(ctx) => {
+					Ok((ctx, nconn, update_info)) => {
 						if clen > 0 {
 							let rem = if clen + headers_len > buf_len {
 								(headers_len + clen).saturating_sub(buf_len)
@@ -983,23 +1148,23 @@ where
 								0
 							};
 							if rem > 0 {
-								Some(ctx.clone())
+								(Some(ctx.clone()), nconn, update_info)
 							} else {
-								None
+								(None, nconn, update_info)
 							}
 						} else {
-							None
+							(None, nconn, update_info)
 						}
 					}
 					Err(e) => {
 						warn!("Error while communicating with proxy: {}", e.kind(),)?;
 						conn_data.write(HTTP_ERROR_502)?;
-						None
+						(None, None, None)
 					}
 				};
-				(true, api_context)
+				(true, api_context, nconn, update_info)
 			}
-			None => (false, None),
+			None => (false, None, None, None),
 		})
 	}
 
@@ -1067,62 +1232,50 @@ where
 	}
 
 	fn process_buffer(
+		conn_info: &mut ConnectionInfo,
 		conn_data: &ConnectionData,
 		buffer: &[u8],
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 		api_config: &Arc<RwLock<HttpApiConfig>>,
-		thread_context: &mut ThreadContext,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		evh_params: &EvhParams,
 		now: SystemTime,
 		remote_peer: &Option<SocketAddr>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
-	) -> Result<usize, Error> {
-		let mime_map = &thread_context.mime_map;
-		let async_connections = &thread_context.async_connections;
-		let connection_id = conn_data.get_connection_id();
-
+		sha1: &mut Sha1,
+		ch: &mut StaticHash<(), ()>,
+		header_map: &mut StaticHash<(), ()>,
+		key_buf: &mut Vec<u8>,
+		value_buf: &mut Vec<u8>,
+		webroot: &Vec<u8>,
+		temp_dir: &String,
+		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
+		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		async_connections: &Arc<RwLock<HashSet<u128>>>,
+	) -> Result<
+		(
+			usize,
+			Option<ConnectionInfo>,
+			Option<(ConnectionData, u128)>,
+		),
+		Error,
+	> {
 		match ws_handler {
 			Some(ws_handler) => {
-				let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
-					Some(conn_info) => conn_info,
-					None => {
-						error!(
-							"Expected connection info for connection_id={}",
-							connection_id
-						)?;
-						return Err(ErrorKind::InternalError(
-							format!("No connection info for connection id {}", connection_id)
-								.into(),
-						)
-						.into());
-					}
-				};
-				let (is_ws, len) = Self::check_websocket(
-					conn_data,
-					None,
-					conn_info,
-					buffer,
-					&mut thread_context.sha1,
-					&ws_handler,
-				)?;
+				let (is_ws, len) =
+					Self::check_websocket(conn_data, None, conn_info, buffer, sha1, &ws_handler)?;
 
 				if is_ws {
-					return Ok(len);
+					return Ok((len, None, None));
 				}
 			}
 			None => {}
 		}
 
-		let headers = match HttpHeaders::new(
-			buffer,
-			config,
-			&mut thread_context.header_map,
-			&mut thread_context.key_buf,
-			&mut thread_context.value_buf,
-		) {
+		let headers = match HttpHeaders::new(buffer, config, header_map, key_buf, value_buf) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -1145,11 +1298,11 @@ where
 					}
 				}
 				debug!("parsing headers generated error: {}", e)?;
-				return Ok(0);
+				return Ok((0, None, None));
 			}
 		};
 
-		let (len, key) = match headers {
+		let (len, key, nconn, update_info) = match headers {
 			Some(headers) => {
 				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
@@ -1157,34 +1310,17 @@ where
 
 				match ws_handler {
 					Some(ws_handler) => {
-						let conn_info =
-							match thread_context.active_connections.get_mut(&connection_id) {
-								Some(conn_info) => conn_info,
-								None => {
-									error!(
-										"Expected connection info for connection_id={}",
-										connection_id
-									)?;
-									return Err(ErrorKind::InternalError(
-										format!(
-											"No connection info for connection id {}",
-											connection_id
-										)
-										.into(),
-									)
-									.into());
-								}
-							};
 						let (is_ws, len) = Self::check_websocket(
 							conn_data,
 							Some(&headers),
 							conn_info,
 							buffer,
-							&mut thread_context.sha1,
+							sha1,
+							//&mut thread_context.sha1,
 							&ws_handler,
 						)?;
 						if is_ws {
-							return Ok(len);
+							return Ok((len, None, None));
 						}
 					}
 					None => {}
@@ -1192,7 +1328,7 @@ where
 				if headers.content_len()? > config.max_content_len {
 					conn_data.write(HTTP_ERROR_413)?;
 					conn_data.close()?;
-					return Ok(0);
+					return Ok((0, None, None));
 				}
 
 				Self::check_expect_100_continue(&headers, conn_data)?;
@@ -1231,17 +1367,16 @@ where
 				};
 				let mut key = None;
 
-				let was_proxy = {
-					let (was_proxy, api_context) = Self::process_proxy_request(
+				let (was_proxy, nconn, update_info) = {
+					let (was_proxy, api_context, nconn, update_info) = Self::process_proxy_request(
 						conn_data,
 						config,
 						&headers,
 						buffer,
 						evh_params,
-						&mut thread_context.idle_proxy_connections,
-						&mut thread_context.proxy_state,
+						idle_proxy_connections,
+						proxy_state,
 						async_connections,
-						&mut thread_context.active_connections,
 						slabs,
 						remote_peer,
 						now,
@@ -1249,59 +1384,26 @@ where
 
 					match api_context {
 						Some(api_context) => {
-							let conn_info =
-								match thread_context.active_connections.get_mut(&connection_id) {
-									Some(conn_info) => conn_info,
-									None => {
-										error!(
-											"Expected connection info for connection_id={}",
-											connection_id
-										)?;
-										return Err(ErrorKind::InternalError(
-											format!(
-												"No connection info for connection id {}",
-												connection_id
-											)
-											.into(),
-										)
-										.into());
-									}
-								};
 							conn_info.api_context = Some(api_context);
 						}
 						None => {}
 					}
 
-					was_proxy
+					(was_proxy, nconn, update_info)
 				};
 
 				// check for api mapping/extension
 				let was_api = {
-					let conn_info = match thread_context.active_connections.get_mut(&connection_id)
-					{
-						Some(conn_info) => conn_info,
-						None => {
-							error!(
-								"Expected connection info for connection_id={}",
-								connection_id
-							)?;
-							return Err(ErrorKind::InternalError(
-								format!("No connection info for connection id {}", connection_id)
-									.into(),
-							)
-							.into());
-						}
-					};
 					Self::process_api(
 						buffer,
 						was_proxy,
 						&headers,
 						api_config,
 						api_handler,
-						&thread_context.async_connections,
+						async_connections,
 						conn_info,
 						conn_data,
-						&thread_context.temp_dir,
+						temp_dir,
 						slabs,
 					)?
 				};
@@ -1318,7 +1420,8 @@ where
 						&mime_map,
 						&async_connections,
 						now,
-						&thread_context.webroot,
+						//&thread_context.webroot,
+						webroot,
 						slabs,
 					) {
 						Ok(k) => {
@@ -1338,7 +1441,8 @@ where
 										&mime_map,
 										&async_connections,
 										now,
-										&thread_context.webroot,
+										//&thread_context.webroot,
+										webroot,
 										slabs,
 									) {
 										Ok(k) => key = k,
@@ -1377,20 +1481,20 @@ where
 					clen + headers_len
 				};
 
-				(end, key)
+				(end, key, nconn, update_info)
 			}
-			None => (0, None),
+			None => (0, None, None, None),
 		};
 
 		match key {
 			Some(key) => {
-				let ch = &mut thread_context.cache_hits;
+				//let ch = &mut thread_context.cache_hits;
 				ch.insert_raw(&key, &[0u8; 16])?;
 			}
 			None => {}
 		}
 
-		Ok(len)
+		Ok((len, nconn, update_info))
 	}
 
 	fn process_api(
@@ -1455,17 +1559,18 @@ where
 		}
 	}
 
-	#[rustfmt::skip]
 	fn update_thread_context(
 		thread_context: &mut ThreadContext,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
 	) -> Result<(), Error> {
 		if thread_context.instant.elapsed().as_millis() > config.process_cache_update {
-                        let ch = &mut thread_context.cache_hits;
+			let ch = &mut thread_context.cache_hits;
 			let mut cache = lockw!(cache)?;
 			let itr = ch.iter_raw();
-			for (k, _v) in itr { cache.bring_to_front(k.try_into()?)?; }
+			for (k, _v) in itr {
+				cache.bring_to_front(k.try_into()?)?;
+			}
 			ch.clear()?;
 			thread_context.instant = Instant::now();
 		}
@@ -2265,15 +2370,30 @@ where
 		Ok(())
 	}
 
-	#[rustfmt::skip]
 	fn get_handle() -> Result<Handle, Error> {
 		let r = socket(AddressFamily::Inet, Stream, SockFlag::empty(), None)?;
 		let o: libc::c_int = 1;
 		let s = mem::size_of_val(&o);
 
-		unsafe { setsockopt(r, SOL_SOCKET, SO_REUSEPORT, &o as *const _ as *const c_void, s as socklen_t) };
+		unsafe {
+			setsockopt(
+				r,
+				SOL_SOCKET,
+				SO_REUSEPORT,
+				&o as *const _ as *const c_void,
+				s as socklen_t,
+			)
+		};
 
-		unsafe { setsockopt(r, SOL_SOCKET, SO_REUSEADDR, &o as *const _ as *const c_void, s as socklen_t) };
+		unsafe {
+			setsockopt(
+				r,
+				SOL_SOCKET,
+				SO_REUSEADDR,
+				&o as *const _ as *const c_void,
+				s as socklen_t,
+			)
+		};
 
 		Ok(r)
 	}
@@ -3005,7 +3125,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 	}
 
 	#[test]
-	fn test_proxy() -> Result<(), Error> {
+	fn test_proxy1() -> Result<(), Error> {
 		let root_dir = "./.test_proxy.nio";
 		setup_test_dir(root_dir)?;
 
