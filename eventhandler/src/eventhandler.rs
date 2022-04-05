@@ -1726,11 +1726,9 @@ where
 					}
 				}
 				None => {
-					return Err(ErrorKind::HandleNotFoundError(format!(
-						"Connection handle was not found for event 10: {:?}",
-						event
-					))
-					.into())
+					debug!("Write connection handle {} not found.", event.handle)?;
+					// this is normal. The connection already closed.
+					return Ok(());
 				}
 			};
 

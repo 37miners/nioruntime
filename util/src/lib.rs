@@ -33,4 +33,4 @@ pub use crate::byte_utils::{
 };
 pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
 
-pub use crate::step_allocator::{StepAllocator, StepAllocatorConfig};
+pub use crate::step_allocator::{DataHolder, StepAllocator, StepAllocatorConfig};

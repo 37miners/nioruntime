@@ -47,6 +47,7 @@ use nioruntime_log::*;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::StaticHash;
 use nioruntime_util::{lockr, lockw};
+use nioruntime_util::{DataHolder, StepAllocator};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -119,7 +120,6 @@ where
 		}
 
 		if std::fs::metadata(mainlog.clone()).is_err() {
-			println!("init mainlog");
 			Self::init_mainlog(&mainlog)?;
 		}
 
@@ -197,20 +197,51 @@ where
 				}
 			};
 			for nconn in nconns {
-				thread_context
+				let conn_data = nconn.conn_data.unwrap();
+				let connection_id = conn_data.get_connection_id();
+				let connection_info = insert_step_allocator(
+					conn_data,
+					&mut thread_context.active_connections,
+					&mut thread_context.active_connection_index_map,
+				)?;
+				let connection_info = thread_context
 					.active_connections
-					.insert(nconn.conn_data.get_connection_id(), nconn);
+					.get_mut(connection_info)?
+					.data_as_mut::<ConnectionInfo>();
+				match connection_info {
+					Some(connection_info) => {
+						connection_info.proxy_info = nconn.proxy_info;
+					}
+					None => {
+						warn!(
+							"no connection info found for connection_id = {}",
+							connection_id,
+						)?;
+					}
+				}
 			}
 
 			for nupdate in nupdates {
-				match thread_context.active_connections.get_mut(&nupdate.1) {
-					Some(conn_info) => match conn_info.proxy_info.as_mut() {
-						Some(proxy_info) => {
-							let now = SystemTime::now();
-							proxy_info.response_conn_data = Some(nupdate.0.clone());
-							proxy_info.request_start_time =
-								now.duration_since(UNIX_EPOCH)?.as_micros();
-						}
+				match active_connection_get_mut(
+					nupdate.1,
+					&mut thread_context.active_connections,
+					&mut thread_context.active_connection_index_map,
+				) {
+					Ok(conn_info) => match conn_info {
+						Some(conn_info) => match conn_info.proxy_info.as_mut() {
+							Some(proxy_info) => {
+								let now = SystemTime::now();
+								proxy_info.response_conn_data = Some(nupdate.0.clone());
+								proxy_info.request_start_time =
+									now.duration_since(UNIX_EPOCH)?.as_micros();
+							}
+							None => {
+								return Err(ErrorKind::InternalError(
+									"proxy connection not found".into(),
+								)
+								.into());
+							}
+						},
 						None => {
 							return Err(ErrorKind::InternalError(
 								"proxy connection not found".into(),
@@ -218,10 +249,12 @@ where
 							.into());
 						}
 					},
-					None => {
-						return Err(
-							ErrorKind::InternalError("proxy connection not found".into()).into(),
-						);
+					Err(e) => {
+						return Err(ErrorKind::InternalError(format!(
+							"proxy connection not found due to: {}",
+							e
+						))
+						.into());
 					}
 				}
 			}
@@ -650,7 +683,7 @@ where
 	) -> Result<(), Error> {
 		if ctx.is_async_complete {
 			let mut async_connections = lockw!(thread_context.async_connections)?;
-			async_connections.remove(&conn_data.get_connection_id());
+			async_connections.remove_raw(&conn_data.get_connection_id().to_be_bytes());
 		}
 		Ok(())
 	}
@@ -662,9 +695,19 @@ where
 	) -> Result<(), Error> {
 		let id = conn_data.get_connection_id();
 		let now = now.duration_since(UNIX_EPOCH)?.as_micros();
-		match thread_context.active_connections.get_mut(&id) {
-			Some(conn_info) => conn_info.last_data = now,
-			None => error!("No connection info found for connection {}", id)?,
+		match active_connection_get_mut(
+			id,
+			&mut thread_context.active_connections,
+			&mut thread_context.active_connection_index_map,
+		) {
+			Ok(mut conn_info) => match conn_info {
+				Some(ref mut conn_info) => conn_info.last_data = now,
+				None => error!("No connection info found for connection {}", id)?,
+			},
+			Err(e) => error!(
+				"No connection info found for connection {} due to error: {}",
+				id, e
+			)?,
 		}
 		Ok(())
 	}
@@ -694,7 +737,7 @@ where
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 	) -> Result<
 		(
 			bool,
@@ -799,11 +842,12 @@ where
 		let connection_id = conn_data.get_connection_id();
 
 		debug!(
-			"on_read[{}] = '{:?}', acc_handle={:?}, buffer_len={}",
+			"on_read[{}] = '{:?}', acc_handle={:?}, buffer_len={}, l={:?}",
 			connection_id,
 			nbuf,
 			conn_data.get_accept_handle(),
 			buffer_len,
+			config.listeners,
 		)?;
 
 		if buffer_len == 0 && nbuf.len() == 0 {
@@ -813,10 +857,16 @@ where
 
 		let is_async = {
 			let async_connections = lockr!(thread_context.async_connections)?;
-			async_connections.get(&connection_id).is_some()
+			async_connections
+				.get_raw(&connection_id.to_be_bytes())
+				.is_some()
 		};
 
-		let conn_info = match thread_context.active_connections.get_mut(&connection_id) {
+		let conn_info = match active_connection_get_mut(
+			connection_id,
+			&mut thread_context.active_connections,
+			&mut thread_context.active_connection_index_map,
+		)? {
 			Some(conn_info) => conn_info,
 			None => {
 				error!(
@@ -871,7 +921,6 @@ where
 			)? {
 				return Ok((vec![], vec![]));
 			}
-
 			match &conn_info.proxy_info {
 				Some(_proxy_info) => {
 					process_proxy_inbound(
@@ -936,7 +985,6 @@ where
 					}
 					None => {}
 				}
-
 				if amt == 0 {
 					break;
 				}
@@ -944,7 +992,7 @@ where
 
 				// if were now async, we must break
 				if lockr!(thread_context.async_connections)?
-					.get(&connection_id)
+					.get_raw(&connection_id.to_be_bytes())
 					.is_some()
 				{
 					break;
@@ -1010,7 +1058,7 @@ where
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1066,7 +1114,10 @@ where
 			offset += amt;
 
 			// if were now async, we must break
-			if lockr!(async_connections)?.get(&connection_id).is_some() {
+			if lockr!(async_connections)?
+				.get_raw(&connection_id.to_be_bytes())
+				.is_some()
+			{
 				Self::append_buffer(&nbuf[offset..], buffer)?;
 				break;
 			}
@@ -1102,7 +1153,7 @@ where
 		evh_params: &EvhParams,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		remote_peer: &Option<SocketAddr>,
 		now: SystemTime,
@@ -1264,7 +1315,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 	) -> Result<
 		(
 			usize,
@@ -1513,7 +1564,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		headers: &HttpHeaders,
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		conn_info: &mut ConnectionInfo,
 		conn_data: &ConnectionData,
 		temp_dir: &String,
@@ -1618,7 +1669,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		now: SystemTime,
 		webroot: &Vec<u8>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
@@ -1819,7 +1870,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		range: Option<(usize, usize)>,
 		need_update: bool,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		async_connections: &Arc<RwLock<HashSet<u128>>>,
+		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
@@ -2250,8 +2301,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let handle = conn_data.get_handle();
 		debug!("on accept: {}, handle={}", id, handle)?;
 		let thread_context = Self::init_user_data(user_data, config)?;
-		let cinfo = ConnectionInfo::new(conn_data.clone());
-		thread_context.active_connections.insert(id, cinfo);
+		insert_step_allocator(
+			conn_data.clone(),
+			&mut thread_context.active_connections,
+			&mut thread_context.active_connection_index_map,
+		)?;
 
 		Ok(())
 	}
@@ -2268,63 +2322,88 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		let connection_id = conn_data.get_connection_id();
 
-		let conn_info = thread_context.active_connections.remove(&connection_id);
-
-		match conn_info {
-			Some(conn_info) => {
-				match conn_info.proxy_info {
-					Some(proxy_info) => {
-						match thread_context
-							.idle_proxy_connections
-							.get_mut(&proxy_info.proxy_entry)
-						{
-							Some(map) => match map.get_mut(&proxy_info.sock_addr) {
-								Some(hashset) => {
-									hashset.remove(&proxy_info);
+		match thread_context
+			.active_connection_index_map
+			.remove_raw(&connection_id.to_be_bytes())
+		{
+			Some(index) => {
+				let index = usize::from_be_bytes(index.try_into()?);
+				match thread_context
+					.active_connections
+					.get_mut(index)?
+					.data_as_mut::<ConnectionInfo>()
+				{
+					Some(conn_info) => {
+						match &conn_info.proxy_info {
+							Some(proxy_info) => {
+								match thread_context
+									.idle_proxy_connections
+									.get_mut(&proxy_info.proxy_entry)
+								{
+									Some(map) => match map.get_mut(&proxy_info.sock_addr) {
+										Some(hashset) => {
+											hashset.remove(&proxy_info);
+										}
+										None => {}
+									},
+									None => {}
 								}
-								None => {}
-							},
-							None => {}
-						}
 
-						let state = thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
-						match state {
-							Some(state) => {
-								state.cur_connections = state.cur_connections.saturating_sub(1);
+								let state =
+									thread_context.proxy_state.get_mut(&proxy_info.proxy_entry);
+								match state {
+									Some(state) => {
+										state.cur_connections =
+											state.cur_connections.saturating_sub(1);
+									}
+									None => {}
+								}
 							}
 							None => {}
 						}
-					}
-					None => {}
-				}
 
-				match conn_info.api_context {
-					Some(api_context) => {
-						let mut post_status = lockw!(api_context.post_status)?;
-						(*post_status).is_disconnected = true;
-						match &(*post_status).send {
-							Some(send) => {
-								let _ = send.send(());
+						match &conn_info.api_context {
+							Some(api_context) => {
+								let mut post_status = lockw!(api_context.post_status)?;
+								(*post_status).is_disconnected = true;
+								match &(*post_status).send {
+									Some(send) => {
+										let _ = send.send(());
+									}
+									None => {}
+								}
 							}
 							None => {}
 						}
+
+						conn_info.conn_data = None;
+						conn_info.proxy_info = None;
+						conn_info.api_context = None;
+						conn_info.health_check_info = None;
 					}
-					None => {}
+					None => {
+						warn!("expected conn_info for id = {}", connection_id)?;
+					}
 				}
+				thread_context.active_connections.free_index(index)?;
 			}
-			None => {}
+			None => {
+				warn!("expected index for id = {}", connection_id)?;
+			}
 		}
 
 		// async connections should be removed by user, but if left to this point, we remove.
 		// we don't want to block in the general case, so we try a read lock first.
 		let found = {
 			let async_connections = lockr!(thread_context.async_connections)?;
-			async_connections.get(&connection_id).is_some()
+			async_connections
+				.get_raw(&connection_id.to_be_bytes())
+				.is_some()
 		};
 
 		if found {
 			let mut async_connections = lockw!(thread_context.async_connections)?;
-			async_connections.remove(&connection_id);
+			async_connections.remove_raw(&connection_id.to_be_bytes());
 		}
 
 		Ok(())
@@ -2359,15 +2438,42 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		process_health_check(thread_context, config, evh_params, tid)?;
 
-		for (_id, connection) in &thread_context.active_connections {
-			if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
-				// read timeout
-				connection.conn_data.close()?;
-			} else if connection.last_data == connection.connection
-				&& now.saturating_sub(connection.connection) >= config.connect_timeout * 1_000
+		let mut index_list = vec![];
+		for (_id, index) in thread_context.active_connection_index_map.iter_raw() {
+			index_list.push(usize::from_be_bytes(index.try_into()?));
+		}
+
+		for index in index_list {
+			match thread_context
+				.active_connections
+				.get_mut(index)?
+				.data_as_mut::<ConnectionInfo>()
 			{
-				// connect timeout
-				connection.conn_data.close()?;
+				Some(connection) => {
+					if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
+						// read timeout
+						match &connection.conn_data {
+							Some(conn_data) => conn_data.close()?,
+							None => {
+								warn!("expected conn_data for index {}", index)?;
+							}
+						}
+					} else if connection.last_data == connection.connection
+						&& now.saturating_sub(connection.connection)
+							>= config.connect_timeout * 1_000
+					{
+						// connect timeout
+						match &connection.conn_data {
+							Some(conn_data) => conn_data.close()?,
+							None => {
+								warn!("expected conn_data for index {}", index)?;
+							}
+						}
+					}
+				}
+				None => {
+					warn!("index not found in housekeeper: {}", index)?;
+				}
 			}
 		}
 
@@ -2465,6 +2571,63 @@ fn clean(path: &mut Vec<u8>) -> Result<(), Error> {
 		path.drain((path_len - 1)..);
 	}
 
+	Ok(())
+}
+
+pub fn active_connection_get_mut<'a>(
+	id: u128,
+	step_allocator: &'a mut StepAllocator,
+	active_connection_index_map: &'a mut StaticHash<(), ()>,
+) -> Result<Option<&'a mut ConnectionInfo>, Error> {
+	Ok(
+		match active_connection_index_map.get_raw(&id.to_be_bytes()) {
+			Some(index) => step_allocator
+				.get_mut(usize::from_be_bytes(index.try_into()?))?
+				.data_as_mut::<ConnectionInfo>(),
+			None => None,
+		},
+	)
+}
+
+pub fn insert_step_allocator<'a>(
+	conn_data: ConnectionData,
+	step_allocator: &mut StepAllocator,
+	active_connection_index_map: &mut StaticHash<(), ()>,
+) -> Result<usize, Error> {
+	match step_allocator.next() {
+		Some(next) => {
+			let ret = next.index();
+			populate_next(next, conn_data, active_connection_index_map)?;
+			Ok(ret)
+		}
+		None => {
+			step_allocator.step(&ConnectionInfo::new_empty());
+			let next = step_allocator.next().unwrap();
+			let ret = next.index();
+			populate_next(next, conn_data, active_connection_index_map)?;
+			Ok(ret)
+		}
+	}
+}
+
+fn populate_next<'a>(
+	next: &mut DataHolder,
+	conn_data: ConnectionData,
+	active_connection_index_map: &mut StaticHash<(), ()>,
+) -> Result<(), Error> {
+	let connection_id = conn_data.get_connection_id();
+	let index = next.index();
+	let connection_info = next.data_as_mut::<ConnectionInfo>().unwrap();
+	let now = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap()
+		.as_micros();
+	connection_info.set(now, now, conn_data, None, None, None, false);
+
+	active_connection_index_map.insert_raw(
+		&connection_id.to_be_bytes(),
+		&(index as usize).to_be_bytes(),
+	)?;
 	Ok(())
 }
 
@@ -3157,19 +3320,13 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		extensions.insert(
 			"html".as_bytes().to_vec(),
 			ProxyEntry::multi_socket_addr(
-				vec![
-					Upstream::new(
-						SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
-						1,
-					),
-					Upstream::new(
-						SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..]).unwrap(),
-						1,
-					),
-				],
+				vec![Upstream::new(
+					SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+					1,
+				)],
 				100,
 				Some(HealthCheck {
-					check_secs: 3,
+					check_secs: 3000,
 					path: "/".to_string(),
 					expect_text: "n".to_string(),
 				}),

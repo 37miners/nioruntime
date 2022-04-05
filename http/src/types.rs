@@ -24,7 +24,7 @@ use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
 use nioruntime_util::bytes_parse_number_header;
 use nioruntime_util::slabs::SlabAllocator;
-use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig};
+use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig, StepAllocator, StepAllocatorConfig};
 use nioruntime_util::{lockr, lockw};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -71,6 +71,9 @@ Connection: close\r\n\r\n"
 			.to_vec(),
 	];
 }
+
+const SIZEOF_USIZE: usize = std::mem::size_of::<usize>();
+const SIZEOF_U128: usize = std::mem::size_of::<u128>();
 
 pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -236,11 +239,11 @@ pub enum ListenerType {
 	Plain,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionInfo {
 	pub last_data: u128,
 	pub connection: u128,
-	pub conn_data: ConnectionData,
+	pub conn_data: Option<ConnectionData>,
 	pub proxy_info: Option<ProxyInfo>,
 	pub api_context: Option<ApiContext>,
 	pub health_check_info: Option<(ProxyEntry, SocketAddr)>,
@@ -256,12 +259,47 @@ impl ConnectionInfo {
 		Self {
 			connection: now,
 			last_data: now,
-			conn_data,
+			conn_data: Some(conn_data),
 			proxy_info: None,
 			api_context: None,
 			health_check_info: None,
 			is_websocket: false,
 		}
+	}
+
+	pub fn new_empty() -> Self {
+		let now = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap()
+			.as_micros();
+		Self {
+			connection: now,
+			last_data: now,
+			conn_data: None,
+			proxy_info: None,
+			api_context: None,
+			health_check_info: None,
+			is_websocket: false,
+		}
+	}
+
+	pub fn set(
+		&mut self,
+		last_data: u128,
+		connection: u128,
+		conn_data: ConnectionData,
+		proxy_info: Option<ProxyInfo>,
+		api_context: Option<ApiContext>,
+		health_check_info: Option<(ProxyEntry, SocketAddr)>,
+		is_websocket: bool,
+	) {
+		self.last_data = last_data;
+		self.connection = connection;
+		self.conn_data = Some(conn_data);
+		self.proxy_info = proxy_info;
+		self.api_context = api_context;
+		self.health_check_info = health_check_info;
+		self.is_websocket = is_websocket;
 	}
 }
 
@@ -351,8 +389,9 @@ pub struct ThreadContext {
 	pub value_buf: Vec<u8>,
 	pub instant: Instant,
 	pub mime_map: HashMap<Vec<u8>, Vec<u8>>,
-	pub async_connections: Arc<RwLock<HashSet<u128>>>,
-	pub active_connections: HashMap<u128, ConnectionInfo>,
+	pub async_connections: Arc<RwLock<StaticHash<(), ()>>>,
+	pub active_connection_index_map: StaticHash<(), ()>,
+	pub active_connections: StepAllocator,
 	pub idle_proxy_connections: HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	pub proxy_state: HashMap<ProxyEntry, ProxyState>,
 	pub webroot: Vec<u8>,
@@ -407,6 +446,29 @@ impl ThreadContext {
 
 		let temp_dir = config.temp_dir.replace("~", &home_dir);
 
+		let async_connections = Arc::new(RwLock::new(StaticHash::new(StaticHashConfig {
+			key_len: SIZEOF_U128,
+			entry_len: 0,
+			max_entries: config.max_async_connections,
+			max_load_factor: 1.0,
+			iterator: false,
+			..Default::default()
+		})?));
+
+		let mut active_connections = StepAllocator::new(StepAllocatorConfig { step_size: 100 });
+
+		let active_connection_index_map = StaticHash::new(StaticHashConfig {
+			key_len: SIZEOF_U128,
+			entry_len: SIZEOF_USIZE,
+			max_entries: config.max_active_connections,
+			max_load_factor: 1.0,
+			iterator: true,
+			..Default::default()
+		})?;
+
+		// preallocate a single step here
+		active_connections.step(&ConnectionInfo::new_empty());
+
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
 			cache_hits: StaticHash::new(cache_hits_conf)?,
@@ -414,8 +476,9 @@ impl ThreadContext {
 			value_buf,
 			instant: Instant::now(),
 			mime_map: HashMap::new(),
-			async_connections: Arc::new(RwLock::new(HashSet::new())),
-			active_connections: HashMap::new(),
+			async_connections,
+			active_connections,
+			active_connection_index_map,
 			idle_proxy_connections,
 			proxy_state,
 			webroot,
@@ -1157,6 +1220,8 @@ pub struct HttpConfig {
 	pub content_upload_slab_count: u64,
 	pub content_upload_slab_size: u64,
 	pub error_page: Vec<u8>,
+	pub max_async_connections: usize,
+	pub max_active_connections: usize,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -1189,6 +1254,8 @@ impl Default for HttpConfig {
 			content_upload_slab_count: 1024 * 10,
 			content_upload_slab_size: 1024,
 			max_load_factor: 0.9,
+			max_async_connections: 10 * 1024,
+			max_active_connections: 16 * 1024,
 			server_name: format!("NIORuntime Httpd/{}", VERSION).as_bytes().to_vec(),
 			process_cache_update: 1_000,    // 1 second
 			cache_recheck_fs_millis: 3_000, // 3 seconds
@@ -1408,7 +1475,7 @@ impl PostStatus {
 
 #[derive(Clone, Debug)]
 pub struct ApiContext {
-	async_connections: Arc<RwLock<HashSet<u128>>>,
+	async_connections: Arc<RwLock<StaticHash<(), ()>>>,
 	conn_data: ConnectionData,
 	temp_file: Option<String>,
 	offset: usize,
@@ -1424,7 +1491,7 @@ pub struct ApiContext {
 
 impl ApiContext {
 	pub fn new(
-		async_connections: Arc<RwLock<HashSet<u128>>>,
+		async_connections: Arc<RwLock<StaticHash<(), ()>>>,
 		conn_data: ConnectionData,
 		slaballocator: Arc<RwLock<SlabAllocator>>,
 		is_proxy: bool,
@@ -1456,7 +1523,7 @@ impl ApiContext {
 
 	pub fn set_async(&mut self) -> Result<(), Error> {
 		let mut async_connections = lockw!(self.async_connections)?;
-		async_connections.insert(self.conn_data.get_connection_id());
+		async_connections.insert_raw(&self.conn_data.get_connection_id().to_be_bytes(), &[])?;
 		Ok(())
 	}
 
@@ -1467,7 +1534,7 @@ impl ApiContext {
 
 		{
 			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove(&self.conn_data.get_connection_id());
+			async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes());
 		}
 		self.conn_data.async_complete()?;
 		Ok(())
@@ -1497,7 +1564,7 @@ impl ApiContext {
 	pub(crate) fn async_complete_no_file(&mut self) -> Result<(), Error> {
 		{
 			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove(&self.conn_data.get_connection_id());
+			async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes());
 		}
 		self.conn_data.async_complete()?;
 		Ok(())

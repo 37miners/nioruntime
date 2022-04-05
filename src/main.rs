@@ -462,6 +462,28 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let max_active_connections = match args.is_present("max_active_connections") {
+		true => args.value_of("max_active_connections").unwrap().parse()?,
+		false => match file_args.is_present("max_active_connections") {
+			true => file_args
+				.value_of("max_active_connections")
+				.unwrap()
+				.parse()?,
+			false => max_rwhandles,
+		},
+	};
+
+	let max_async_connections = match args.is_present("max_async_connections") {
+		true => args.value_of("max_async_connections").unwrap().parse()?,
+		false => match file_args.is_present("max_async_connections") {
+			true => file_args
+				.value_of("max_async_connections")
+				.unwrap()
+				.parse()?,
+			false => max_rwhandles,
+		},
+	};
+
 	let max_handle_numeric_value = match args.is_present("max_handle_numeric_value") {
 		true => args.value_of("max_handle_numeric_value").unwrap().parse()?,
 		false => match file_args.is_present("max_handle_numeric_value") {
@@ -569,6 +591,8 @@ fn real_main() -> Result<(), Error> {
 		idle_timeout,
 		mainlog_max_age,
 		mainlog_max_size,
+		max_active_connections,
+		max_async_connections,
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
 		debug_post,

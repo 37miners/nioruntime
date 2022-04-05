@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::http::insert_step_allocator;
 use crate::types::ConnectionInfo;
 use crate::types::*;
 use nioruntime_deps::libc;
@@ -27,6 +28,7 @@ use nioruntime_evh::EvhParams;
 use nioruntime_log::*;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::{bytes_find, bytes_parse_number_header, bytes_parse_number_hex};
+use nioruntime_util::{StaticHash, StepAllocator};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::Write;
@@ -292,7 +294,7 @@ pub fn process_proxy_outbound(
 	evh_params: &EvhParams,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
-	async_connections: &Arc<RwLock<HashSet<u128>>>,
+	async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
 	slabs: &Arc<RwLock<SlabAllocator>>,
@@ -523,7 +525,7 @@ pub fn process_proxy_outbound(
 				}
 			};
 
-			debug!(
+			warn!(
 				"proxy added handle = {}, conn_id = {}",
 				handle,
 				conn_data.get_connection_id()
@@ -566,7 +568,6 @@ pub fn process_proxy_outbound(
 	ctx.set_expected(rem, &"".to_string(), true)?;
 	ctx.set_async()?;
 
-	// send the first request
 	proxy_info.proxy_conn.write(&buffer[0..end])?;
 	Ok((ctx, nconn, update_info))
 }
@@ -665,6 +666,7 @@ pub fn process_health_check(
 							&upstream.sock_addr,
 							tid,
 							evh_params,
+							&mut thread_context.active_connection_index_map,
 							&mut thread_context.active_connections,
 							k,
 							&hc.path,
@@ -694,7 +696,8 @@ fn check(
 	sock_addr: &SocketAddr,
 	tid: usize,
 	evh_params: &EvhParams,
-	active_connections: &mut HashMap<u128, ConnectionInfo>,
+	active_connection_index_map: &mut StaticHash<(), ()>,
+	active_connections: &mut StepAllocator,
 	proxy_entry: &ProxyEntry,
 	path: &String,
 ) -> Result<bool, Error> {
@@ -704,9 +707,25 @@ fn check(
 	health_check.extend_from_slice(&HEALTH_CHECK_VEC[1]);
 	conn_data.write(&health_check)?;
 
-	let mut connection_info = ConnectionInfo::new(conn_data.clone());
-	connection_info.health_check_info = Some((proxy_entry.clone(), sock_addr.clone()));
-	active_connections.insert(conn_data.get_connection_id(), connection_info);
+	let connection_info = insert_step_allocator(
+		conn_data.clone(),
+		active_connections,
+		active_connection_index_map,
+	)?;
+	let connection_info = active_connections
+		.get_mut(connection_info)?
+		.data_as_mut::<ConnectionInfo>();
+	match connection_info {
+		Some(connection_info) => {
+			connection_info.health_check_info = Some((proxy_entry.clone(), sock_addr.clone()))
+		}
+		None => {
+			warn!(
+				"no connection info found for connection_id = {}",
+				conn_data.get_connection_id()
+			)?;
+		}
+	}
 
 	Ok(true)
 }

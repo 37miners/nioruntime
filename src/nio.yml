@@ -136,11 +136,21 @@ args:
         takes_value: true
         value_name: read_buffer_size
     - max_rwhandles:
-        help: The maximum number of read/write handles that the server can accept. This includes handles that the server creates (like proxy connections) and connections the server accepts.
+        help: The maximum number of read/write handles that the server can accept. This includes handles that the server creates (like proxy connections) and connections the server accepts. The default value is 16,000.
         short: y
         long: max_rwhandles
         takes_value: true
         value_name: max_rwhandles
+    - max_active_connections:
+        help: The maximum number of active connections for the HTTP server. The default value is max_rwhandles.
+        long: max_active_connections
+        takes_value: true
+        value_name: max_active_connections
+    - max_async_connections:
+        help: The maximum number of async connections for the HTTP server. The default value is max_rwhandles.
+        long: max_async_connections
+        takes_value: true
+        value_name: max_async_connections
     - max_handle_numeric_value:
         help: The maximum numeric value of a handle (file handles on windows and file descriptors on unix).
         short: n
