@@ -45,7 +45,7 @@ use std::os::unix::prelude::RawFd;
 
 lazy_static! {
 	pub static ref HTTP_PARTIAL_206_HEADERS_VEC: Vec<Vec<u8>> = vec![
-		" 206 Partial Content\r\nServer: ".as_bytes().to_vec(),
+		"\r\nServer: ".as_bytes().to_vec(),
 		"\"\r\nContent-Range: bytes ".as_bytes().to_vec(),
 		"-".as_bytes().to_vec(),
 		"/".as_bytes().to_vec(),
@@ -53,7 +53,7 @@ lazy_static! {
 		"\r\n\r\n".as_bytes().to_vec(),
 	];
 	pub static ref HTTP_OK_200_HEADERS_VEC: Vec<Vec<u8>> = vec![
-		" 200 OK\r\nServer: ".as_bytes().to_vec(),
+		"\r\nServer: ".as_bytes().to_vec(),
 		"\r\nDate: ".as_bytes().to_vec(),
 		"\r\nLast-Modified: ".as_bytes().to_vec(),
 		"\r\nConnection: ".as_bytes().to_vec(),
@@ -75,6 +75,17 @@ Connection: close\r\n\r\n"
 const SIZEOF_USIZE: usize = std::mem::size_of::<usize>();
 const SIZEOF_U128: usize = std::mem::size_of::<u128>();
 
+pub const HTTP_CODE_206: &[u8] = "206 Partial Content".as_bytes();
+pub const HTTP_CODE_200: &[u8] = "200 OK".as_bytes();
+pub const HTTP_CODE_400: &[u8] = "400 Bad request".as_bytes();
+pub const HTTP_CODE_403: &[u8] = "403 Forbidden".as_bytes();
+pub const HTTP_CODE_404: &[u8] = "404 Not Found".as_bytes();
+pub const HTTP_CODE_405: &[u8] = "405 Method not supported".as_bytes();
+pub const HTTP_CODE_413: &[u8] = "413 Request Entity Too Large".as_bytes();
+pub const HTTP_CODE_431: &[u8] = "431 Request Header Fields Too Large".as_bytes();
+pub const HTTP_CODE_500: &[u8] = "500 Internal Server Error".as_bytes();
+pub const HTTP_CODE_502: &[u8] = "502 Bad Gateway".as_bytes();
+
 pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 pub const END_HEADERS: &[u8] = "\r\n\r\n".as_bytes();
@@ -90,6 +101,7 @@ pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
 pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
 pub const BACK_R: &[u8] = "\r".as_bytes();
+pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
 
 pub const GET_BYTES: &[u8] = "GET ".as_bytes();
 pub const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -122,106 +134,86 @@ pub const OCT_BYTES: &[u8] = " Oct ".as_bytes();
 pub const NOV_BYTES: &[u8] = " Nov ".as_bytes();
 pub const DEC_BYTES: &[u8] = " Dec ".as_bytes();
 
-pub const HTTP10_BYTES: &[u8] = "HTTP/1.0".as_bytes();
-pub const HTTP11_BYTES: &[u8] = "HTTP/1.1".as_bytes();
-pub const HTTP20_BYTES: &[u8] = "HTTP/2.0".as_bytes();
+pub const HTTP10_BYTES_DISPLAY: &[u8] = "HTTP/1.0 ".as_bytes();
+pub const HTTP11_BYTES_DISPLAY: &[u8] = "HTTP/1.1 ".as_bytes();
+
+pub const HTTP10_BYTES_MATCH: &[u8] = "HTTP/1.0".as_bytes();
+pub const HTTP11_BYTES_MATCH: &[u8] = "HTTP/1.1".as_bytes();
+pub const HTTP20_BYTES_MATCH: &[u8] = "HTTP/2.0".as_bytes();
 
 pub const KEEP_ALIVE_BYTES: &[u8] = "keep-alive".as_bytes();
 pub const CLOSE_BYTES: &[u8] = "close".as_bytes();
 
 pub const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-pub const _SIMPLE: &[u8] = b"HTTP/1.1 200 Ok\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
-Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Content-Length: 7\r\n\
-Connection: keep-alive\r\n\
-\r\n\
-Hello\r\n";
-
 pub const HTTP_CONTINUE_100: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 
 pub const HTTP_ERROR_400: &[u8] = b"HTTP/1.1 400 Bad request\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 14\r\n\
 Connection: close\r\n\
-\r\n";
+\r\n\
+Bad Request.\r\n";
 
 pub const HTTP_ERROR_403: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
 Content-Length: 12\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
 Forbidden.\r\n";
 
 pub const HTTP_ERROR_404: &[u8] = b"HTTP/1.1 404 Not found\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Content-Length: 11\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 12\r\n\
 Connection: close\r\n\r\n\
-Not found\r\n";
+Not found.\r\n";
 
 pub const HTTP_ERROR_405: &[u8] = b"HTTP/1.1 405 Method not supported\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 23\r\n\
 Connection: close\r\n\
 \r\n\
 Method Not supported.\r\n";
 
 pub const HTTP_ERROR_413: &[u8] = b"HTTP/1.1 413 Request Entity Too Large\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
-Content-Length: 25\r\n\
+Content-Length: 27\r\n\
 Connection: close\r\n\r\n\
-Request Entity Too Large\r\n";
+Request Entity Too Large.\r\n";
 
 pub const HTTP_ERROR_431: &[u8] = b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 34\r\n\
 Connection: close\r\n\
 \r\n\
 Request Header Fields Too Large.\r\n";
 
 pub const HTTP_ERROR_502: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
 Content-Length: 14\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
 Bad Gateway.\r\n";
 
 pub const HTTP_ERROR_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
 Content-Length: 22\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
 Connection: close\r\n\
 \r\n\
 Service Unavailable.\r\n";
 
 pub const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 Internal Server Error\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
-Date: Wed, 09 Mar 2022 22:03:11 GMT\r\n\
 Content-Type: text/html\r\n\
-Last-Modified: Fri, 30 Jul 2021 06:40:15 GMT\r\n\
+Content-Length: 24\r\n\
 Connection: close\r\n\
 \r\n\
 Internal Server Error.\r\n";
@@ -521,6 +513,7 @@ pub struct HttpHeaders<'a> {
 	range: bool,
 	expect: bool,
 	websocket_upgrade: bool,
+	connection_close: bool,
 	content_length: usize,
 }
 
@@ -592,22 +585,31 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
-		let (len, range, content_length, websocket_upgrade, expect) = match Self::parse_headers(
-			&buffer[(offset + 2)..],
-			config,
-			header_map,
-			key_buf,
-			value_buf,
-		)? {
-			Some((noffset, range, content_length, websocket_upgrade, expect)) => (
-				noffset + offset + 2,
-				range,
-				content_length,
-				websocket_upgrade,
-				expect,
-			),
-			None => return Ok(None),
-		};
+		let (len, range, content_length, websocket_upgrade, expect, connection_close) =
+			match Self::parse_headers(
+				&buffer[(offset + 2)..],
+				config,
+				header_map,
+				key_buf,
+				value_buf,
+			)? {
+				Some((
+					noffset,
+					range,
+					content_length,
+					websocket_upgrade,
+					expect,
+					connection_close,
+				)) => (
+					noffset + offset + 2,
+					range,
+					content_length,
+					websocket_upgrade,
+					expect,
+					connection_close,
+				),
+				None => return Ok(None),
+			};
 
 		if len > config.max_header_size {
 			return Err(ErrorKind::HttpError431("Request Header Fields Too Large".into()).into());
@@ -623,6 +625,7 @@ impl<'a> HttpHeaders<'a> {
 			len,
 			range,
 			expect,
+			connection_close,
 			websocket_upgrade,
 			content_length,
 		}))
@@ -646,6 +649,10 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn has_range(&self) -> bool {
 		self.range
+	}
+
+	pub fn is_close(&self) -> bool {
+		self.connection_close
 	}
 
 	pub fn len(&self) -> usize {
@@ -752,14 +759,14 @@ impl<'a> HttpHeaders<'a> {
 		config: &HttpConfig,
 	) -> Result<Option<(HttpVersion, usize)>, Error> {
 		let buffer_len = buffer.len();
-		let http_bytes_len = HTTP10_BYTES.len();
+		let http_bytes_len = HTTP10_BYTES_MATCH.len();
 		if buffer_len < http_bytes_len {
 			Ok(None)
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP10_BYTES) {
+		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP10_BYTES_MATCH) {
 			Ok(Some((HttpVersion::V10, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP11_BYTES) {
+		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP11_BYTES_MATCH) {
 			Ok(Some((HttpVersion::V11, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP20_BYTES) {
+		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP20_BYTES_MATCH) {
 			Ok(Some((HttpVersion::V20, http_bytes_len)))
 		} else {
 			let mut offset = 0;
@@ -865,7 +872,7 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool, usize, bool, bool)>, Error> {
+	) -> Result<Option<(usize, bool, usize, bool, bool, bool)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
@@ -874,6 +881,7 @@ impl<'a> HttpHeaders<'a> {
 		let mut range = false;
 		let mut websocket_upgrade = false;
 		let mut expect = false;
+		let mut connection_close = false;
 		let mut content_length = 0;
 
 		loop {
@@ -921,6 +929,7 @@ impl<'a> HttpHeaders<'a> {
 								content_length,
 								websocket_upgrade,
 								expect,
+								connection_close,
 							)));
 						}
 					}
@@ -988,6 +997,10 @@ impl<'a> HttpHeaders<'a> {
 					websocket_upgrade = true;
 				} else if bytes_eq(&key_buf[0..key_offset], EXPECT_BYTES) {
 					expect = true;
+				} else if bytes_eq(&key_buf[0..key_offset], CONNECTION_BYTES)
+					&& bytes_eq(&value_buf[4..value_offset], CLOSE_BYTES)
+				{
+					connection_close = true;
 				}
 
 				match header_map.get_raw(&key_buf) {
@@ -1049,6 +1062,7 @@ impl<'a> HttpHeaders<'a> {
 						content_length,
 						websocket_upgrade,
 						expect,
+						connection_close,
 					)));
 				}
 			}

@@ -1157,6 +1157,9 @@ where
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		remote_peer: &Option<SocketAddr>,
 		now: SystemTime,
+		cache: &Arc<RwLock<HttpCache>>,
+		webroot: &Vec<u8>,
+		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 	) -> Result<
 		(
 			bool,
@@ -1217,7 +1220,31 @@ where
 					}
 					Err(e) => {
 						warn!("Error while communicating with proxy: {}", e.kind(),)?;
-						conn_data.write(HTTP_ERROR_502)?;
+
+						match Self::send_file(
+							HTTP_CODE_502,
+							&config.error_page,
+							conn_data,
+							config,
+							cache,
+							headers.get_version(),
+							headers.get_method(),
+							None,
+							&mime_map,
+							&async_connections,
+							now,
+							webroot,
+							slabs,
+							headers.is_close(),
+						) {
+							Ok(_) => {}
+							Err(_e) => {
+								conn_data.write(HTTP_ERROR_502)?;
+								if headers.is_close() {
+									conn_data.close()?;
+								}
+							}
+						}
 						(None, None, None)
 					}
 				};
@@ -1341,21 +1368,101 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			Err(e) => {
 				match e.kind() {
 					ErrorKind::HttpError400(_) => {
-						conn_data.write(HTTP_ERROR_400)?;
-						conn_data.close()?;
+						match Self::send_file(
+							HTTP_CODE_400,
+							&config.error_page,
+							conn_data,
+							config,
+							cache,
+							&HttpVersion::V10,
+							&HttpMethod::Get,
+							None,
+							&mime_map,
+							&async_connections,
+							now,
+							webroot,
+							slabs,
+							true,
+						) {
+							Ok(_) => {}
+							Err(_e) => {
+								conn_data.write(HTTP_ERROR_400)?;
+								conn_data.close()?;
+							}
+						}
 					}
 					ErrorKind::HttpError405(_) => {
-						conn_data.write(HTTP_ERROR_405)?;
-						conn_data.close()?;
+						match Self::send_file(
+							HTTP_CODE_405,
+							&config.error_page,
+							conn_data,
+							config,
+							cache,
+							&HttpVersion::V10,
+							&HttpMethod::Get,
+							None,
+							&mime_map,
+							&async_connections,
+							now,
+							webroot,
+							slabs,
+							true,
+						) {
+							Ok(_) => {}
+							Err(_e) => {
+								conn_data.write(HTTP_ERROR_405)?;
+								conn_data.close()?;
+							}
+						}
 					}
 					ErrorKind::HttpError431(_) => {
-						conn_data.write(HTTP_ERROR_431)?;
-						conn_data.close()?;
+						match Self::send_file(
+							HTTP_CODE_431,
+							&config.error_page,
+							conn_data,
+							config,
+							cache,
+							&HttpVersion::V10,
+							&HttpMethod::Get,
+							None,
+							&mime_map,
+							&async_connections,
+							now,
+							webroot,
+							slabs,
+							true,
+						) {
+							Ok(_) => {}
+							Err(_e) => {
+								conn_data.write(HTTP_ERROR_431)?;
+								conn_data.close()?;
+							}
+						}
 					}
 					_ => {
 						error!("Internal server error: {}", e)?;
-						conn_data.write(HTTP_ERROR_500)?;
-						conn_data.close()?;
+						match Self::send_file(
+							HTTP_CODE_500,
+							&config.error_page,
+							conn_data,
+							config,
+							cache,
+							&HttpVersion::V10,
+							&HttpMethod::Get,
+							None,
+							&mime_map,
+							&async_connections,
+							now,
+							webroot,
+							slabs,
+							true,
+						) {
+							Ok(_) => {}
+							Err(_e) => {
+								conn_data.write(HTTP_ERROR_500)?;
+								conn_data.close()?;
+							}
+						}
 					}
 				}
 				debug!("parsing headers generated error: {}", e)?;
@@ -1377,7 +1484,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							conn_info,
 							buffer,
 							sha1,
-							//&mut thread_context.sha1,
 							&ws_handler,
 						)?;
 						if is_ws {
@@ -1387,8 +1493,28 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					None => {}
 				}
 				if headers.content_len()? > config.max_content_len {
-					conn_data.write(HTTP_ERROR_413)?;
-					conn_data.close()?;
+					match Self::send_file(
+						HTTP_CODE_413,
+						&config.error_page,
+						conn_data,
+						config,
+						cache,
+						headers.get_version(),
+						headers.get_method(),
+						None,
+						&mime_map,
+						&async_connections,
+						now,
+						webroot,
+						slabs,
+						true,
+					) {
+						Ok(_) => {}
+						Err(_e) => {
+							conn_data.write(HTTP_ERROR_413)?;
+							conn_data.close()?;
+						}
+					}
 					return Ok((0, None, None));
 				}
 
@@ -1441,6 +1567,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						slabs,
 						remote_peer,
 						now,
+						cache,
+						webroot,
+						mime_map,
 					)?;
 
 					match api_context {
@@ -1471,6 +1600,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 				if !was_api && !was_proxy {
 					match Self::send_file(
+						HTTP_CODE_200,
 						&headers.get_uri(),
 						conn_data,
 						config,
@@ -1481,9 +1611,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						&mime_map,
 						&async_connections,
 						now,
-						//&thread_context.webroot,
 						webroot,
 						slabs,
+						headers.is_close(),
 					) {
 						Ok(k) => {
 							key = k;
@@ -1492,6 +1622,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							match e.kind() {
 								ErrorKind::HttpError404(_) => {
 									match Self::send_file(
+										HTTP_CODE_404,
 										&config.error_page,
 										conn_data,
 										config,
@@ -1502,9 +1633,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&mime_map,
 										&async_connections,
 										now,
-										//&thread_context.webroot,
 										webroot,
 										slabs,
+										headers.is_close(),
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1513,16 +1644,79 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 									}
 								}
 								ErrorKind::HttpError405(_) => {
-									conn_data.write(HTTP_ERROR_405)?;
-									conn_data.close()?;
+									match Self::send_file(
+										HTTP_CODE_405,
+										&config.error_page,
+										conn_data,
+										config,
+										cache,
+										headers.get_version(),
+										headers.get_method(),
+										range,
+										&mime_map,
+										&async_connections,
+										now,
+										webroot,
+										slabs,
+										true,
+									) {
+										Ok(k) => key = k,
+										Err(_e) => {
+											conn_data.write(HTTP_ERROR_405)?;
+											conn_data.close()?;
+										}
+									}
 								}
 								ErrorKind::HttpError403(_) => {
-									conn_data.write(HTTP_ERROR_403)?;
+									match Self::send_file(
+										HTTP_CODE_403,
+										&config.error_page,
+										conn_data,
+										config,
+										cache,
+										headers.get_version(),
+										headers.get_method(),
+										range,
+										&mime_map,
+										&async_connections,
+										now,
+										webroot,
+										slabs,
+										headers.is_close(),
+									) {
+										Ok(k) => key = k,
+										Err(_e) => {
+											conn_data.write(HTTP_ERROR_403)?;
+											if headers.is_close() {
+												conn_data.close()?;
+											}
+										}
+									}
 								}
 								_ => {
 									error!("Internal server error: {}", e)?;
-									conn_data.write(HTTP_ERROR_500)?;
-									conn_data.close()?;
+									match Self::send_file(
+										HTTP_CODE_500,
+										&config.error_page,
+										conn_data,
+										config,
+										cache,
+										headers.get_version(),
+										headers.get_method(),
+										range,
+										&mime_map,
+										&async_connections,
+										now,
+										webroot,
+										slabs,
+										true,
+									) {
+										Ok(k) => key = k,
+										Err(_e) => {
+											conn_data.write(HTTP_ERROR_500)?;
+											conn_data.close()?;
+										}
+									}
 								}
 							}
 							debug!(
@@ -1661,6 +1855,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn send_file(
+		code: &[u8],
 		uri: &[u8],
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
@@ -1673,6 +1868,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		now: SystemTime,
 		webroot: &Vec<u8>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
+		close: bool,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -1685,6 +1881,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		// try both the exact path and the version with index appended (metadata too expensive)
 		let (found, need_update, key) = Self::try_send_cache(
+			code,
 			conn_data,
 			&config,
 			&path,
@@ -1696,11 +1893,21 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			mime_map,
 		)?;
 		let need_update = if found && !need_update {
+			match http_version {
+				HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
+				HttpVersion::V11 | HttpVersion::V20 => match close {
+					true => {
+						conn_data.close()?;
+					}
+					false => {}
+				},
+			}
 			return Ok(Some(key));
 		} else if !found {
 			let mut path2 = path.clone();
 			path2.extend_from_slice(INDEX_HTML_BYTES);
 			let (found, need_update, key) = Self::try_send_cache(
+				code,
 				conn_data,
 				config,
 				&path2,
@@ -1711,10 +1918,16 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				range,
 				mime_map,
 			)?;
+
 			if found && !need_update {
 				match http_version {
 					HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
-					HttpVersion::V11 | HttpVersion::V20 => {}
+					HttpVersion::V11 | HttpVersion::V20 => match close {
+						true => {
+							conn_data.close()?;
+						}
+						false => {}
+					},
 				}
 				return Ok(Some(key));
 			}
@@ -1745,6 +1958,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		};
 
 		Self::load_cache(
+			code,
 			path,
 			conn_data.clone(),
 			config.clone(),
@@ -1758,6 +1972,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			mime_map,
 			async_connections,
 			slabs,
+			close,
 		)?;
 
 		Ok(None)
@@ -1765,6 +1980,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	// found, need_update, key
 	fn try_send_cache(
+		code: &[u8],
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		path: &Vec<u8>,
@@ -1814,6 +2030,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					};
 					if !headers_sent {
 						Self::send_headers(
+							code,
 							&conn_data,
 							config,
 							len,
@@ -1859,6 +2076,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn load_cache(
+		code: &[u8],
 		path: Vec<u8>,
 		conn_data: ConnectionData,
 		config: HttpConfig,
@@ -1872,6 +2090,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
+		close: bool,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -1886,6 +2105,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		ctx.set_async()?;
 		let mut ctx = ctx.clone();
+		let code = code.to_vec();
 		std::thread::spawn(move || -> Result<(), Error> {
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
@@ -1906,6 +2126,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 			let mut file = File::open(&path_str)?;
 			Self::send_headers(
+				&code,
 				&conn_data,
 				&config,
 				md.len(),
@@ -1958,10 +2179,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 			match http_version {
 				HttpVersion::V10 | HttpVersion::Unknown => conn_data.close()?,
-				HttpVersion::V11 | HttpVersion::V20 => {}
+				HttpVersion::V11 | HttpVersion::V20 => match close {
+					true => {
+						conn_data.close()?;
+					}
+					false => ctx.async_complete()?,
+				},
 			}
 
-			ctx.async_complete()?;
 			Ok(())
 		});
 		Ok(())
@@ -2190,6 +2415,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn send_headers(
+		code: &[u8],
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		len: u64,
@@ -2204,13 +2430,21 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
-			HttpVersion::V10 | HttpVersion::Unknown => response.extend_from_slice(&HTTP10_BYTES),
-			HttpVersion::V11 => response.extend_from_slice(&HTTP11_BYTES),
-			HttpVersion::V20 => response.extend_from_slice(&HTTP11_BYTES),
+			HttpVersion::V10 | HttpVersion::Unknown => {
+				response.extend_from_slice(&HTTP10_BYTES_DISPLAY)
+			}
+			HttpVersion::V11 => response.extend_from_slice(&HTTP11_BYTES_DISPLAY),
+			HttpVersion::V20 => response.extend_from_slice(&HTTP11_BYTES_DISPLAY),
 		}
 		match range {
-			Some(_range) => response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[0]),
-			None => response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[0]),
+			Some(_range) => {
+				response.extend_from_slice(&HTTP_CODE_206);
+				response.extend_from_slice(&HTTP_PARTIAL_206_HEADERS_VEC[0])
+			}
+			None => {
+				response.extend_from_slice(&code);
+				response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[0])
+			}
 		}
 		response.extend_from_slice(&config.server_name);
 		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[1]);
