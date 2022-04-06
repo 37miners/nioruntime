@@ -77,6 +77,7 @@ const SIZEOF_U128: usize = std::mem::size_of::<u128>();
 
 pub const HTTP_CODE_206: &[u8] = "206 Partial Content".as_bytes();
 pub const HTTP_CODE_200: &[u8] = "200 OK".as_bytes();
+pub const HTTP_CODE_304: &[u8] = "304 Not Modified".as_bytes();
 pub const HTTP_CODE_400: &[u8] = "400 Bad request".as_bytes();
 pub const HTTP_CODE_403: &[u8] = "403 Forbidden".as_bytes();
 pub const HTTP_CODE_404: &[u8] = "404 Not Found".as_bytes();
@@ -102,6 +103,8 @@ pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
 pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
 pub const BACK_R: &[u8] = "\r".as_bytes();
 pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
+pub const IF_NONE_MATCH: &[u8] = "If-None-Match".as_bytes();
+pub const IF_MODIFIED_SINCE: &[u8] = "If-Modified-Since".as_bytes();
 
 pub const GET_BYTES: &[u8] = "GET ".as_bytes();
 pub const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -512,6 +515,8 @@ pub struct HttpHeaders<'a> {
 	len: usize,
 	range: bool,
 	expect: bool,
+	if_modified_since: bool,
+	if_none_match: bool,
 	websocket_upgrade: bool,
 	connection_close: bool,
 	content_length: usize,
@@ -585,31 +590,43 @@ impl<'a> HttpHeaders<'a> {
 			return Ok(None);
 		}
 
-		let (len, range, content_length, websocket_upgrade, expect, connection_close) =
-			match Self::parse_headers(
-				&buffer[(offset + 2)..],
-				config,
-				header_map,
-				key_buf,
-				value_buf,
-			)? {
-				Some((
-					noffset,
-					range,
-					content_length,
-					websocket_upgrade,
-					expect,
-					connection_close,
-				)) => (
-					noffset + offset + 2,
-					range,
-					content_length,
-					websocket_upgrade,
-					expect,
-					connection_close,
-				),
-				None => return Ok(None),
-			};
+		let (
+			len,
+			range,
+			content_length,
+			websocket_upgrade,
+			expect,
+			connection_close,
+			if_modified_since,
+			if_none_match,
+		) = match Self::parse_headers(
+			&buffer[(offset + 2)..],
+			config,
+			header_map,
+			key_buf,
+			value_buf,
+		)? {
+			Some((
+				noffset,
+				range,
+				content_length,
+				websocket_upgrade,
+				expect,
+				connection_close,
+				if_modified_since,
+				if_none_match,
+			)) => (
+				noffset + offset + 2,
+				range,
+				content_length,
+				websocket_upgrade,
+				expect,
+				connection_close,
+				if_modified_since,
+				if_none_match,
+			),
+			None => return Ok(None),
+		};
 
 		if len > config.max_header_size {
 			return Err(ErrorKind::HttpError431("Request Header Fields Too Large".into()).into());
@@ -627,6 +644,8 @@ impl<'a> HttpHeaders<'a> {
 			expect,
 			connection_close,
 			websocket_upgrade,
+			if_modified_since,
+			if_none_match,
 			content_length,
 		}))
 	}
@@ -649,6 +668,14 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn has_range(&self) -> bool {
 		self.range
+	}
+
+	pub fn has_if_modified_since(&self) -> bool {
+		self.if_modified_since
+	}
+
+	pub fn has_if_none_match(&self) -> bool {
+		self.if_none_match
 	}
 
 	pub fn is_close(&self) -> bool {
@@ -872,7 +899,7 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool, usize, bool, bool, bool)>, Error> {
+	) -> Result<Option<(usize, bool, usize, bool, bool, bool, bool, bool)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
@@ -883,6 +910,8 @@ impl<'a> HttpHeaders<'a> {
 		let mut expect = false;
 		let mut connection_close = false;
 		let mut content_length = 0;
+		let mut if_none_match = false;
+		let mut if_modified_since = false;
 
 		loop {
 			if i > config.max_header_size {
@@ -930,6 +959,8 @@ impl<'a> HttpHeaders<'a> {
 								websocket_upgrade,
 								expect,
 								connection_close,
+								if_modified_since,
+								if_none_match,
 							)));
 						}
 					}
@@ -1001,6 +1032,10 @@ impl<'a> HttpHeaders<'a> {
 					&& bytes_eq(&value_buf[4..value_offset], CLOSE_BYTES)
 				{
 					connection_close = true;
+				} else if bytes_eq(&key_buf[0..key_offset], IF_NONE_MATCH) {
+					if_none_match = true;
+				} else if bytes_eq(&key_buf[0..key_offset], IF_MODIFIED_SINCE) {
+					if_modified_since = true;
 				}
 
 				match header_map.get_raw(&key_buf) {
@@ -1063,6 +1098,8 @@ impl<'a> HttpHeaders<'a> {
 						websocket_upgrade,
 						expect,
 						connection_close,
+						if_modified_since,
+						if_none_match,
 					)));
 				}
 			}

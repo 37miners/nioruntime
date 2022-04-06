@@ -1236,6 +1236,8 @@ where
 							webroot,
 							slabs,
 							headers.is_close(),
+							&None,
+							&None,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1383,6 +1385,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							webroot,
 							slabs,
 							true,
+							&None,
+							&None,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1407,6 +1411,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							webroot,
 							slabs,
 							true,
+							&None,
+							&None,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1431,6 +1437,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							webroot,
 							slabs,
 							true,
+							&None,
+							&None,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1456,6 +1464,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							webroot,
 							slabs,
 							true,
+							&None,
+							&None,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1508,6 +1518,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						webroot,
 						slabs,
 						true,
+						&None,
+						&None,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -1599,6 +1611,17 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				};
 
 				if !was_api && !was_proxy {
+					let if_modified_since = if headers.has_if_modified_since() {
+						headers.get_header_value(&"If-Modified-Since".to_string())?
+					} else {
+						None
+					};
+
+					let if_none_match = if headers.has_if_none_match() {
+						headers.get_header_value(&"If-None-Match".to_string())?
+					} else {
+						None
+					};
 					match Self::send_file(
 						HTTP_CODE_200,
 						&headers.get_uri(),
@@ -1614,6 +1637,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						webroot,
 						slabs,
 						headers.is_close(),
+						&if_modified_since,
+						&if_none_match,
 					) {
 						Ok(k) => {
 							key = k;
@@ -1636,6 +1661,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										webroot,
 										slabs,
 										headers.is_close(),
+										&None,
+										&None,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1659,6 +1686,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										webroot,
 										slabs,
 										true,
+										&None,
+										&None,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1683,6 +1712,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										webroot,
 										slabs,
 										headers.is_close(),
+										&None,
+										&None,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1710,6 +1741,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										webroot,
 										slabs,
 										true,
+										&None,
+										&None,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1869,6 +1902,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		webroot: &Vec<u8>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
+		if_modified_since: &Option<Vec<String>>,
+		if_none_match: &Option<Vec<String>>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -1891,6 +1926,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			http_method,
 			range,
 			mime_map,
+			if_modified_since,
+			if_none_match,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -1917,6 +1954,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				http_method,
 				range,
 				mime_map,
+				if_modified_since,
+				if_none_match,
 			)?;
 
 			if found && !need_update {
@@ -1973,9 +2012,44 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			async_connections,
 			slabs,
 			close,
+			if_modified_since,
+			if_none_match,
 		)?;
 
 		Ok(None)
+	}
+
+	fn not_modified(
+		if_modified_since: &Option<Vec<String>>,
+		if_none_match: &Option<Vec<String>>,
+		etag: &[u8],
+		last_modified: u128,
+	) -> Result<bool, Error> {
+		match &*if_modified_since {
+			Some(if_modified_since) => {
+				let mut date_fmt = vec![];
+				Self::extend_date(&mut date_fmt, last_modified)?;
+				let x = from_utf8(&date_fmt)?;
+				if x == if_modified_since[0] {
+					return Ok(true);
+				}
+			}
+			None => {}
+		}
+
+		match &*if_none_match {
+			Some(if_none_match) => {
+				if if_none_match.len() > 0 {
+					let if_none_match = if_none_match[0].replace("\"", "");
+					if hex::encode(etag).as_bytes() == if_none_match.as_bytes() {
+						return Ok(true);
+					}
+				}
+			}
+			None => {}
+		}
+
+		Ok(false)
 	}
 
 	// found, need_update, key
@@ -1990,6 +2064,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		if_modified_since: &Option<Vec<String>>,
+		if_none_match: &Option<Vec<String>>,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -2021,6 +2097,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				return Ok((true, true, key));
 			} else {
 				let mut len_sum = 0;
+				let mut is_304 = false;
 				for chunk in iter {
 					let chunk_len = chunk.len();
 					let wlen = if chunk_len + len_sum < len.try_into()? {
@@ -2029,26 +2106,49 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						len as usize - len_sum
 					};
 					if !headers_sent {
-						Self::send_headers(
-							code,
-							&conn_data,
-							config,
-							len,
-							if http_method == &HttpMethod::Head {
-								None
-							} else {
-								Some(&chunk[..wlen])
-							},
-							now_millis,
+						if Self::not_modified(
+							if_modified_since,
+							if_none_match,
+							&etag,
 							last_modified,
-							http_version,
-							etag,
-							range,
-							path,
-							mime_map,
-						)?;
+						)? {
+							is_304 = true;
+							Self::send_headers(
+								HTTP_CODE_304,
+								&conn_data,
+								config,
+								0,
+								None,
+								now_millis,
+								last_modified,
+								http_version,
+								etag,
+								range,
+								path,
+								mime_map,
+							)?;
+						} else {
+							Self::send_headers(
+								code,
+								&conn_data,
+								config,
+								len,
+								if http_method == &HttpMethod::Head {
+									None
+								} else {
+									Some(&chunk[..wlen])
+								},
+								now_millis,
+								last_modified,
+								http_version,
+								etag,
+								range,
+								path,
+								mime_map,
+							)?;
+						}
 						headers_sent = true;
-					} else {
+					} else if !is_304 {
 						Self::write_range(conn_data, &chunk[..wlen], range, len_sum)?;
 					}
 
@@ -2091,6 +2191,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
+		if_modified_since: &Option<Vec<String>>,
+		if_none_match: &Option<Vec<String>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -2106,6 +2208,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		ctx.set_async()?;
 		let mut ctx = ctx.clone();
 		let code = code.to_vec();
+		let if_modified_since = if_modified_since.clone();
+		let if_none_match = if_none_match.clone();
 		std::thread::spawn(move || -> Result<(), Error> {
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
@@ -2113,32 +2217,48 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			in_buf.resize(config.cache_chunk_size.try_into()?, 0u8);
 
 			let mut sha256 = Sha256::new();
-			sha256.write(
-				&md.modified()?
-					.duration_since(UNIX_EPOCH)?
-					.as_millis()
-					.to_be_bytes(),
-			)?;
+			let last_modified = md.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
+			sha256.write(&last_modified.to_be_bytes())?;
 			sha256.write(&md.len().to_be_bytes())?;
 			let hash = sha256.finalize();
 			let etag: [u8; 8] = hash[0..8].try_into()?;
 			let now_u128 = now.duration_since(UNIX_EPOCH)?.as_millis();
 
 			let mut file = File::open(&path_str)?;
-			Self::send_headers(
-				&code,
-				&conn_data,
-				&config,
-				md.len(),
-				None,
-				now_u128,
-				md.modified()?.duration_since(UNIX_EPOCH)?.as_millis(),
-				&http_version,
-				etag,
-				range,
-				&path,
-				&mime_map,
-			)?;
+			let mut is_304 = false;
+
+			if Self::not_modified(&if_modified_since, &if_none_match, &etag, last_modified)? {
+				is_304 = true;
+				Self::send_headers(
+					HTTP_CODE_304,
+					&conn_data,
+					&config,
+					0,
+					None,
+					now_u128,
+					last_modified,
+					&http_version,
+					etag,
+					range,
+					&path,
+					&mime_map,
+				)?;
+			} else {
+				Self::send_headers(
+					&code,
+					&conn_data,
+					&config,
+					md.len(),
+					None,
+					now_u128,
+					md.modified()?.duration_since(UNIX_EPOCH)?.as_millis(),
+					&http_version,
+					etag,
+					range,
+					&path,
+					&mime_map,
+				)?;
+			}
 
 			let mut len_sum = 0;
 			let mut len_written = 0;
@@ -2168,7 +2288,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						}
 					}
 
-					Self::write_range(&conn_data, nslice, range, len_written)?;
+					if !is_304 {
+						Self::write_range(&conn_data, nslice, range, len_written)?;
+					}
 					len_written += nslice.len();
 
 					if len <= 0 {
