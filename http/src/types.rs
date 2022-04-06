@@ -105,6 +105,7 @@ pub const BACK_R: &[u8] = "\r".as_bytes();
 pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
 pub const IF_NONE_MATCH: &[u8] = "If-None-Match".as_bytes();
 pub const IF_MODIFIED_SINCE: &[u8] = "If-Modified-Since".as_bytes();
+pub const ACCEPT_ENCODING: &[u8] = "Accept-Encoding".as_bytes();
 
 pub const GET_BYTES: &[u8] = "GET ".as_bytes();
 pub const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -520,6 +521,7 @@ pub struct HttpHeaders<'a> {
 	websocket_upgrade: bool,
 	connection_close: bool,
 	content_length: usize,
+	accept_encoding: bool,
 }
 
 impl<'a> Display for HttpHeaders<'a> {
@@ -599,6 +601,7 @@ impl<'a> HttpHeaders<'a> {
 			connection_close,
 			if_modified_since,
 			if_none_match,
+			accept_encoding,
 		) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
@@ -615,6 +618,7 @@ impl<'a> HttpHeaders<'a> {
 				connection_close,
 				if_modified_since,
 				if_none_match,
+				accept_encoding,
 			)) => (
 				noffset + offset + 2,
 				range,
@@ -624,6 +628,7 @@ impl<'a> HttpHeaders<'a> {
 				connection_close,
 				if_modified_since,
 				if_none_match,
+				accept_encoding,
 			),
 			None => return Ok(None),
 		};
@@ -647,6 +652,7 @@ impl<'a> HttpHeaders<'a> {
 			if_modified_since,
 			if_none_match,
 			content_length,
+			accept_encoding,
 		}))
 	}
 
@@ -664,6 +670,10 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn has_expect(&self) -> bool {
 		self.expect
+	}
+
+	pub fn has_accept_encoding(&self) -> bool {
+		self.accept_encoding
 	}
 
 	pub fn has_range(&self) -> bool {
@@ -899,7 +909,7 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool, usize, bool, bool, bool, bool, bool)>, Error> {
+	) -> Result<Option<(usize, bool, usize, bool, bool, bool, bool, bool, bool)>, Error> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
@@ -912,6 +922,7 @@ impl<'a> HttpHeaders<'a> {
 		let mut content_length = 0;
 		let mut if_none_match = false;
 		let mut if_modified_since = false;
+		let mut accept_encoding = false;
 
 		loop {
 			if i > config.max_header_size {
@@ -961,6 +972,7 @@ impl<'a> HttpHeaders<'a> {
 								connection_close,
 								if_modified_since,
 								if_none_match,
+								accept_encoding,
 							)));
 						}
 					}
@@ -1036,6 +1048,8 @@ impl<'a> HttpHeaders<'a> {
 					if_none_match = true;
 				} else if bytes_eq(&key_buf[0..key_offset], IF_MODIFIED_SINCE) {
 					if_modified_since = true;
+				} else if bytes_eq(&key_buf[0..key_offset], ACCEPT_ENCODING) {
+					accept_encoding = true;
 				}
 
 				match header_map.get_raw(&key_buf) {
@@ -1100,6 +1114,7 @@ impl<'a> HttpHeaders<'a> {
 						connection_close,
 						if_modified_since,
 						if_none_match,
+						accept_encoding,
 					)));
 				}
 			}
