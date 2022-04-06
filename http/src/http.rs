@@ -1485,10 +1485,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
 				}
-				warn!(
-					"headers.has_accept_encoding={}",
-					headers.has_accept_encoding()
-				);
 
 				match ws_handler {
 					Some(ws_handler) => {
