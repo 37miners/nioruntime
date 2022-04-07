@@ -47,6 +47,7 @@ pub use dirs;
 pub use ed25519_dalek;
 pub use errno;
 pub use failure;
+pub use flate2;
 pub use fsutils;
 pub use futures;
 pub use generic_array;

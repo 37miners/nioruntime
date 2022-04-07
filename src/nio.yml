@@ -8,6 +8,18 @@ args:
         long: config
         takes_value: false
         value_name: config
+    - gzip_compression_level:
+        help: The compression level of gzip. The value must be a number between 0 and 10. 0 being no compression, 10 being highly compressed. The default value is 7. See the flate2 crate for full details on this setting at https://docs.rs/flate2/latest/flate2/struct.Compression.html#method.new.
+        short: g
+        long: gzip_compression_level
+        takes_value: true
+        value_name: gzip_compression_level
+    - gzip_extensions:
+        help: The mime extensions which will be gzipped. By default gzip compression is used for all files in which the client includes the Accept-Encoding header with gzip as one of the values. If this parameter is set, only the extensions that are specified are gzipped.
+        long: gzip_extensions
+        takes_value: true
+        value_name: gzip_extensions
+        multiple: true
     - listener:
         help: TCP SocketAddr to listen for HTTP Requests on. For example 127.0.0.1:8080. If none are specified, 127.0.0.1:8080 is used.
         short: l

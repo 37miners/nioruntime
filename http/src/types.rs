@@ -92,7 +92,8 @@ pub const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 pub const END_HEADERS: &[u8] = "\r\n\r\n".as_bytes();
 pub const CONTENT_LENGTH: &[u8] = "\r\nContent-Length: ".as_bytes();
 pub const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
-pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked\r\n".as_bytes();
+pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked".as_bytes();
+pub const GZIP_ENCODING: &[u8] = "\r\nContent-Encoding: gzip".as_bytes();
 
 pub const UPGRADE_BYTES: &[u8] = "Upgrade".as_bytes();
 pub const WEBSOCKET_BYTES: &[u8] = "websocket".as_bytes();
@@ -106,6 +107,9 @@ pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
 pub const IF_NONE_MATCH: &[u8] = "If-None-Match".as_bytes();
 pub const IF_MODIFIED_SINCE: &[u8] = "If-Modified-Since".as_bytes();
 pub const ACCEPT_ENCODING: &[u8] = "Accept-Encoding".as_bytes();
+
+pub const HTML_EXTENSION: &[u8] = "html".as_bytes();
+pub const SLASH: &[u8] = "/".as_bytes();
 
 pub const GET_BYTES: &[u8] = "GET ".as_bytes();
 pub const POST_BYTES: &[u8] = "POST ".as_bytes();
@@ -661,7 +665,10 @@ impl<'a> HttpHeaders<'a> {
 	}
 
 	pub fn extension(&self) -> &[u8] {
-		self.extension
+		match self.extension == SLASH {
+			true => HTML_EXTENSION,
+			false => self.extension,
+		}
 	}
 
 	pub fn has_websocket_upgrade(&self) -> bool {
@@ -674,6 +681,26 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn has_accept_encoding(&self) -> bool {
 		self.accept_encoding
+	}
+
+	pub fn accept_gzip(&self) -> bool {
+		if !self.accept_encoding {
+			false
+		} else {
+			match self.get_header_value(&"Accept-Encoding".to_string()) {
+				Ok(accept_encoding) => match accept_encoding {
+					Some(accept_encoding) => {
+						if accept_encoding.len() > 0 {
+							accept_encoding[0].find("gzip").is_some()
+						} else {
+							false
+						}
+					}
+					None => false,
+				},
+				Err(_) => false,
+			}
+		}
 	}
 
 	pub fn has_range(&self) -> bool {
@@ -1288,6 +1315,8 @@ pub struct HttpConfig {
 	pub error_page: Vec<u8>,
 	pub max_async_connections: usize,
 	pub max_active_connections: usize,
+	pub gzip_compression_level: u32,
+	pub gzip_extensions: HashSet<Vec<u8>>,
 	pub evh_config: EventHandlerConfig,
 }
 
@@ -1323,6 +1352,8 @@ impl Default for HttpConfig {
 			max_async_connections: 10 * 1024,
 			max_active_connections: 16 * 1024,
 			server_name: format!("NIORuntime Httpd/{}", VERSION).as_bytes().to_vec(),
+			gzip_compression_level: 7,
+			gzip_extensions: HashSet::new(),
 			process_cache_update: 1_000,    // 1 second
 			cache_recheck_fs_millis: 3_000, // 3 seconds
 			connect_timeout: 30_000,        // 30 seconds

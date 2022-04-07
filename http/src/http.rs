@@ -25,6 +25,8 @@ use nioruntime_deps::bytefmt;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
 use nioruntime_deps::colored::Colorize;
 use nioruntime_deps::dirs;
+use nioruntime_deps::flate2::write::GzEncoder;
+use nioruntime_deps::flate2::Compression;
 use nioruntime_deps::fsutils;
 use nioruntime_deps::hex;
 use nioruntime_deps::libc::{
@@ -382,6 +384,15 @@ where
 				.into());
 			}
 		}
+
+		if config.gzip_compression_level > 10 {
+			return Err(ErrorKind::Configuration(format!(
+                                        "gzip_compression_level must be between 0 and 10 inclusive. The value {} was specified",
+                                        config.gzip_compression_level,
+                                ))
+                                .into());
+		}
+
 		Ok(())
 	}
 
@@ -483,6 +494,29 @@ where
 			&format!(
 				"{}",
 				Self::format_bytes(self.config.max_header_value_len.try_into()?)
+			)[..],
+		)?;
+
+		let mut extensions = "[".to_string();
+		let mut first = true;
+		for extension in &self.config.gzip_extensions {
+			if first {
+				extensions = format!("{}{}", extensions, std::str::from_utf8(&extension)?);
+			} else {
+				extensions = format!("{}, {}", extensions, std::str::from_utf8(&extension)?);
+			};
+			first = false;
+		}
+		let extensions = format!("{}]", extensions);
+		self.startup_line("gzip_extensions", &extensions)?;
+
+		self.startup_line(
+			"gzip_compression_level",
+			&format!(
+				"{}",
+				self.config
+					.gzip_compression_level
+					.to_formatted_string(&Locale::en)
 			)[..],
 		)?;
 
@@ -1238,13 +1272,12 @@ where
 							headers.is_close(),
 							&None,
 							&None,
+							false,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
 								conn_data.write(HTTP_ERROR_502)?;
-								if headers.is_close() {
-									conn_data.close()?;
-								}
+								conn_data.close()?;
 							}
 						}
 						(None, None, None)
@@ -1387,6 +1420,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							true,
 							&None,
 							&None,
+							false,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1413,6 +1447,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							true,
 							&None,
 							&None,
+							false,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1439,6 +1474,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							true,
 							&None,
 							&None,
+							false,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1466,6 +1502,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							true,
 							&None,
 							&None,
+							false,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1485,7 +1522,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if config.show_request_headers {
 					warn!("HTTP Request:\n{}", headers)?;
 				}
-
 				match ws_handler {
 					Some(ws_handler) => {
 						let (is_ws, len) = Self::check_websocket(
@@ -1520,6 +1556,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						true,
 						&None,
 						&None,
+						false,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -1622,6 +1659,25 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					} else {
 						None
 					};
+
+					let gzip = if headers.accept_gzip() {
+						if config.gzip_extensions.len() == 0 {
+							true
+						} else {
+							if config
+								.gzip_extensions
+								.get(&headers.extension().to_vec())
+								.is_some()
+							{
+								true
+							} else {
+								false
+							}
+						}
+					} else {
+						false
+					};
+
 					match Self::send_file(
 						HTTP_CODE_200,
 						&headers.get_uri(),
@@ -1639,6 +1695,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						headers.is_close(),
 						&if_modified_since,
 						&if_none_match,
+						gzip,
 					) {
 						Ok(k) => {
 							key = k;
@@ -1663,10 +1720,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										headers.is_close(),
 										&None,
 										&None,
+										false,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
 											conn_data.write(HTTP_ERROR_404)?;
+											conn_data.close()?;
 										}
 									}
 								}
@@ -1688,6 +1747,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										true,
 										&None,
 										&None,
+										false,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1714,13 +1774,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										headers.is_close(),
 										&None,
 										&None,
+										false,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
 											conn_data.write(HTTP_ERROR_403)?;
-											if headers.is_close() {
-												conn_data.close()?;
-											}
+											conn_data.close()?;
 										}
 									}
 								}
@@ -1743,6 +1802,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										true,
 										&None,
 										&None,
+										false,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1904,6 +1964,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		close: bool,
 		if_modified_since: &Option<Vec<String>>,
 		if_none_match: &Option<Vec<String>>,
+		gzip: bool,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -1928,6 +1989,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			mime_map,
 			if_modified_since,
 			if_none_match,
+			gzip,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -1956,6 +2018,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				mime_map,
 				if_modified_since,
 				if_none_match,
+				gzip,
 			)?;
 
 			if found && !need_update {
@@ -2014,6 +2077,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			close,
 			if_modified_since,
 			if_none_match,
+			gzip,
 		)?;
 
 		Ok(None)
@@ -2066,6 +2130,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		if_modified_since: &Option<Vec<String>>,
 		if_none_match: &Option<Vec<String>>,
+		gzip: bool,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -2105,6 +2170,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					} else {
 						len as usize - len_sum
 					};
+
 					if !headers_sent {
 						if Self::not_modified(
 							if_modified_since,
@@ -2126,6 +2192,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								range,
 								path,
 								mime_map,
+								gzip,
 							)?;
 						} else {
 							Self::send_headers(
@@ -2145,15 +2212,21 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								range,
 								path,
 								mime_map,
+								gzip,
 							)?;
 						}
 						headers_sent = true;
 					} else if !is_304 {
-						Self::write_range(conn_data, &chunk[..wlen], range, len_sum)?;
+						Self::write_range(conn_data, &chunk[..wlen], range, len_sum, gzip, config)?;
 					}
 
 					len_sum += chunk_len;
 				}
+
+				if gzip {
+					conn_data.write("0\r\n\r\n".as_bytes())?;
+				}
+
 				if update_lc.is_none() {
 					// it's found, it doesn't need an update to last check
 					return Ok((true, false, key));
@@ -2193,6 +2266,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		close: bool,
 		if_modified_since: &Option<Vec<String>>,
 		if_none_match: &Option<Vec<String>>,
+		gzip: bool,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -2242,6 +2316,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					range,
 					&path,
 					&mime_map,
+					gzip,
 				)?;
 			} else {
 				Self::send_headers(
@@ -2257,6 +2332,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					range,
 					&path,
 					&mime_map,
+					gzip,
 				)?;
 			}
 
@@ -2265,6 +2341,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			if http_method != HttpMethod::Head {
 				loop {
 					let len = file.read(&mut in_buf)?;
+					if len <= 0 {
+						break;
+					}
 					let nslice = &in_buf[0..len];
 					if len > 0
 						&& md_len
@@ -2289,13 +2368,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					}
 
 					if !is_304 {
-						Self::write_range(&conn_data, nslice, range, len_written)?;
+						Self::write_range(&conn_data, nslice, range, len_written, gzip, &config)?;
 					}
 					len_written += nslice.len();
+				}
 
-					if len <= 0 {
-						break;
-					}
+				if gzip {
+					conn_data.write("0\r\n\r\n".as_bytes())?;
 				}
 			}
 
@@ -2319,8 +2398,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		nslice: &[u8],
 		range: Option<(usize, usize)>,
 		len_written: usize,
+		gzip: bool,
+		config: &HttpConfig,
 	) -> Result<(), Error> {
-		match range {
+		let mut response = vec![];
+		let slice = match range {
 			Some(range) => {
 				let nslice_len = nslice.len();
 				if !(len_written > (1 + range.1) || len_written + nslice_len < range.0) {
@@ -2333,13 +2415,30 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						start = range.0 - len_written;
 					}
 					if start < end {
-						conn_data.write(&nslice[start..end])?;
+						&nslice[start..end]
+					} else {
+						&[]
 					}
+				} else {
+					&[]
 				}
 			}
-			None => {
-				conn_data.write(nslice)?;
-			}
+			None => &nslice,
+		};
+		if slice.len() > 0 {
+			let slice = if gzip {
+				let mut encoder =
+					GzEncoder::new(Vec::new(), Compression::new(config.gzip_compression_level));
+				encoder.write(slice)?;
+				let gzip_vec = encoder.finish()?;
+				response.extend_from_slice(format!("{:X}\r\n", gzip_vec.len()).as_bytes());
+				response.extend_from_slice(&gzip_vec[..]);
+				response.extend_from_slice("\r\n".as_bytes());
+				&response[..]
+			} else {
+				slice
+			};
+			conn_data.write(slice)?;
 		}
 		Ok(())
 	}
@@ -2549,6 +2648,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		range: Option<(usize, usize)>,
 		path: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		gzip: bool,
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -2578,17 +2678,23 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			HttpVersion::V10 | HttpVersion::Unknown => response.extend_from_slice(&CLOSE_BYTES),
 			HttpVersion::V11 | HttpVersion::V20 => response.extend_from_slice(&KEEP_ALIVE_BYTES),
 		}
-		response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[4]);
-		match range {
-			Some(range) => {
-				let mut rlen = (1 + range.1).saturating_sub(range.0).try_into()?;
-				if rlen > len {
-					rlen = len;
-				}
 
-				Self::extend_len(&mut response, rlen)?
+		if gzip {
+			response.extend_from_slice(TRANSFER_ENCODING_CHUNKED);
+			response.extend_from_slice(GZIP_ENCODING);
+		} else {
+			response.extend_from_slice(&HTTP_OK_200_HEADERS_VEC[4]);
+			match range {
+				Some(range) => {
+					let mut rlen = (1 + range.1).saturating_sub(range.0).try_into()?;
+					if rlen > len {
+						rlen = len;
+					}
+
+					Self::extend_len(&mut response, rlen)?
+				}
+				None => Self::extend_len(&mut response, len)?,
 			}
-			None => Self::extend_len(&mut response, len)?,
 		}
 
 		Self::extend_content_type(&mut response, path, mime_map)?;
@@ -2627,11 +2733,36 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						end = chunk_len;
 					}
 					if start < end {
-						response.extend_from_slice(&chunk[start..end]);
+						if gzip {
+							let mut encoder = GzEncoder::new(
+								Vec::new(),
+								Compression::new(config.gzip_compression_level),
+							);
+							encoder.write(&chunk[start..end])?;
+							let gzip_vec = encoder.finish()?;
+							response
+								.extend_from_slice(format!("{:X}\r\n", gzip_vec.len()).as_bytes());
+							response.extend_from_slice(&gzip_vec[..]);
+							response.extend_from_slice("\r\n".as_bytes());
+						} else {
+							response.extend_from_slice(&chunk[start..end]);
+						}
 					}
 				}
 				None => {
-					response.extend_from_slice(&chunk);
+					if gzip {
+						let mut encoder = GzEncoder::new(
+							Vec::new(),
+							Compression::new(config.gzip_compression_level),
+						);
+						encoder.write(chunk)?;
+						let gzip_vec = encoder.finish()?;
+						response.extend_from_slice(format!("{:X}\r\n", gzip_vec.len()).as_bytes());
+						response.extend_from_slice(&gzip_vec[..]);
+						response.extend_from_slice("\r\n".as_bytes());
+					} else {
+						response.extend_from_slice(&chunk);
+					}
 				}
 			},
 			None => {}
@@ -2996,6 +3127,7 @@ mod test {
 	};
 	use crate::HttpApiConfig;
 	use crate::HttpHeaders;
+	use nioruntime_deps::flate2::read::GzDecoder;
 	use nioruntime_deps::rand;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_evh::EventHandlerConfig;
@@ -4938,6 +5070,85 @@ Content-Length: 30\r\n\
 
 		http1.stop()?;
 		http2.stop()?;
+		tear_down_test_dir(root_dir)?;
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_gzip() -> Result<(), Error> {
+		let root_dir = "./.test_gzip.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 19999;
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			temp_dir: format!("{}/tmp", root_dir),
+			debug: true,
+			show_request_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /index.html HTTP/1.0\r\nAccept-Encoding: gzip\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(1000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len == 0 {
+				break;
+			}
+		}
+
+		let find = bytes_find(&buf[0..len_sum], "\r\n\r\n".as_bytes());
+		assert!(find.is_some());
+		let mut gz = GzDecoder::new(&buf[(find.unwrap() + 8)..(buf.len() - 5)]);
+		let mut s = String::new();
+		gz.read_to_string(&mut s)?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(b"GET /index.html HTTP/1.0\r\n\r\n")?;
+
+		let mut buf = vec![];
+		buf.resize(1000, 0u8);
+		let mut len_sum = 0;
+		loop {
+			let len = strm.read(&mut buf[len_sum..])?;
+			len_sum += len;
+			if len == 0 {
+				break;
+			}
+		}
+
+		let resp = std::str::from_utf8(&buf[0..len_sum])?;
+
+		// resp should contain the delated portion of the first response
+		assert!(resp.find(&s).is_some());
+
+		http.stop()?;
+
 		tear_down_test_dir(root_dir)?;
 
 		Ok(())

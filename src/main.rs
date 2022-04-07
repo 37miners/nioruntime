@@ -23,6 +23,7 @@ use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_http::{send_websocket_message, ApiContext, HttpConfig, HttpServer, ListenerType};
 use nioruntime_log::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -280,6 +281,37 @@ fn real_main() -> Result<(), Error> {
 		false => match file_args.is_present("threads") {
 			true => file_args.value_of("threads").unwrap().parse()?,
 			false => 8,
+		},
+	};
+
+	let gzip_compression_level = match args.is_present("gzip_compression_level") {
+		true => args.value_of("gzip_compression_level").unwrap().parse()?,
+		false => match file_args.is_present("gzip_compression_level") {
+			true => file_args
+				.value_of("gzip_compression_level")
+				.unwrap()
+				.parse()?,
+			false => 7,
+		},
+	};
+
+	let gzip_extensions = match args.is_present("gzip_extensions") {
+		true => {
+			let mut gzip_extensions = HashSet::new();
+			for gzip_extension in args.values_of("gzip_extensions").unwrap() {
+				gzip_extensions.insert(gzip_extension.as_bytes().to_vec());
+			}
+			gzip_extensions
+		}
+		false => match file_args.is_present("gzip_extensions") {
+			true => {
+				let mut gzip_extensions = HashSet::new();
+				for gzip_extension in file_args.values_of("gzip_extensions").unwrap() {
+					gzip_extensions.insert(gzip_extension.as_bytes().to_vec());
+				}
+				gzip_extensions
+			}
+			false => HashSet::new(),
 		},
 	};
 
@@ -587,6 +619,8 @@ fn real_main() -> Result<(), Error> {
 		max_bring_to_front,
 		process_cache_update,
 		cache_recheck_fs_millis,
+		gzip_compression_level,
+		gzip_extensions,
 		connect_timeout,
 		idle_timeout,
 		mainlog_max_age,
