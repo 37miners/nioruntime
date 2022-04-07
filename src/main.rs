@@ -33,6 +33,14 @@ use std::time::Instant;
 
 info!();
 
+const POST_BYTES: &[u8] = "/post".as_bytes();
+const EMPTY_REPLY: &[u8] = b"HTTP/1.1 200 Ok\r\n\
+Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Content-Type: text/html\r\n\
+Content-Length: 8\r\n\
+Connection: close\r\n\r\n\
+Empty.\r\n";
+
 // include build information
 pub mod built_info {
 	include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -586,9 +594,9 @@ fn real_main() -> Result<(), Error> {
 		false => file_args.is_present("debug"),
 	};
 
-	let debug_post = match args.is_present("debug_post") {
+	let debug_api = match args.is_present("debug_api") {
 		true => true,
-		false => file_args.is_present("debug_post"),
+		false => file_args.is_present("debug_api"),
 	};
 
 	let debug_websocket = match args.is_present("debug_websocket") {
@@ -629,7 +637,7 @@ fn real_main() -> Result<(), Error> {
 		max_async_connections,
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
-		debug_post,
+		debug_api,
 		debug_websocket,
 		evh_config: EventHandlerConfig {
 			threads,
@@ -671,9 +679,10 @@ fn real_main() -> Result<(), Error> {
 
 	let mut http = HttpServer::new(config)?;
 
-	if debug_post {
+	if debug_api {
 		let mut mappings = std::collections::HashSet::new();
 		mappings.insert("/post".as_bytes().to_vec());
+		mappings.insert("/get".as_bytes().to_vec());
 		http.set_api_config(nioruntime_http::HttpApiConfig {
 			mappings,
 			..Default::default()
@@ -693,21 +702,28 @@ fn real_main() -> Result<(), Error> {
 	}
 
 	http.set_api_handler(move |conn_data, headers, ctx| {
-		ctx.set_async()?;
+		match headers.get_uri() {
+			POST_BYTES => {
+				ctx.set_async()?;
 
-		let content_len = headers.content_len()?;
-		let conn_data = conn_data.clone();
-		let mut ctx = ctx.clone();
-		std::thread::spawn(move || -> Result<(), Error> {
-			match pull_post_thread(content_len, &mut ctx, &conn_data) {
-				Ok(_) => {}
-				Err(e) => {
-					warn!("pull post generated error: {}", e)?;
-				}
+				let content_len = headers.content_len()?;
+				let conn_data = conn_data.clone();
+				let mut ctx = ctx.clone();
+				std::thread::spawn(move || -> Result<(), Error> {
+					match pull_post_thread(content_len, &mut ctx, &conn_data) {
+						Ok(_) => {}
+						Err(e) => {
+							warn!("pull post generated error: {}", e)?;
+						}
+					}
+					ctx.async_complete()?;
+					Ok(())
+				});
 			}
-			ctx.async_complete()?;
-			Ok(())
-		});
+			_ => {
+				conn_data.write(EMPTY_REPLY)?;
+			}
+		}
 		Ok(())
 	})?;
 	http.start()?;

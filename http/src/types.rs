@@ -218,7 +218,7 @@ Connection: close\r\n\
 \r\n\
 Service Unavailable.\r\n";
 
-pub const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 Internal Server Error\r\n\
+pub const HTTP_ERROR_500: &[u8] = b"HTTP/1.1 500 Internal Server Error\r\n\
 Server: nioruntime httpd/0.0.3-beta.1\r\n\
 Content-Type: text/html\r\n\
 Content-Length: 24\r\n\
@@ -1305,7 +1305,7 @@ pub struct HttpConfig {
 	pub show_request_headers: bool,
 	pub show_response_headers: bool,
 	pub debug: bool,
-	pub debug_post: bool,
+	pub debug_api: bool,
 	pub debug_websocket: bool,
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
@@ -1360,7 +1360,7 @@ impl Default for HttpConfig {
 			idle_timeout: 60_000,           // 1 minute
 			show_request_headers: false,    // debug: show request headers
 			show_response_headers: false,   // debug: show response headers
-			debug_post: false, // debug: dummy post request handler (note: we just display the flag here,
+			debug_api: false, // debug: dummy post/get request handler (note: we just display the flag here,
 			// /src/main.rs responsible for creating it.
 			debug_websocket: false, // debug: dummy websocket handler (note: we just display the flag here,
 			// /src/main.rs responsible for creating it.

@@ -640,7 +640,7 @@ where
 		self.debug_flag("--show_request_headers", self.config.show_request_headers)?;
 		self.debug_flag("--show_response_headers", self.config.show_response_headers)?;
 		self.debug_flag("--debug", self.config.debug)?;
-		self.debug_flag("--debug_post", self.config.debug_post)?;
+		self.debug_flag("--debug_api", self.config.debug_api)?;
 		self.debug_flag("--debug_websocket", self.config.debug_websocket)?;
 
 		info_no_ts!("{}", SEPARATOR)?;

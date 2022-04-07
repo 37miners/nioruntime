@@ -46,9 +46,9 @@ args:
         short: d
         long: debug
         takes_value: false
-    - debug_post:
-        help: Show debugging information for post requests. The debug configuration maps the url /post to a dummy api handler for testing purposes. This flag must NOT be set in a production environment.
-        long: debug_post
+    - debug_api:
+        help: Show debugging information for get/post api requests. The debug configuration maps the url /post and /get to a dummy api handler for testing purposes. This flag must NOT be set in a production environment.
+        long: debug_api
         takes_value: false
     - debug_websocket:
         help: Show debugging information for websocket requests. The debug configuration creates a dummy websocket handler for testing purposes. This flag must NOT be set in a production environment.
