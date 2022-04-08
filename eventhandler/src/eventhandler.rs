@@ -2319,7 +2319,7 @@ where
 				None => {
 					// connection already closed
 					debug!("Attempt to write on closed connection: {:?}", connection_id)?;
-					return Ok(());
+					continue;
 				}
 			};
 
