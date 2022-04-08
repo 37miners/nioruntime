@@ -747,7 +747,7 @@ fn pull_post_thread(
 			Err(_) => format!("[{} bytes of non-utf8data]", len),
 		}
 	};
-	warn!("Debug post handler read {} bytes: {}", len, display_str,)?;
+	debug!("Debug post handler read {} bytes: {}", len, display_str,)?;
 	let response = format!(
 		"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\nPost_Data was: {}",
 		display_str.len() + 15,
