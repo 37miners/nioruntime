@@ -79,7 +79,6 @@ args:
         value_name: max_header_name_len
     - max_header_value_len:
         help: Maximum length of a header value in bytes. The default value is 1,024 bytes.
-        short: v
         long: max_header_value_len
         takes_value: true
         value_name: max_header_value_len
@@ -224,3 +223,10 @@ args:
         long: max_content_len
         takes_value: true
         value_name: max_content_len
+    - virtual_server:
+        help: Specifies a virtual server config. Format is --virtual_server <hostname> <directory> or --virtual_server <bind_ip> <directory>.
+        long: virtual_server
+        short: v
+        takes_value: true
+        value_name: virtual_server
+        multiple: true

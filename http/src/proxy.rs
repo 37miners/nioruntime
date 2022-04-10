@@ -402,11 +402,11 @@ pub fn process_proxy_outbound(
 						}
 					},
 					ProxyRotation::StickyCookie(cookie_target) => {
-						match headers.get_header_value(&"Cookie".to_string())? {
+						match headers.get_header_value(COOKIE_BYTES)? {
 							Some(cookies) => {
 								let mut ret = None;
 								for cookie in cookies {
-									let cookie = cookie.as_bytes();
+									let cookie = &cookie;
 									let mut start = 0;
 									loop {
 										let mut end = cookie.len();

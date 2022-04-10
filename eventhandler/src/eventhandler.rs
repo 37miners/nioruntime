@@ -14,9 +14,12 @@
 
 //! An event handler library.
 
+use crate::eventhandler::rustls::sign::RsaSigningKey;
 use nioruntime_deps::bitvec::prelude::*;
 use nioruntime_deps::errno::{errno, set_errno, Errno};
 use nioruntime_deps::libc::{self, accept, c_int, c_void, pipe, read, write};
+use nioruntime_deps::rustls::server::ResolvesServerCertUsingSni;
+use nioruntime_deps::rustls::sign::CertifiedKey;
 use nioruntime_deps::{rand, rustls, rustls_pemfile};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
@@ -42,7 +45,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use nioruntime_deps::libc::fcntl;
 #[cfg(unix)]
-use nioruntime_deps::nix::sys::socket::getpeername;
+use nioruntime_deps::nix::sys::socket::{getpeername, getsockname};
 #[cfg(unix)]
 use std::os::unix::prelude::RawFd;
 
@@ -122,14 +125,16 @@ pub struct ConnectionContext {
 	pub buffer: Vec<u8>,
 	pub is_async_complete: bool,
 	pub remote_peer: Option<SocketAddr>,
+	pub local_peer: Option<SocketAddr>,
 }
 
 impl ConnectionContext {
-	fn new() -> Self {
+	fn new(remote_peer: Option<SocketAddr>, local_peer: Option<SocketAddr>) -> Self {
 		Self {
 			buffer: vec![],
 			is_async_complete: false,
-			remote_peer: None,
+			remote_peer,
+			local_peer,
 		}
 	}
 
@@ -560,22 +565,24 @@ where
 
 		let tls_config = match tls_config {
 			Some(tls_config) => {
-				match ServerConfig::builder()
-					.with_safe_defaults()
-					.with_no_client_auth()
-					.with_single_cert(
-						load_certs(&tls_config.certificates_file)?,
-						load_private_key(&tls_config.private_key_file)?,
-					) {
-					Ok(tls_server_config) => Some(tls_server_config),
-					Err(e) => {
-						return Err(ErrorKind::TLSError(format!(
-							"TLS not configured properly: {}",
-							e
-						))
-						.into());
-					}
-				}
+				let mut cert_resolver = ResolvesServerCertUsingSni::new();
+				cert_resolver.add(
+					&tls_config.sni_host,
+					CertifiedKey {
+						cert: load_certs(&tls_config.certificates_file)?,
+						key: Arc::new(RsaSigningKey::new(&load_private_key(
+							&tls_config.private_key_file,
+						)?)?),
+						ocsp: None,
+						sct_list: None,
+					},
+				)?;
+				Some(
+					ServerConfig::builder()
+						.with_safe_defaults()
+						.with_no_client_auth()
+						.with_cert_resolver(Arc::new(cert_resolver)),
+				)
 			}
 			None => None,
 		};
@@ -671,9 +678,26 @@ where
 			}
 		};
 
+		#[cfg(unix)]
+		let remote_peer = match getpeername(handle) {
+			Ok(remote_peer) => Some(SocketAddr::from_str(&remote_peer.to_string())?),
+			Err(_) => None,
+		};
+		#[cfg(windows)]
+		let remote_peer: Option<SocketAddr> = None; // TODO: make work for windows
+
+		#[cfg(unix)]
+		let local_peer = match getsockname(handle) {
+			Ok(local_peer) => Some(SocketAddr::from_str(&local_peer.to_string())?),
+			Err(_) => None,
+		};
+		#[cfg(windows)]
+		let local_peer: Option<SocketAddr> = None; // TODO: make work for windows
+
 		let connection_hash_data = next.data_as_mut::<ConnectionHashData>().unwrap();
 		connection_hash_data.connection_info = Some(connection_info);
-		connection_hash_data.connection_context = Some(ConnectionContext::new());
+		connection_hash_data.connection_context =
+			Some(ConnectionContext::new(remote_peer, local_peer));
 
 		connection_index_handle_map.insert_raw(
 			&handle.to_be_bytes(),
@@ -682,6 +706,7 @@ where
 
 		connection_index_id_map
 			.insert_raw(&id.to_be_bytes(), &(next.index() as usize).to_be_bytes())?;
+
 		Ok(())
 	}
 
@@ -1445,13 +1470,17 @@ where
 				None,
 			);
 
-			let mut connection_context = ConnectionContext::new();
-
 			#[cfg(unix)]
 			let remote_peer = Some(SocketAddr::from_str(&getpeername(handle)?.to_string())?);
 			#[cfg(windows)]
 			let remote_peer: Option<SocketAddr> = None; // TODO: make work for windows
-			connection_context.remote_peer = remote_peer;
+
+			#[cfg(unix)]
+			let local_peer = Some(SocketAddr::from_str(&getsockname(handle)?.to_string())?);
+			#[cfg(windows)]
+			let local_peer: Option<SocketAddr> = None; // TODO: make work for windows
+
+			let mut connection_context = ConnectionContext::new(remote_peer, local_peer);
 
 			match &callbacks.on_accept {
 				Some(on_accept) => {
@@ -2489,6 +2518,8 @@ pub struct TLSServerConfig {
 	pub private_key_file: String,
 	/// The location of the certificates file (fullchain.pem).
 	pub certificates_file: String,
+	/// The sni_host to use with the cert/key pair.
+	pub sni_host: String,
 }
 
 pub struct TLSClientConfig {
@@ -3398,6 +3429,7 @@ mod tests {
 			Some(TLSServerConfig {
 				certificates_file: "./src/resources/cert.pem".to_string(),
 				private_key_file: "./src/resources/key.pem".to_string(),
+				sni_host: "localhost".to_string(),
 			}),
 		)?;
 

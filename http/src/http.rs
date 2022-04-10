@@ -42,10 +42,10 @@ use nioruntime_deps::rand;
 use nioruntime_deps::sha1::Sha1;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
-use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
+use nioruntime_util::bytes_find;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::StaticHash;
 use nioruntime_util::{lockr, lockw};
@@ -161,6 +161,7 @@ where
 		let config2 = self.config.clone();
 		let config3 = self.config.clone();
 		let config4 = self.config.clone();
+
 		let cache = Arc::new(RwLock::new(HttpCache::new(
 			self.config.max_cache_files,
 			self.config.max_cache_chunks,
@@ -299,33 +300,7 @@ where
 			}
 
 			let tls_config = if self.config.listeners[i].0 == ListenerType::Tls {
-				let port = self.config.listeners[i].1.port();
-				let private_key_file = match self.config.privkey_map.get(&port) {
-					Some(private_key_file) => private_key_file.to_string(),
-					None => {
-						return Err(ErrorKind::Configuration(format!(
-							"No privkey file specified for port {}",
-							self.config.listeners[i].1.port()
-						))
-						.into());
-					}
-				};
-
-				let certificates_file = match self.config.fullchain_map.get(&port) {
-					Some(certificates_file) => certificates_file.to_string(),
-					None => {
-						return Err(ErrorKind::Configuration(format!(
-							"No fullchain file specified for port {}",
-							self.config.listeners[i].1.port()
-						))
-						.into());
-					}
-				};
-
-				Some(TLSServerConfig {
-					certificates_file,
-					private_key_file,
-				})
+				self.config.listeners[i].2.clone()
 			} else {
 				None
 			};
@@ -441,6 +416,19 @@ where
 			"Listener Addresses",
 			&format!("{:?}", &self.config.listeners)[..],
 		)?;
+
+		let mut virtual_host_map = HashMap::new();
+		for (k, v) in &self.config.virtual_hosts {
+			virtual_host_map.insert(from_utf8(&k)?.to_string(), from_utf8(&v)?.to_string());
+		}
+
+		let mut virtual_ip_map = HashMap::new();
+		for (k, v) in &self.config.virtual_ips {
+			virtual_ip_map.insert(k, from_utf8(&v)?.to_string());
+		}
+
+		self.startup_line("virtual_hosts", &format!("{:?}", virtual_host_map))?;
+		self.startup_line("virtual_ips", &format!("{:?}", virtual_ip_map))?;
 
 		self.startup_line("mainlog", &self.config.mainlog)?;
 
@@ -772,6 +760,7 @@ where
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
+		local_peer: &Option<SocketAddr>,
 	) -> Result<
 		(
 			bool,
@@ -847,6 +836,7 @@ where
 				proxy_state,
 				mime_map,
 				async_connections,
+				local_peer,
 			)?;
 		}
 
@@ -871,6 +861,7 @@ where
 		Self::update_conn_info(thread_context, conn_data, now)?;
 
 		let remote_peer = &ctx.remote_peer.clone();
+		let local_peer = &ctx.local_peer.clone();
 		let buffer = ctx.get_buffer();
 		let buffer_len = buffer.len();
 		let connection_id = conn_data.get_connection_id();
@@ -940,6 +931,7 @@ where
 			&mut thread_context.proxy_state,
 			&mut thread_context.mime_map,
 			&mut thread_context.async_connections,
+			local_peer,
 		)?;
 
 		if was_post_await {
@@ -1004,6 +996,7 @@ where
 					&mut thread_context.proxy_state,
 					&mut thread_context.mime_map,
 					&mut thread_context.async_connections,
+					local_peer,
 				)?;
 
 				match nconn {
@@ -1059,6 +1052,7 @@ where
 				&mut thread_context.proxy_state,
 				&mut thread_context.mime_map,
 				&mut thread_context.async_connections,
+				local_peer,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1093,6 +1087,7 @@ where
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
+		local_peer: &Option<SocketAddr>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1129,6 +1124,7 @@ where
 				proxy_state,
 				mime_map,
 				async_connections,
+				local_peer,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1164,10 +1160,10 @@ where
 		conn_data: &ConnectionData,
 	) -> Result<(), Error> {
 		if headers.has_expect() {
-			match headers.get_header_value(&"Expect".to_string())? {
+			match headers.get_header_value(EXPECT_BYTES)? {
 				Some(values) => {
 					for value in values {
-						if value == "100-continue" {
+						if value == "100-continue".as_bytes() {
 							conn_data.write(HTTP_CONTINUE_100)?;
 						}
 					}
@@ -1194,6 +1190,7 @@ where
 		cache: &Arc<RwLock<HttpCache>>,
 		webroot: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
+		local_peer: &Option<SocketAddr>,
 	) -> Result<
 		(
 			bool,
@@ -1273,6 +1270,8 @@ where
 							&None,
 							&None,
 							false,
+							headers.get_header_value(HOST_BYTES)?,
+							local_peer,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1328,14 +1327,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			false => match headers {
 				Some(headers) => {
 					if headers.has_websocket_upgrade() {
-						let sec_key = headers.get_header_value(&"Sec-WebSocket-Key".to_string())?;
+						let sec_key = headers.get_header_value(SEC_WEBSOCKET_KEY_BYTES)?;
 						match sec_key {
 							Some(sec_key) => {
 								if sec_key.len() > 0 {
 									conn_info.is_websocket = true;
 									Self::send_websocket_handshake_response(
 										conn_data,
-										&sec_key[0],
+										&from_utf8(&sec_key[0])?.to_string(),
 										sha1,
 									)?;
 									(true, headers.len())
@@ -1378,6 +1377,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
+		local_peer: &Option<SocketAddr>,
 	) -> Result<
 		(
 			usize,
@@ -1421,6 +1421,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
+							None,
+							local_peer,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1448,6 +1450,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
+							None,
+							local_peer,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1475,6 +1479,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
+							None,
+							local_peer,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1503,6 +1509,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
+							None,
+							local_peer,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1557,6 +1565,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						&None,
 						&None,
 						false,
+						headers.get_header_value(HOST_BYTES)?,
+						local_peer,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -1570,13 +1580,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				Self::check_expect_100_continue(&headers, conn_data)?;
 
 				let range: Option<(usize, usize)> = if headers.has_range() {
-					let range = headers.get_header_value(&"Range".to_string())?;
+					let range = &headers.get_header_value(RANGE_BYTES)?;
 					match range {
 						Some(range) => {
 							if range.len() < 1 {
 								None
 							} else {
-								let range = &range[0];
+								let range = from_utf8(&range[0])?;
 								let start_index = range.find("=");
 								match start_index {
 									Some(start_index) => {
@@ -1619,6 +1629,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						cache,
 						webroot,
 						mime_map,
+						local_peer,
 					)?;
 
 					match api_context {
@@ -1649,13 +1660,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 				if !was_api && !was_proxy {
 					let if_modified_since = if headers.has_if_modified_since() {
-						headers.get_header_value(&"If-Modified-Since".to_string())?
+						headers.get_header_value(IF_MODIFIED_SINCE)?
 					} else {
 						None
 					};
 
 					let if_none_match = if headers.has_if_none_match() {
-						headers.get_header_value(&"If-None-Match".to_string())?
+						headers.get_header_value(IF_NONE_MATCH)?
 					} else {
 						None
 					};
@@ -1696,6 +1707,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						&if_modified_since,
 						&if_none_match,
 						gzip,
+						headers.get_header_value(HOST_BYTES)?,
+						local_peer,
 					) {
 						Ok(k) => {
 							key = k;
@@ -1721,6 +1734,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
+										headers.get_header_value(HOST_BYTES)?,
+										local_peer,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1748,6 +1763,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
+										headers.get_header_value(HOST_BYTES)?,
+										local_peer,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1775,6 +1792,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
+										headers.get_header_value(HOST_BYTES)?,
+										local_peer,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1803,6 +1822,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
+										headers.get_header_value(HOST_BYTES)?,
+										local_peer,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1962,15 +1983,53 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		webroot: &Vec<u8>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
-		if_modified_since: &Option<Vec<String>>,
-		if_none_match: &Option<Vec<String>>,
+		if_modified_since: &Option<Vec<Vec<u8>>>,
+		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
+		host: Option<Vec<Vec<u8>>>,
+		local_peer: &Option<SocketAddr>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
 		}
 
-		let mut path = webroot.clone();
+		let path = if config.virtual_hosts.len() > 0 {
+			match host {
+				Some(host) => {
+					if host.len() > 0 {
+						let host = match bytes_find(&host[0], &[':' as u8]) {
+							Some(index) => &host[0][0..index],
+							None => &host[0][..],
+						};
+
+						match config.virtual_hosts.get(host) {
+							Some(host) => Some(host.clone()),
+							None => None,
+						}
+					} else {
+						None
+					}
+				}
+				None => None,
+			}
+		} else {
+			None
+		};
+
+		let mut path = if path.is_none() && config.virtual_ips.len() > 0 {
+			match local_peer {
+				Some(local_peer) => match config.virtual_ips.get(&local_peer) {
+					Some(local_peer) => local_peer.clone(),
+					None => webroot.clone(),
+				},
+				None => webroot.clone(),
+			}
+		} else if path.is_none() {
+			webroot.clone()
+		} else {
+			path.unwrap()
+		};
+
 		path.extend_from_slice(&uri);
 		Self::clean(&mut path)?;
 		Self::check_path(&path, &webroot)?;
@@ -2084,8 +2143,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn not_modified(
-		if_modified_since: &Option<Vec<String>>,
-		if_none_match: &Option<Vec<String>>,
+		if_modified_since: &Option<Vec<Vec<u8>>>,
+		if_none_match: &Option<Vec<Vec<u8>>>,
 		etag: &[u8],
 		last_modified: u128,
 	) -> Result<bool, Error> {
@@ -2094,7 +2153,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				let mut date_fmt = vec![];
 				Self::extend_date(&mut date_fmt, last_modified)?;
 				let x = from_utf8(&date_fmt)?;
-				if x == if_modified_since[0] {
+				if x.as_bytes() == if_modified_since[0] {
 					return Ok(true);
 				}
 			}
@@ -2103,10 +2162,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		match &*if_none_match {
 			Some(if_none_match) => {
-				if if_none_match.len() > 0 {
-					let if_none_match = if_none_match[0].replace("\"", "");
-					if hex::encode(etag).as_bytes() == if_none_match.as_bytes() {
-						return Ok(true);
+				let if_none_match_len = if_none_match.len();
+				if if_none_match_len > 0 {
+					let if_none_match = &if_none_match[0];
+					if if_none_match.len() > 3 {
+						let if_none_match = &if_none_match[1..(if_none_match_len - 1)];
+						if hex::encode(etag).as_bytes() == if_none_match {
+							return Ok(true);
+						}
 					}
 				}
 			}
@@ -2128,8 +2191,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		if_modified_since: &Option<Vec<String>>,
-		if_none_match: &Option<Vec<String>>,
+		if_modified_since: &Option<Vec<Vec<u8>>>,
+		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
@@ -2264,8 +2327,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
-		if_modified_since: &Option<Vec<String>>,
-		if_none_match: &Option<Vec<String>>,
+		if_modified_since: &Option<Vec<Vec<u8>>>,
+		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
@@ -2280,10 +2343,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		);
 
 		ctx.set_async()?;
+
 		let mut ctx = ctx.clone();
 		let code = code.to_vec();
 		let if_modified_since = if_modified_since.clone();
 		let if_none_match = if_none_match.clone();
+
 		std::thread::spawn(move || -> Result<(), Error> {
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
@@ -3170,6 +3235,7 @@ mod test {
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3275,6 +3341,7 @@ mod test {
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3405,6 +3472,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3503,6 +3571,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3619,6 +3688,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3740,6 +3810,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
 			temp_dir: format!("{}/tmp", root_dir),
@@ -3791,6 +3862,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+				None,
 			)],
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
@@ -3828,6 +3900,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -3919,6 +3992,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -4031,6 +4105,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -4133,6 +4208,7 @@ Content-Length: 10\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -4251,6 +4327,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -4416,6 +4493,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -4552,6 +4630,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+				None,
 			)],
 			show_request_headers: true,
 			webroot: format!("{}/www1", root_dir).as_bytes().to_vec(),
@@ -4589,6 +4668,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www2", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs2/mainlog.log", root_dir),
@@ -4733,6 +4813,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			content_upload_slab_count: 1000,
 			content_upload_slab_size: 8,
@@ -4846,6 +4927,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..])?,
+				None,
 			)],
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
@@ -4885,6 +4967,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
@@ -5085,6 +5168,7 @@ Content-Length: 30\r\n\
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),

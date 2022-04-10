@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use crate::failure::{Backtrace, Context, Fail};
-#[cfg(unix)]
-use crate::nix::errno::Errno;
-use crate::rustls::client::InvalidDnsNameError;
 use nioruntime_deps::hex::FromHexError;
+use nioruntime_deps::nix::errno::Errno;
+use nioruntime_deps::rustls::client::InvalidDnsNameError;
+use nioruntime_deps::rustls::sign::SignError;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
@@ -435,6 +435,14 @@ impl From<ParseFloatError> for Error {
 				"Error parsing float: {}",
 				e
 			))),
+		}
+	}
+}
+
+impl From<SignError> for Error {
+	fn from(e: SignError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::TLSError(format!("Error signing: {}", e))),
 		}
 	}
 }

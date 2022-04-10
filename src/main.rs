@@ -19,6 +19,7 @@ use nioruntime_deps::dirs;
 use nioruntime_deps::fsutils;
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_err::{Error, ErrorKind};
+use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_http::{send_websocket_message, ApiContext, HttpConfig, HttpServer, ListenerType};
 use nioruntime_log::*;
@@ -89,117 +90,21 @@ fn real_main() -> Result<(), Error> {
 		}
 	};
 
-	let fullchain_map = {
-		let mut ret: HashMap<u16, String> = HashMap::new();
-		match args.is_present("fullchain") {
-			true => {
-				for fullchain in args.values_of("fullchain").unwrap() {
-					let mut spl = fullchain.split(':');
-					let port = match spl.next() {
-						Some(port) => port.parse()?,
-						None => {
-							return Err(
-								ErrorKind::Configuration("malformed fullchain".into()).into()
-							);
-						}
-					};
-
-					let file = match spl.next() {
-						Some(file) => file.to_string(),
-						None => {
-							return Err(
-								ErrorKind::Configuration("malformed fullchain".into()).into()
-							);
-						}
-					};
-					ret.insert(port, file);
-				}
-			}
-			false => {}
-		}
-		match file_args.is_present("fullchain") {
-			true => {
-				for fullchain in file_args.values_of("fullchain").unwrap() {
-					let mut spl = fullchain.split(':');
-					let port = match spl.next() {
-						Some(port) => port.parse()?,
-						None => {
-							return Err(
-								ErrorKind::Configuration("malformed fullchain".into()).into()
-							);
-						}
-					};
-					let file = match spl.next() {
-						Some(file) => file.to_string(),
-						None => {
-							return Err(
-								ErrorKind::Configuration("malformed fullchain".into()).into()
-							);
-						}
-					};
-					ret.insert(port, file);
-				}
-			}
-			false => {}
-		}
-
-		ret
-	};
-
-	let privkey_map = {
-		let mut ret: HashMap<u16, String> = HashMap::new();
-		match args.is_present("privkey") {
-			true => {
-				for privkey in args.values_of("privkey").unwrap() {
-					let mut spl = privkey.split(':');
-					let port = match spl.next() {
-						Some(port) => port.parse()?,
-						None => {
-							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
-						}
-					};
-
-					let file = match spl.next() {
-						Some(file) => file.to_string(),
-						None => {
-							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
-						}
-					};
-					ret.insert(port, file);
-				}
-			}
-			false => {}
-		}
-		match file_args.is_present("privkey") {
-			true => {
-				for privkey in file_args.values_of("privkey").unwrap() {
-					let mut spl = privkey.split(':');
-					let port = match spl.next() {
-						Some(port) => port.parse()?,
-						None => {
-							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
-						}
-					};
-
-					let file = match spl.next() {
-						Some(file) => file.to_string(),
-						None => {
-							return Err(ErrorKind::Configuration("malformed privkey".into()).into());
-						}
-					};
-					ret.insert(port, file);
-				}
-			}
-			false => {}
-		}
-
-		ret
-	};
-
 	let mut listeners = match args.is_present("listener") {
 		true => {
 			let mut listeners = vec![];
+			let mut listener_args = vec![];
+
 			for listener in args.values_of("listener").unwrap() {
+				listener_args.push(listener);
+			}
+
+			let mut i = 0;
+			loop {
+				if i >= listener_args.len() {
+					break;
+				}
+				let listener = listener_args[i];
 				let mut spl = listener.split(':');
 				let proto = match spl.next() {
 					Some(proto) => proto,
@@ -222,6 +127,46 @@ fn real_main() -> Result<(), Error> {
 					}
 				};
 
+				let tls_config = if proto == "https" {
+					i += 1;
+					if i >= listener_args.len() {
+						return Err(ErrorKind::Configuration(
+							"malformed listener. private_key_file required for https".into(),
+						)
+						.into());
+					}
+					let private_key_file = listener_args[i].to_string();
+					println!("private_key_file={}", private_key_file);
+
+					i += 1;
+					if i >= listener_args.len() {
+						return Err(ErrorKind::Configuration(
+							"malformed listener. certificates_file required for https".into(),
+						)
+						.into());
+					}
+
+					let certificates_file = listener_args[i].to_string();
+
+					i += 1;
+					if i >= listener_args.len() {
+						return Err(ErrorKind::Configuration(
+							"malformed listener. sni_host required for https".into(),
+						)
+						.into());
+					}
+
+					let sni_host = listener_args[i].to_string();
+
+					Some(TLSServerConfig {
+						private_key_file,
+						certificates_file,
+						sni_host,
+					})
+				} else {
+					None
+				};
+
 				let listener_type = if proto == "http" {
 					ListenerType::Plain
 				} else if proto == "https" {
@@ -232,7 +177,8 @@ fn real_main() -> Result<(), Error> {
 					)
 					.into());
 				};
-				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?));
+				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?, tls_config));
+				i += 1;
 			}
 			listeners
 		}
@@ -264,6 +210,49 @@ fn real_main() -> Result<(), Error> {
 					}
 				};
 
+				let tls_config = if proto == "https" {
+					let private_key_file = match spl.next() {
+						Some(private_key_file) => private_key_file,
+						None => {
+							return Err(ErrorKind::Configuration(
+								"malformed listener. private_key_file required for https".into(),
+							)
+							.into());
+						}
+					}
+					.to_string();
+
+					let certificates_file = match spl.next() {
+						Some(certificates_file) => certificates_file,
+						None => {
+							return Err(ErrorKind::Configuration(
+								"malformed listener. private_key_file required for https".into(),
+							)
+							.into());
+						}
+					}
+					.to_string();
+
+					let sni_host = match spl.next() {
+						Some(sni_host) => sni_host.to_string(),
+						None => {
+							return Err(ErrorKind::Configuration(
+								"malformed listener. sni_host required for https".into(),
+							)
+							.into());
+						}
+					}
+					.to_string();
+
+					Some(TLSServerConfig {
+						private_key_file,
+						certificates_file,
+						sni_host,
+					})
+				} else {
+					None
+				};
+
 				let listener_type = if proto == "http" {
 					ListenerType::Plain
 				} else if proto == "https" {
@@ -274,14 +263,86 @@ fn real_main() -> Result<(), Error> {
 					)
 					.into());
 				};
-				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?));
+				listeners.push((listener_type, SocketAddr::from_str(&sock_addr)?, tls_config));
 			}
 		}
 		false => {}
 	}
 
 	if listeners.len() == 0 {
-		listeners.push((ListenerType::Plain, SocketAddr::from_str("127.0.0.1:8080")?));
+		listeners.push((
+			ListenerType::Plain,
+			SocketAddr::from_str("127.0.0.1:8080")?,
+			None,
+		));
+	}
+
+	let (mut virtual_ips, mut virtual_hosts) = match args.is_present("virtual_server") {
+		true => {
+			let mut virtual_servers = vec![];
+			for virtual_server in args.values_of("virtual_server").unwrap() {
+				virtual_servers.push(virtual_server);
+			}
+
+			if virtual_servers.len() % 2 != 0 {
+				return Err(ErrorKind::Configuration(
+                                    "malformed --virtual_servers. Format is: --virtual_servers <host/ip> <directory>".into()
+                            ).into());
+			}
+
+			let mut i = 0;
+			let mut virtual_ips = HashMap::new();
+			let mut virtual_hosts = HashMap::new();
+			loop {
+				if i >= virtual_servers.len() {
+					break;
+				}
+
+				println!("parsing {}", virtual_servers[i]);
+				match SocketAddr::from_str(virtual_servers[i]) {
+					Ok(ip_addr) => {
+						virtual_ips.insert(ip_addr, virtual_servers[i + 1].as_bytes().to_vec())
+					}
+					Err(e) => {
+						println!("virtual_hostserr={}", e);
+						virtual_hosts.insert(
+							virtual_servers[i].as_bytes().to_vec(),
+							virtual_servers[i + 1].as_bytes().to_vec(),
+						)
+					}
+				};
+				i += 2;
+			}
+			(virtual_ips, virtual_hosts)
+		}
+		false => (HashMap::new(), HashMap::new()),
+	};
+
+	match file_args.is_present("virtual_server") {
+		true => {
+			let mut virtual_servers = vec![];
+			for virtual_server in file_args.values_of("virtual_server").unwrap() {
+				virtual_servers.push(virtual_server);
+			}
+
+			let mut i = 0;
+			loop {
+				if i >= virtual_servers.len() {
+					break;
+				}
+				match SocketAddr::from_str(virtual_servers[i]) {
+					Ok(ip_addr) => {
+						virtual_ips.insert(ip_addr, virtual_servers[i + 1].as_bytes().to_vec())
+					}
+					Err(_) => virtual_hosts.insert(
+						virtual_servers[i].as_bytes().to_vec(),
+						virtual_servers[i + 1].as_bytes().to_vec(),
+					),
+				};
+				i += 2;
+			}
+		}
+		false => {}
 	}
 
 	let threads = match args.is_present("threads") {
@@ -611,8 +672,6 @@ fn real_main() -> Result<(), Error> {
 		max_content_len,
 		temp_dir,
 		listeners,
-		fullchain_map,
-		privkey_map,
 		show_request_headers,
 		show_response_headers,
 		listen_queue_size,
@@ -635,6 +694,8 @@ fn real_main() -> Result<(), Error> {
 		mainlog_max_size,
 		max_active_connections,
 		max_async_connections,
+		virtual_ips,
+		virtual_hosts,
 		webroot: webroot.as_bytes().to_vec(),
 		debug,
 		debug_api,

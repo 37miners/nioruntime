@@ -20,6 +20,7 @@ use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
 use nioruntime_deps::sha1::Sha1;
 use nioruntime_err::{Error, ErrorKind};
+use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
 use nioruntime_util::bytes_parse_number_header;
@@ -95,8 +96,10 @@ pub const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
 pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked".as_bytes();
 pub const GZIP_ENCODING: &[u8] = "\r\nContent-Encoding: gzip".as_bytes();
 
+pub const COOKIE_BYTES: &[u8] = "Cookie".as_bytes();
 pub const UPGRADE_BYTES: &[u8] = "Upgrade".as_bytes();
 pub const WEBSOCKET_BYTES: &[u8] = "websocket".as_bytes();
+pub const SEC_WEBSOCKET_KEY_BYTES: &[u8] = "Sec-WebSocket-Key".as_bytes();
 pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
 pub const EXPECT_BYTES: &[u8] = "Expect".as_bytes();
 pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
@@ -107,6 +110,7 @@ pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
 pub const IF_NONE_MATCH: &[u8] = "If-None-Match".as_bytes();
 pub const IF_MODIFIED_SINCE: &[u8] = "If-Modified-Since".as_bytes();
 pub const ACCEPT_ENCODING: &[u8] = "Accept-Encoding".as_bytes();
+pub const HOST_BYTES: &[u8] = "Host".as_bytes();
 
 pub const HTML_EXTENSION: &[u8] = "html".as_bytes();
 pub const SLASH: &[u8] = "/".as_bytes();
@@ -544,7 +548,9 @@ impl<'a> Display for HttpHeaders<'a> {
 		)?;
 		write!(f, "\nHTTP Headers:")?;
 		for name in self.get_header_names().map_err(|_e| std::fmt::Error)? {
-			let values = self.get_header_value(&name).map_err(|_e| std::fmt::Error)?;
+			let values = self
+				.get_header_value(&name.as_bytes())
+				.map_err(|_e| std::fmt::Error)?;
 			match values {
 				Some(values) => {
 					for value in values {
@@ -552,7 +558,13 @@ impl<'a> Display for HttpHeaders<'a> {
 						for _ in name.len()..20 {
 							spacing = format!("{} ", spacing);
 						}
-						write!(f, "\n{}:{} '{}'", name, spacing, value)?;
+						write!(
+							f,
+							"\n{}:{} '{}'",
+							name,
+							spacing,
+							std::str::from_utf8(&value).unwrap_or("non-utf8-value")
+						)?;
 					}
 				}
 				None => {}
@@ -687,11 +699,15 @@ impl<'a> HttpHeaders<'a> {
 		if !self.accept_encoding {
 			false
 		} else {
-			match self.get_header_value(&"Accept-Encoding".to_string()) {
+			match self.get_header_value(ACCEPT_ENCODING) {
 				Ok(accept_encoding) => match accept_encoding {
 					Some(accept_encoding) => {
 						if accept_encoding.len() > 0 {
-							accept_encoding[0].find("gzip").is_some()
+							std::str::from_utf8(&accept_encoding[0])
+								.unwrap_or("")
+								.to_string()
+								.find("gzip")
+								.is_some()
 						} else {
 							false
 						}
@@ -739,10 +755,10 @@ impl<'a> HttpHeaders<'a> {
 		&self.uri
 	}
 
-	pub fn get_header_value(&self, name: &String) -> Result<Option<Vec<String>>, Error> {
-		let mut name_bytes = name.as_bytes().to_vec();
+	pub fn get_header_value(&self, name: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Error> {
+		let mut name_bytes = name.to_vec();
 		let key_len = self.header_map.config().key_len;
-		for _ in name_bytes.len()..key_len {
+		for _ in name.len()..key_len {
 			name_bytes.push(0);
 		}
 		match self.header_map.get_raw(&name_bytes) {
@@ -757,9 +773,7 @@ impl<'a> HttpHeaders<'a> {
 					if len == 0 {
 						break;
 					}
-					ret.push(
-						std::str::from_utf8(&value[offset + 4..offset + 4 + len])?.to_string(),
-					);
+					ret.push(value[offset + 4..offset + 4 + len].to_vec());
 					offset += 4 + len;
 				}
 
@@ -1279,9 +1293,7 @@ impl Default for ProxyConfig {
 #[derive(Clone)]
 pub struct HttpConfig {
 	pub start: Instant,
-	pub listeners: Vec<(ListenerType, SocketAddr)>,
-	pub fullchain_map: HashMap<u16, String>,
-	pub privkey_map: HashMap<u16, String>,
+	pub listeners: Vec<(ListenerType, SocketAddr, Option<TLSServerConfig>)>,
 	pub listen_queue_size: usize,
 	pub max_content_len: usize,
 	pub max_header_size: usize,
@@ -1312,6 +1324,8 @@ pub struct HttpConfig {
 	pub mainlog_max_size: u64,
 	pub content_upload_slab_count: u64,
 	pub content_upload_slab_size: u64,
+	pub virtual_hosts: HashMap<Vec<u8>, Vec<u8>>,
+	pub virtual_ips: HashMap<SocketAddr, Vec<u8>>,
 	pub error_page: Vec<u8>,
 	pub max_async_connections: usize,
 	pub max_active_connections: usize,
@@ -1328,9 +1342,8 @@ impl Default for HttpConfig {
 			listeners: vec![(
 				ListenerType::Plain,
 				SocketAddr::from_str("127.0.0.1:8080").unwrap(),
+				None,
 			)],
-			fullchain_map: HashMap::new(),
-			privkey_map: HashMap::new(),
 			listen_queue_size: 1000,
 			max_header_size: 16 * 1024,
 			max_header_name_len: 128,
@@ -1351,6 +1364,8 @@ impl Default for HttpConfig {
 			max_load_factor: 0.9,
 			max_async_connections: 10 * 1024,
 			max_active_connections: 16 * 1024,
+			virtual_ips: HashMap::new(),
+			virtual_hosts: HashMap::new(),
 			server_name: format!("NIORuntime Httpd/{}", VERSION).as_bytes().to_vec(),
 			gzip_compression_level: 7,
 			gzip_extensions: HashSet::new(),

@@ -15,7 +15,6 @@
 use nioruntime_deps::base64;
 use nioruntime_deps::ed25519_dalek;
 use nioruntime_deps::failure;
-use nioruntime_deps::nix;
 use nioruntime_deps::rustls;
 
 mod error;
