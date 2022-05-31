@@ -119,3 +119,4 @@ Please note that many of the files were copyright "The Grin Developers", "The BM
 notice at the top of the files saying, "Copyright (c) 2022, 37 Miners, LLC". If any of the copyright holders have an objection to this, please feel free to contact us
 by opening an issue in this repo.
 
+
