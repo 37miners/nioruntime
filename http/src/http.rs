@@ -2166,6 +2166,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if if_none_match_len > 0 {
 					let if_none_match = &if_none_match[0];
 					if if_none_match.len() > 3 {
+						let if_none_match_len = if_none_match.len();
 						let if_none_match = &if_none_match[1..(if_none_match_len - 1)];
 						if hex::encode(etag).as_bytes() == if_none_match {
 							return Ok(true);
@@ -2175,7 +2176,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			}
 			None => {}
 		}
-
 		Ok(false)
 	}
 
