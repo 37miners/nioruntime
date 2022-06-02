@@ -1958,7 +1958,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		if path.len() < root_dir_len {
 			return Err(ErrorKind::HttpError403("Forbidden".into()).into());
 		}
-
 		for i in 0..root_dir_len {
 			if path[i] != root_dir[i] {
 				return Err(ErrorKind::HttpError403("Forbidden".into()).into());
@@ -1993,6 +1992,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
 		}
 
+		let mut webroot_applied = webroot;
 		let path = if config.virtual_hosts.len() > 0 {
 			match host {
 				Some(host) => {
@@ -2003,7 +2003,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						};
 
 						match config.virtual_hosts.get(host) {
-							Some(host) => Some(host.clone()),
+							Some(host) => {
+								webroot_applied = host;
+								Some(host.clone())
+							}
 							None => None,
 						}
 					} else {
@@ -2019,7 +2022,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let mut path = if path.is_none() && config.virtual_ips.len() > 0 {
 			match local_peer {
 				Some(local_peer) => match config.virtual_ips.get(&local_peer) {
-					Some(local_peer) => local_peer.clone(),
+					Some(local_peer) => {
+						webroot_applied = local_peer;
+						local_peer.clone()
+					}
 					None => webroot.clone(),
 				},
 				None => webroot.clone(),
@@ -2029,6 +2035,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		} else {
 			path.unwrap()
 		};
+
+		let webroot = webroot_applied;
 
 		path.extend_from_slice(&uri);
 		Self::clean(&mut path)?;
