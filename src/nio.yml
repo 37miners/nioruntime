@@ -21,7 +21,7 @@ args:
         value_name: gzip_extensions
         multiple: true
     - listener:
-        help: TCP SocketAddr to listen for HTTP Requests on. For example 127.0.0.1:8080. If none are specified, 127.0.0.1:8080 is used. Format is <protocol>::<interface>::<port> <private_key_file (https only)> <fullchain_file (https only)> e.g. -l https://0.0.0.0:443 /path/to/privkey.pem /path/to/fullchain.pem.
+        help: TCP SocketAddr to listen for HTTP Requests on. For example 127.0.0.1:8080. If none are specified, 127.0.0.1:8080 is used. Format is <protocol>::<interface>::<port> <private_key_file (https only)> <fullchain_file (https only)> <sni_host (https only)> e.g. -l https://0.0.0.0:443 /path/to/privkey.pem /path/to/fullchain.pem example.com.
         short: l
         long: listener
         takes_value: true

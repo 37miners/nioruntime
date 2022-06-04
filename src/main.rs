@@ -136,7 +136,6 @@ fn real_main() -> Result<(), Error> {
 						.into());
 					}
 					let private_key_file = listener_args[i].to_string();
-					println!("private_key_file={}", private_key_file);
 
 					i += 1;
 					if i >= listener_args.len() {
@@ -298,18 +297,14 @@ fn real_main() -> Result<(), Error> {
 					break;
 				}
 
-				println!("parsing {}", virtual_servers[i]);
 				match SocketAddr::from_str(virtual_servers[i]) {
 					Ok(ip_addr) => {
 						virtual_ips.insert(ip_addr, virtual_servers[i + 1].as_bytes().to_vec())
 					}
-					Err(e) => {
-						println!("virtual_hostserr={}", e);
-						virtual_hosts.insert(
-							virtual_servers[i].as_bytes().to_vec(),
-							virtual_servers[i + 1].as_bytes().to_vec(),
-						)
-					}
+					Err(_e) => virtual_hosts.insert(
+						virtual_servers[i].as_bytes().to_vec(),
+						virtual_servers[i + 1].as_bytes().to_vec(),
+					),
 				};
 				i += 2;
 			}
