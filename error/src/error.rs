@@ -446,3 +446,63 @@ impl From<SignError> for Error {
 		}
 	}
 }
+
+#[cfg(test)]
+mod test {
+	use crate::{Error, ErrorKind};
+	use nioruntime_deps::hex::FromHex;
+	use std::net::SocketAddr;
+	use std::str::FromStr;
+
+	#[test]
+	fn test_error() -> Result<(), crate::Error> {
+		match f64::from_str("a.12") {
+			Ok(_) => {}
+			Err(pe) => {
+				let e: Error = pe.into();
+				let ematch: Error = ErrorKind::ParseFloatError(
+					"Error parsing float: invalid float literal".to_string(),
+				)
+				.into();
+
+				assert_eq!(e.to_string(), ematch.to_string());
+			}
+		}
+
+		match Vec::from_hex("48656c6c6f20776f726c6x21") {
+			Ok(_) => {}
+			Err(e) => {
+				let e: Error = e.into();
+				let ematch: Error = ErrorKind::HexError(
+					"Error parsing hex: Invalid character 'x' at position 21".to_string(),
+				)
+				.into();
+
+				assert_eq!(e.to_string(), ematch.to_string());
+				assert!(e.cause().is_none());
+				assert!(e.backtrace().is_some());
+				assert_eq!(
+					e.inner(),
+					"HexError: Error parsing hex: Invalid character 'x' at position 21".to_string()
+				);
+				assert_eq!(
+					e.kind().to_string(),
+					"HexError: Error parsing hex: Invalid character 'x' at position 21".to_string()
+				);
+			}
+		}
+		match SocketAddr::from_str(&format!("127.0.0.1:x")) {
+			Ok(_) => {}
+			Err(e) => {
+				let e: Error = e.into();
+				let ematch: Error = ErrorKind::AddrParseError(
+					"Error parsing address: invalid IP address syntax".to_string(),
+				)
+				.into();
+
+				assert_eq!(e.to_string(), ematch.to_string());
+			}
+		}
+		Ok(())
+	}
+}
