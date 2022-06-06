@@ -20,12 +20,10 @@
 //! `serialize` or `deserialize` functions on them as appropriate.
 
 use nioruntime_deps::byteorder::{BigEndian, ByteOrder, ReadBytesExt};
-use nioruntime_deps::bytes::Buf;
 use nioruntime_err::{Error, ErrorKind};
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::io::{self, Read, Write};
-use std::marker;
 
 /// Implementations defined how different numbers and binary structures are
 /// written to an underlying stream or container (depending on implementation).
@@ -155,44 +153,6 @@ pub trait Reader {
 	}
 }
 
-/// Reader that exposes an Iterator interface.
-pub struct IteratingReader<'a, T, R: Reader> {
-	count: u64,
-	curr: u64,
-	reader: &'a mut R,
-	_marker: marker::PhantomData<T>,
-}
-
-impl<'a, T, R: Reader> IteratingReader<'a, T, R> {
-	/// Constructor to create a new iterating reader for the provided underlying reader.
-	/// Takes a count so we know how many to iterate over.
-	pub fn new(reader: &'a mut R, count: u64) -> Self {
-		let curr = 0;
-		IteratingReader {
-			count,
-			curr,
-			reader,
-			_marker: marker::PhantomData,
-		}
-	}
-}
-
-impl<'a, T, R> Iterator for IteratingReader<'a, T, R>
-where
-	T: Serializable,
-	R: Reader,
-{
-	type Item = T;
-
-	fn next(&mut self) -> Option<T> {
-		if self.curr >= self.count {
-			return None;
-		}
-		self.curr += 1;
-		T::read(self.reader).ok()
-	}
-}
-
 pub trait Serializable
 where
 	Self: Sized + Debug,
@@ -277,224 +237,6 @@ impl<'a, R: Read> Reader for BinReader<'a, R> {
 		}
 		let mut buf = vec![0; len];
 		self.source.read_exact(&mut buf).map_err(map_io_err)?;
-		Ok(buf)
-	}
-
-	fn expect_u8(&mut self, val: u8) -> Result<u8, Error> {
-		let b = self.read_u8()?;
-		if b == val {
-			Ok(b)
-		} else {
-			Err(ErrorKind::UnexpectedData(format!(
-				"expected: {:?}, received: {:?}",
-				vec![val],
-				vec![b]
-			))
-			.into())
-		}
-	}
-}
-
-/// A reader that reads straight off a stream.
-/// Tracks total bytes read so we can verify we read the right number afterwards.
-pub struct StreamingReader<'a> {
-	total_bytes_read: u64,
-	stream: &'a mut dyn Read,
-}
-
-impl<'a> StreamingReader<'a> {
-	/// Create a new streaming reader with the provided underlying stream.
-	/// Also takes a duration to be used for each individual read_exact call.
-	pub fn new(stream: &'a mut dyn Read) -> StreamingReader<'a> {
-		StreamingReader {
-			total_bytes_read: 0,
-			stream,
-		}
-	}
-
-	/// Returns the total bytes read via this streaming reader.
-	pub fn total_bytes_read(&self) -> u64 {
-		self.total_bytes_read
-	}
-}
-
-/// Note: We use read_fixed_bytes() here to ensure our "async" I/O behaves as expected.
-impl<'a> Reader for StreamingReader<'a> {
-	fn read_u8(&mut self) -> Result<u8, Error> {
-		let buf = self.read_fixed_bytes(1)?;
-		Ok(buf[0])
-	}
-	fn read_i8(&mut self) -> Result<i8, Error> {
-		let buf = self.read_fixed_bytes(1)?;
-		Ok(buf[0] as i8)
-	}
-	fn read_i16(&mut self) -> Result<i16, Error> {
-		let buf = self.read_fixed_bytes(2)?;
-		Ok(BigEndian::read_i16(&buf[..]))
-	}
-	fn read_u16(&mut self) -> Result<u16, Error> {
-		let buf = self.read_fixed_bytes(2)?;
-		Ok(BigEndian::read_u16(&buf[..]))
-	}
-	fn read_u32(&mut self) -> Result<u32, Error> {
-		let buf = self.read_fixed_bytes(4)?;
-		Ok(BigEndian::read_u32(&buf[..]))
-	}
-	fn read_i32(&mut self) -> Result<i32, Error> {
-		let buf = self.read_fixed_bytes(4)?;
-		Ok(BigEndian::read_i32(&buf[..]))
-	}
-	fn read_u64(&mut self) -> Result<u64, Error> {
-		let buf = self.read_fixed_bytes(8)?;
-		Ok(BigEndian::read_u64(&buf[..]))
-	}
-	fn read_u128(&mut self) -> Result<u128, Error> {
-		let buf = self.read_fixed_bytes(8)?;
-		Ok(BigEndian::read_u128(&buf[..]))
-	}
-	fn read_i128(&mut self) -> Result<i128, Error> {
-		let buf = self.read_fixed_bytes(8)?;
-		Ok(BigEndian::read_i128(&buf[..]))
-	}
-	fn read_i64(&mut self) -> Result<i64, Error> {
-		let buf = self.read_fixed_bytes(8)?;
-		Ok(BigEndian::read_i64(&buf[..]))
-	}
-
-	/// Read a variable size vector from the underlying stream. Expects a usize
-	fn read_bytes_len_prefix(&mut self) -> Result<Vec<u8>, Error> {
-		let len = self.read_u64()?;
-		self.total_bytes_read += 8;
-		self.read_fixed_bytes(len as usize)
-	}
-
-	/// Read a fixed number of bytes.
-	fn read_fixed_bytes(&mut self, len: usize) -> Result<Vec<u8>, Error> {
-		if len > 100_000 {
-			return Err(ErrorKind::TooLargeReadErr("too large read".to_string()).into());
-		}
-		let mut buf = vec![0u8; len];
-		self.stream.read_exact(&mut buf)?;
-		self.total_bytes_read += len as u64;
-		Ok(buf)
-	}
-
-	fn expect_u8(&mut self, val: u8) -> Result<u8, Error> {
-		let b = self.read_u8()?;
-		if b == val {
-			Ok(b)
-		} else {
-			Err(ErrorKind::UnexpectedData(format!(
-				"expected: {:?}, received: {:?}",
-				vec![val],
-				vec![b],
-			))
-			.into())
-		}
-	}
-}
-
-/// Protocol wrapper around a `Buf` impl
-pub struct BufReader<'a, B: Buf> {
-	inner: &'a mut B,
-	bytes_read: usize,
-}
-
-impl<'a, B: Buf> BufReader<'a, B> {
-	/// Construct a new BufReader
-	pub fn new(buf: &'a mut B) -> Self {
-		Self {
-			inner: buf,
-			bytes_read: 0,
-		}
-	}
-
-	/// Check whether the buffer has enough bytes remaining to perform a read
-	fn has_remaining(&mut self, len: usize) -> Result<(), Error> {
-		if self.inner.remaining() >= len {
-			self.bytes_read += len;
-			Ok(())
-		} else {
-			Err(ErrorKind::UnexpectedEof("unexpectedEOF".to_string()).into())
-		}
-	}
-
-	/// The total bytes read
-	pub fn bytes_read(&self) -> u64 {
-		self.bytes_read as u64
-	}
-
-	/// Convenience function to read from the buffer and deserialize
-	pub fn body<T: Serializable>(&mut self) -> Result<T, Error> {
-		T::read(self)
-	}
-}
-
-impl<'a, B: Buf> Reader for BufReader<'a, B> {
-	fn read_u8(&mut self) -> Result<u8, Error> {
-		self.has_remaining(1)?;
-		Ok(self.inner.get_u8())
-	}
-
-	fn read_i8(&mut self) -> Result<i8, Error> {
-		self.has_remaining(1)?;
-		Ok(self.inner.get_i8())
-	}
-
-	fn read_i16(&mut self) -> Result<i16, Error> {
-		self.has_remaining(2)?;
-		Ok(self.inner.get_i16())
-	}
-
-	fn read_u16(&mut self) -> Result<u16, Error> {
-		self.has_remaining(2)?;
-		Ok(self.inner.get_u16())
-	}
-
-	fn read_u32(&mut self) -> Result<u32, Error> {
-		self.has_remaining(4)?;
-		Ok(self.inner.get_u32())
-	}
-
-	fn read_u64(&mut self) -> Result<u64, Error> {
-		self.has_remaining(8)?;
-		Ok(self.inner.get_u64())
-	}
-
-	fn read_u128(&mut self) -> Result<u128, Error> {
-		self.has_remaining(16)?;
-		Ok(self.inner.get_u128())
-	}
-
-	fn read_i128(&mut self) -> Result<i128, Error> {
-		self.has_remaining(16)?;
-		Ok(self.inner.get_i128())
-	}
-
-	fn read_i32(&mut self) -> Result<i32, Error> {
-		self.has_remaining(4)?;
-		Ok(self.inner.get_i32())
-	}
-
-	fn read_i64(&mut self) -> Result<i64, Error> {
-		self.has_remaining(8)?;
-		Ok(self.inner.get_i64())
-	}
-
-	fn read_bytes_len_prefix(&mut self) -> Result<Vec<u8>, Error> {
-		let len = self.read_u64()?;
-		self.read_fixed_bytes(len as usize)
-	}
-
-	fn read_fixed_bytes(&mut self, len: usize) -> Result<Vec<u8>, Error> {
-		// not reading more than 100k bytes in a single read
-		if len > 100_000 {
-			return Err(ErrorKind::TooLargeReadErr("too large read".to_string()).into());
-		}
-		self.has_remaining(len)?;
-
-		let mut buf = vec![0; len];
-		self.inner.copy_to_slice(&mut buf[..]);
 		Ok(buf)
 	}
 
@@ -625,6 +367,28 @@ impl Serializable for () {
 	}
 }
 
+impl<T> Serializable for Vec<T>
+where
+	T: Serializable,
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		writer.write_u64(self.len().try_into()?)?;
+		for elmt in self {
+			elmt.write(writer)?;
+		}
+		Ok(())
+	}
+
+	fn read<R: Reader>(reader: &mut R) -> Result<Vec<T>, Error> {
+		let mut buf = Vec::new();
+		let len = reader.read_u64()?;
+		for _ in 0..len {
+			buf.push(T::read(reader)?);
+		}
+		Ok(buf)
+	}
+}
+
 impl Serializable for bool {
 	fn read<R: Reader>(reader: &mut R) -> Result<bool, Error> {
 		Ok(reader.read_u8()? != 0)
@@ -661,28 +425,6 @@ where
 	}
 }
 
-impl<T> Serializable for Vec<T>
-where
-	T: Serializable,
-{
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		writer.write_u64(self.len().try_into()?)?;
-		for elmt in self {
-			elmt.write(writer)?;
-		}
-		Ok(())
-	}
-
-	fn read<R: Reader>(reader: &mut R) -> Result<Vec<T>, Error> {
-		let mut buf = Vec::new();
-		let len = reader.read_u64()?;
-		for _ in 0..len {
-			buf.push(T::read(reader)?);
-		}
-		Ok(buf)
-	}
-}
-
 impl<'a, A: Serializable> Serializable for &'a A {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 		Serializable::write(*self, writer)
@@ -702,45 +444,14 @@ impl<A: Serializable, B: Serializable> Serializable for (A, B) {
 	}
 }
 
-impl<A: Serializable, B: Serializable, C: Serializable> Serializable for (A, B, C) {
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Serializable::write(&self.0, writer)?;
-		Serializable::write(&self.1, writer)?;
-		Serializable::write(&self.2, writer)
-	}
-	fn read<R: Reader>(reader: &mut R) -> Result<(A, B, C), Error> {
-		Ok((
-			Serializable::read(reader)?,
-			Serializable::read(reader)?,
-			Serializable::read(reader)?,
-		))
-	}
-}
-
-impl<A: Serializable, B: Serializable, C: Serializable, D: Serializable> Serializable
-	for (A, B, C, D)
-{
-	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
-		Serializable::write(&self.0, writer)?;
-		Serializable::write(&self.1, writer)?;
-		Serializable::write(&self.2, writer)?;
-		Serializable::write(&self.3, writer)
-	}
-	fn read<R: Reader>(reader: &mut R) -> Result<(A, B, C, D), Error> {
-		Ok((
-			Serializable::read(reader)?,
-			Serializable::read(reader)?,
-			Serializable::read(reader)?,
-			Serializable::read(reader)?,
-		))
-	}
-}
-
 #[cfg(test)]
 mod test {
+	use crate::ser::map_io_err;
 	use crate::ser::{serialize, BinReader, Reader, Serializable, Writer};
 	use nioruntime_err::Error;
+	use nioruntime_err::ErrorKind;
 	use nioruntime_log::*;
+	use std::convert::TryInto;
 	use std::io::Cursor;
 
 	debug!();
@@ -749,19 +460,67 @@ mod test {
 	struct TestSer {
 		f1: u8,
 		f2: u16,
+		f3: u32,
+		f4: u64,
+		f5: u128,
+		f6: i8,
+		f7: i16,
+		f8: i32,
+		f9: i64,
+		f10: i128,
+		f11: [u8; 8],
 	}
 
 	impl Serializable for TestSer {
 		fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
 			writer.write_u8(self.f1)?;
+			writer.write_u8(1)?;
+			writer.write_u8(1)?;
 			writer.write_u16(self.f2)?;
+			writer.write_u32(self.f3)?;
+			writer.write_u64(self.f4)?;
+			writer.write_u128(self.f5)?;
+			writer.write_i8(self.f6)?;
+			writer.write_i16(self.f7)?;
+			writer.write_i32(self.f8)?;
+			writer.write_i64(self.f9)?;
+			writer.write_i128(self.f10)?;
+			writer.write_bytes(self.f11)?;
+			writer.write_empty_bytes(4)?;
+
 			Ok(())
 		}
 
 		fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
 			let f1 = reader.read_u8()?;
+			assert!(reader.expect_u8(2).is_err());
+			reader.expect_u8(1)?;
 			let f2 = reader.read_u16()?;
-			Ok(Self { f1, f2 })
+			let f3 = reader.read_u32()?;
+			let f4 = reader.read_u64()?;
+			let f5 = reader.read_u128()?;
+			let f6 = reader.read_i8()?;
+			let f7 = reader.read_i16()?;
+			let f8 = reader.read_i32()?;
+			let f9 = reader.read_i64()?;
+			let f10 = reader.read_i128()?;
+			let f11 = reader.read_bytes_len_prefix()?.try_into().unwrap();
+			reader.read_empty_bytes(4)?;
+
+			let x = Self {
+				f1,
+				f2,
+				f3,
+				f4,
+				f5,
+				f6,
+				f7,
+				f8,
+				f9,
+				f10,
+				f11,
+			};
+			Ok(x)
 		}
 	}
 
@@ -769,7 +528,19 @@ mod test {
 	fn test_ser() -> Result<(), Error> {
 		info!("testing ser")?;
 
-		let ser_in = TestSer { f1: 1, f2: 2 };
+		let ser_in = TestSer {
+			f1: 1,
+			f2: 2,
+			f3: 3,
+			f4: 4,
+			f5: 5,
+			f6: 6,
+			f7: 7,
+			f8: 8,
+			f9: 9,
+			f10: 10,
+			f11: [0u8; 8],
+		};
 		let mut ser_vec = vec![];
 		serialize(&mut ser_vec, &ser_in)?;
 
@@ -779,6 +550,12 @@ mod test {
 
 		let ser_out = TestSer::read(&mut reader)?;
 		assert_eq!(ser_out, ser_in);
+
+		let r: Result<std::fs::File, std::io::Error> = std::fs::File::open("/path/to/nothing");
+		if let Err(e) = r {
+			let err: Error = ErrorKind::IOError(format!("{}", e.to_string())).into();
+			assert_eq!(map_io_err(e).inner().to_string(), err.inner().to_string());
+		}
 		Ok(())
 	}
 }
