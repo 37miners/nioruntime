@@ -16,7 +16,10 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro::TokenTree::{Group, Ident, Literal, Punct};
 
+// Don't see a way to get code coverage on macros with tarpaulin so disabling. Some tests use this
+// code though.
 #[proc_macro_derive(Serializable)]
+#[cfg(not(tarpaulin_include))]
 pub fn derive_serializable(strm: TokenStream) -> TokenStream {
 	let mut found_struct = false;
 	let mut readable = "".to_string();

@@ -570,9 +570,15 @@ where
 					&tls_config.sni_host,
 					CertifiedKey {
 						cert: load_certs(&tls_config.certificates_file)?,
-						key: Arc::new(RsaSigningKey::new(&load_private_key(
-							&tls_config.private_key_file,
-						)?)?),
+						key: Arc::new(
+							RsaSigningKey::new(&load_private_key(&tls_config.private_key_file)?)
+								.map_err(|e| {
+									let error: Error =
+										ErrorKind::InternalError(format!("Signing error: {}", e))
+											.into();
+									error
+								})?,
+						),
 						ocsp: None,
 						sct_list: None,
 					},

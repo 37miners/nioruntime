@@ -27,8 +27,6 @@ use std::path::{Path, MAIN_SEPARATOR};
 
 use crate::{Error, ErrorKind};
 
-use failure::ResultExt;
-
 const SEC_KEY_FILE: &str = "hs_ed25519_secret_key";
 const PUB_KEY_FILE: &str = "hs_ed25519_public_key";
 const HOSTNAME_FILE: &str = "hostname";
@@ -181,8 +179,11 @@ pub fn output_onion_service_config(
 	tor_config_directory: &str,
 	sec_key: &SecretKey,
 ) -> Result<OnionV3Address, Error> {
-	let d_sec_key = DalekSecretKey::from_bytes(&sec_key.0)
-		.context(ErrorKind::ED25519Key("Unable to parse private key".to_string()).into())?;
+	let d_sec_key = DalekSecretKey::from_bytes(&sec_key.0).map_err(|e| {
+		let error: Error =
+			ErrorKind::ED25519Key(format!("Unable to parse private key: {}", e)).into();
+		error
+	})?;
 	let address = OnionV3Address::from_private(&sec_key.0).map_err(|e| {
 		let error: Error =
 			ErrorKind::InternalError(format!("v3Onion from pvt key err: {}", e)).into();

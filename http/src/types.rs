@@ -1723,7 +1723,11 @@ impl ApiContext {
 
 		match recv {
 			Some(receive) => {
-				receive.recv()?;
+				receive.recv().map_err(|err| {
+					let error: Error =
+						ErrorKind::InternalError(format!("Recv Error: {}", err)).into();
+					error
+				})?;
 			}
 			None => {}
 		}
@@ -1806,9 +1810,10 @@ impl ApiContext {
 			}
 		};
 		match recv {
-			Some(receive) => {
-				receive.recv()?;
-			}
+			Some(receive) => receive.recv().map_err(|err| {
+				let error: Error = ErrorKind::InternalError(format!("Recv Error: {}", err)).into();
+				error
+			})?,
 			None => {}
 		}
 
@@ -2005,7 +2010,10 @@ impl ApiContext {
 
 			Ok(())
 		});
-		seqrecv.recv()?;
+		seqrecv.recv().map_err(|err| {
+			let error: Error = ErrorKind::InternalError(format!("Recv Error: {}", err)).into();
+			error
+		})?;
 
 		Ok((self.rem, pushed))
 	}

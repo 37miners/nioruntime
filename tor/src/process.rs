@@ -272,7 +272,10 @@ impl TorProcess {
 					stdout_timeout_tx.send(Err(error)).unwrap_or(());
 				});
 
-			match stdout_rx.recv()? {
+			match stdout_rx.recv().map_err(|err| {
+				let error: Error = ErrorKind::InternalError(format!("Recv Error: {}", err)).into();
+				error
+			})? {
 				Ok(()) => {
 					return Ok(self);
 				}

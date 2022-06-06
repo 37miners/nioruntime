@@ -16,7 +16,6 @@ use crate::failure::{Backtrace, Context, Fail};
 use nioruntime_deps::hex::FromHexError;
 use nioruntime_deps::nix::errno::Errno;
 use nioruntime_deps::rustls::client::InvalidDnsNameError;
-use nioruntime_deps::rustls::sign::SignError;
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::fmt;
@@ -26,8 +25,6 @@ use std::num::ParseFloatError;
 use std::num::ParseIntError;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
-use std::sync::mpsc::RecvError;
-use std::sync::MutexGuard;
 
 /// Base Error struct which is used throught this crate and other crates
 #[derive(Debug, Fail)]
@@ -44,6 +41,12 @@ pub enum ErrorKind {
 	/// IOError Error
 	#[fail(display = "IOError Error: {}", _0)]
 	IOError(String),
+	/// UTF8Error
+	#[fail(display = "UTF8 Error: {}", _0)]
+	Utf8Error(String),
+	/// ErrnoError
+	#[fail(display = "Errno: {}", _0)]
+	ErrnoError(String),
 	/// Send Error
 	#[fail(display = "Send Error: {}", _0)]
 	SendError(String),
@@ -69,7 +72,7 @@ pub enum ErrorKind {
 	#[fail(display = "Log configuration Error: {}", _0)]
 	LogConfigurationError(String),
 	/// OsString error
-	#[fail(display = "OsString Error: {}", _0)]
+	#[fail(display = "OsString Error")]
 	OsStringError(String),
 	/// Poison error multiple locks
 	#[fail(display = "Poison Error: {}", _0)]
@@ -125,9 +128,6 @@ pub enum ErrorKind {
 	/// Timeout
 	#[fail(display = "Timeout: {}", _0)]
 	Timeout(String),
-	/// RecvError
-	#[fail(display = "RecvError: {}", _0)]
-	RecvError(String),
 	/// NotOnion
 	#[fail(display = "NotOnion: {}", _0)]
 	NotOnion(String),
@@ -253,6 +253,7 @@ impl Error {
 		self.inner.backtrace()
 	}
 
+	/// get inner
 	pub fn inner(&self) -> String {
 		self.inner.to_string()
 	}
@@ -278,7 +279,7 @@ impl From<std::io::Error> for Error {
 impl From<Errno> for Error {
 	fn from(e: Errno) -> Error {
 		Error {
-			inner: Context::new(ErrorKind::IOError(format!("{}", e))),
+			inner: Context::new(ErrorKind::ErrnoError(format!("{}", e))),
 		}
 	}
 }
@@ -286,7 +287,7 @@ impl From<Errno> for Error {
 impl From<Utf8Error> for Error {
 	fn from(e: Utf8Error) -> Error {
 		Error {
-			inner: Context::new(ErrorKind::IOError(format!("{}", e))),
+			inner: Context::new(ErrorKind::Utf8Error(format!("{}", e))),
 		}
 	}
 }
@@ -315,34 +316,10 @@ impl From<crate::rustls::Error> for Error {
 	}
 }
 
-impl From<RecvError> for Error {
-	fn from(e: RecvError) -> Error {
-		Error {
-			inner: Context::new(ErrorKind::RecvError(format!("RecvError: {}", e))),
-		}
-	}
-}
-
-impl From<crate::failure::Context<ErrorKind>> for Error {
-	fn from(e: crate::failure::Context<ErrorKind>) -> Error {
-		Error {
-			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
-		}
-	}
-}
-
-impl From<std::sync::PoisonError<MutexGuard<'_, Vec<(String, String)>>>> for Error {
-	fn from(e: std::sync::PoisonError<MutexGuard<'_, Vec<(String, String)>>>) -> Error {
-		Error {
-			inner: Context::new(ErrorKind::InternalError(format!("InternalError: {}", e))),
-		}
-	}
-}
-
 impl From<std::string::FromUtf8Error> for Error {
 	fn from(e: std::string::FromUtf8Error) -> Error {
 		Error {
-			inner: Context::new(ErrorKind::InternalError(format!("UTF-8 error: {}", e))),
+			inner: Context::new(ErrorKind::Utf8Error(format!("UTF-8 error: {}", e))),
 		}
 	}
 }
@@ -393,6 +370,8 @@ impl From<TryFromIntError> for Error {
 	}
 }
 
+// infallible cannot happen, so can't test for it.
+#[cfg(not(tarpaulin_include))]
 impl From<Infallible> for Error {
 	fn from(e: Infallible) -> Error {
 		Error {
@@ -439,70 +418,196 @@ impl From<ParseFloatError> for Error {
 	}
 }
 
-impl From<SignError> for Error {
-	fn from(e: SignError) -> Error {
-		Error {
-			inner: Context::new(ErrorKind::TLSError(format!("Error signing: {}", e))),
-		}
-	}
-}
-
 #[cfg(test)]
 mod test {
+	use crate::base64;
+	use crate::error::InvalidDnsNameError;
+	use crate::error::OsString;
+	use crate::error::ParseIntError;
+	use crate::rustls;
+	use crate::rustls::PrivateKey;
+	use crate::rustls::ServerConfig;
+	use crate::rustls::ServerName;
 	use crate::{Error, ErrorKind};
+	use nioruntime_deps::ed25519_dalek::PublicKey as DalekPublicKey;
 	use nioruntime_deps::hex::FromHex;
+	use nioruntime_deps::nix::errno::Errno;
+	use nioruntime_deps::substring::Substring;
+	use std::array::TryFromSliceError;
+	use std::convert::TryFrom;
+	use std::convert::TryInto;
+	use std::env;
 	use std::net::SocketAddr;
+	use std::num::TryFromIntError;
 	use std::str::FromStr;
+	use std::thread::sleep;
+	use std::time::{Duration, SystemTime};
+
+	fn get_errno_error() -> Result<(), Error> {
+		Err(Error::from(Errno::EPERM))
+	}
+
+	fn get_os_string() -> Result<(), Error> {
+		Err(OsString::new().into())
+	}
+
+	fn check_error<T: Sized, Q>(r: Result<T, Q>, ematch: Error) -> Result<(), Error>
+	where
+		crate::Error: From<Q>,
+	{
+		if let Err(r) = r {
+			let e: Error = r.into();
+			assert_eq!(
+				e.to_string().substring(0, e.inner().len()),
+				ematch.to_string().substring(0, e.inner().len())
+			);
+			assert_eq!(
+				e.kind().to_string(),
+				ematch.to_string().substring(0, e.kind().to_string().len())
+			);
+			assert!(e.cause().is_none());
+			assert!(e.backtrace().is_some());
+			assert_eq!(e.inner(), ematch.to_string().substring(0, e.inner().len()),);
+			println!("e.backtrace()={:?}", e.backtrace());
+		}
+		Ok(())
+	}
+
+	fn test_error_impl() -> Result<(), Error> {
+		check_error(
+			f64::from_str("a.12"),
+			ErrorKind::ParseFloatError("Error parsing float: invalid float literal".to_string())
+				.into(),
+		)?;
+		check_error(
+			Vec::from_hex("48656c6c6f20776f726c6x21"),
+			ErrorKind::HexError(
+				"Error parsing hex: Invalid character 'x' at position 21".to_string(),
+			)
+			.into(),
+		)?;
+		check_error(
+			SocketAddr::from_str(&format!("127.0.0.1:x")),
+			ErrorKind::AddrParseError(
+				"Error parsing address: invalid IP address syntax".to_string(),
+			)
+			.into(),
+		)?;
+		check_error(
+			std::fs::File::open("/no/path/here"),
+			ErrorKind::IOError("No such file or directory (os error 2)".to_string()).into(),
+		)?;
+
+		check_error(
+			String::from_utf8(vec![0, 159]),
+			ErrorKind::Utf8Error(
+				"UTF-8 error: invalid utf-8 sequence of 1 bytes from index 1".to_string(),
+			)
+			.into(),
+		)?;
+
+		check_error(
+			std::str::from_utf8(&vec![0u8, 159]),
+			ErrorKind::Utf8Error("invalid utf-8 sequence of 1 bytes from index 1".to_string())
+				.into(),
+		)?;
+
+		check_error(
+			get_errno_error(),
+			ErrorKind::ErrnoError("EPERM: Operation not permitted".to_string()).into(),
+		)?;
+
+		check_error(
+			get_os_string(),
+			ErrorKind::OsStringError("".to_string()).into(),
+		)?;
+
+		let x: Result<u16, ParseIntError> = "a".parse();
+		check_error(
+			x,
+			ErrorKind::ParseIntError("invalid digit found in string".to_string()).into(),
+		)?;
+
+		check_error(
+			base64::decode("aGVsbG8*gd29ybGQ="),
+			ErrorKind::InternalError(
+				"Base64 error: Encoded text cannot have a 6-bit remainder.".to_string(),
+			)
+			.into(),
+		)?;
+
+		let arr = [0u8; 20];
+		let res: Result<[u8; 8], TryFromSliceError> = arr[0..5].try_into();
+		check_error(
+			res,
+			ErrorKind::InternalError(
+				"TryFromSlice error: could not convert slice to array".to_string(),
+			)
+			.into(),
+		)?;
+
+		let res: Result<u32, TryFromIntError> = u64::MAX.try_into();
+		check_error(
+			res,
+			ErrorKind::InternalError(
+				"TryFromIntError: out of range integral type conversion attempted".to_string(),
+			)
+			.into(),
+		)?;
+
+		let sys_time = SystemTime::now();
+		sleep(Duration::from_secs(1));
+		let new_sys_time = SystemTime::now();
+		let res = sys_time.duration_since(new_sys_time);
+		check_error(
+			res,
+			ErrorKind::InternalError(
+				"system time error: second time provided was later than self".to_string(),
+			)
+			.into(),
+		)?;
+
+		let res: Result<ServerName, InvalidDnsNameError> = ServerName::try_from("example&^.com");
+		check_error(
+			res,
+			ErrorKind::TLSError("InvalidDNS: invalid dns name".to_string()).into(),
+		)?;
+
+		let res: Result<ServerConfig, rustls::Error> = ServerConfig::builder()
+			.with_safe_defaults()
+			.with_no_client_auth()
+			.with_single_cert(vec![], PrivateKey(vec![]));
+
+		check_error(
+			res,
+			ErrorKind::TLSError("unexpected error: invalid private key".to_string()).into(),
+		)?;
+
+		let res: Result<DalekPublicKey, nioruntime_deps::signature::Error> =
+			DalekPublicKey::from_bytes(&[0u8; 1]);
+
+		check_error(
+			res,
+			ErrorKind::InternalError(
+				"dalek error: signature error: PublicKey must be 32 bytes in length".to_string(),
+			)
+			.into(),
+		)?;
+
+		Ok(())
+	}
 
 	#[test]
-	fn test_error() -> Result<(), crate::Error> {
-		match f64::from_str("a.12") {
-			Ok(_) => {}
-			Err(pe) => {
-				let e: Error = pe.into();
-				let ematch: Error = ErrorKind::ParseFloatError(
-					"Error parsing float: invalid float literal".to_string(),
-				)
-				.into();
+	fn test_error_bt() -> Result<(), Error> {
+		env::set_var("RUST_BACKTRACE", "1");
+		test_error_impl()?;
+		Ok(())
+	}
 
-				assert_eq!(e.to_string(), ematch.to_string());
-			}
-		}
-
-		match Vec::from_hex("48656c6c6f20776f726c6x21") {
-			Ok(_) => {}
-			Err(e) => {
-				let e: Error = e.into();
-				let ematch: Error = ErrorKind::HexError(
-					"Error parsing hex: Invalid character 'x' at position 21".to_string(),
-				)
-				.into();
-
-				assert_eq!(e.to_string(), ematch.to_string());
-				assert!(e.cause().is_none());
-				assert!(e.backtrace().is_some());
-				assert_eq!(
-					e.inner(),
-					"HexError: Error parsing hex: Invalid character 'x' at position 21".to_string()
-				);
-				assert_eq!(
-					e.kind().to_string(),
-					"HexError: Error parsing hex: Invalid character 'x' at position 21".to_string()
-				);
-			}
-		}
-		match SocketAddr::from_str(&format!("127.0.0.1:x")) {
-			Ok(_) => {}
-			Err(e) => {
-				let e: Error = e.into();
-				let ematch: Error = ErrorKind::AddrParseError(
-					"Error parsing address: invalid IP address syntax".to_string(),
-				)
-				.into();
-
-				assert_eq!(e.to_string(), ematch.to_string());
-			}
-		}
+	#[test]
+	fn test_error_no_bt() -> Result<(), Error> {
+		env::remove_var("RUST_BACKTRACE");
+		test_error_impl()?;
 		Ok(())
 	}
 }
