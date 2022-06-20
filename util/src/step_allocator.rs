@@ -26,10 +26,11 @@ pub struct DataHolder {
 
 impl<'a> DataHolder {
 	pub fn new() -> Self {
+		let data = Box::new(false);
 		Self {
 			index: 0,
 			next: usize::MAX,
-			data: Box::new(false),
+			data,
 		}
 	}
 
@@ -109,10 +110,9 @@ impl<'a> StepAllocator {
 
 	pub fn get(&'a self, index: usize) -> Result<&'a DataHolder, Error> {
 		if index >= self.data.len() {
-			Err(
-				ErrorKind::ArrayIndexOutofBounds(format!("{} >= {}", index, self.data.len()))
-					.into(),
-			)
+			let txt = format!("{} >= {}", index, self.data.len());
+			let ekind = ErrorKind::ArrayIndexOutofBounds(txt);
+			Err(ekind.into())
 		} else {
 			Ok(&self.data[index])
 		}
@@ -120,10 +120,9 @@ impl<'a> StepAllocator {
 
 	pub fn get_mut(&'a mut self, index: usize) -> Result<&'a mut DataHolder, Error> {
 		if index >= self.data.len() {
-			Err(
-				ErrorKind::ArrayIndexOutofBounds(format!("{} >= {}", index, self.data.len()))
-					.into(),
-			)
+			let txt = format!("{} >= {}", index, self.data.len());
+			let ekind = ErrorKind::ArrayIndexOutofBounds(txt);
+			Err(ekind.into())
 		} else {
 			Ok(&mut self.data[index])
 		}
@@ -138,7 +137,7 @@ impl<'a> StepAllocator {
 
 #[cfg(test)]
 mod test {
-	use crate::step_allocator::{StepAllocator, StepAllocatorConfig};
+	use crate::step_allocator::{DataHolder, StepAllocator, StepAllocatorConfig};
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
 
@@ -160,18 +159,10 @@ mod test {
 			debug!("next.index={}", index)?;
 
 			let data = next.data_mut();
-			match data.downcast_mut::<u128>() {
-				Some(x) => {
-					debug!("cur value for index = {} is {}", index, x)?;
-					let value: u128 = 10 + index as u128;
-					*x = value;
-				}
-				None => {
-					debug!("no value for {}", index)?;
-					let value: u128 = 10 + index as u128;
-					*data = Box::new(value);
-				}
-			}
+			let x = data.downcast_mut::<u128>().unwrap();
+			debug!("cur value for index = {} is {}", index, x)?;
+			let value: u128 = 10 + index as u128;
+			*x = value;
 		}
 		step_allocator.free_index(3)?;
 		let next = step_allocator.next().unwrap();
@@ -199,6 +190,9 @@ mod test {
 		*v = 15;
 		assert_eq!(step_allocator.get(4)?.data_as::<u128>().unwrap(), &15);
 		assert!(step_allocator.get_mut(4)?.data_as_mut::<u64>().is_none());
+
+		assert!(step_allocator.get(1000).is_err());
+		assert!(step_allocator.get_mut(1000).is_err());
 
 		Ok(())
 	}
@@ -251,6 +245,10 @@ mod test {
 				&((10 + i) as u128)
 			);
 		}
+
+		let dh = DataHolder::new();
+		assert_eq!(dh.index, 0);
+		assert_eq!(dh.data_as::<bool>().unwrap(), &false);
 
 		Ok(())
 	}

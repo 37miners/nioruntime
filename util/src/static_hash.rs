@@ -41,9 +41,8 @@ impl<K: Serializable, V: Serializable> Iterator for Iter<'_, K, V> {
 		if self.pos == u64::MAX {
 			None
 		} else {
-			let offset = self
-				.hash
-				.get_iterator_prev_offset(self.pos.try_into().ok()?);
+			let hash = self.hash;
+			let offset = hash.get_iterator_prev_offset(self.pos.try_into().ok()?);
 			let k_offset = self.hash.get_key_offset(self.pos.try_into().ok()?);
 			let v_offset = self.hash.get_value_offset(self.pos.try_into().ok()?);
 			self.pos = u64::from_be_bytes(self.hash.data[offset..offset + 8].try_into().ok()?);
@@ -75,9 +74,8 @@ impl<'a, K: Serializable, V: Serializable> Iterator for IterRaw<'a, K, V> {
 		if self.pos == u64::MAX {
 			None
 		} else {
-			let offset = self
-				.hash
-				.get_iterator_prev_offset(self.pos.try_into().ok()?);
+			let hash = self.hash;
+			let offset = hash.get_iterator_prev_offset(self.pos.try_into().ok()?);
 			let k_offset = self.hash.get_key_offset(self.pos.try_into().ok()?);
 			let v_offset = self.hash.get_value_offset(self.pos.try_into().ok()?);
 			self.pos = u64::from_be_bytes(self.hash.data[offset..offset + 8].try_into().ok()?);
@@ -413,17 +411,15 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 	}
 
 	pub fn iter_raw(&self) -> IterRaw<'_, K, V> {
-		IterRaw {
-			pos: self.last,
-			hash: &self,
-		}
+		let pos = self.last;
+		let hash = &self;
+		IterRaw { pos, hash }
 	}
 
 	pub fn iter(&self) -> Iter<'_, K, V> {
-		Iter {
-			pos: self.last,
-			hash: &self,
-		}
+		let pos = self.last;
+		let hash = &self;
+		Iter { pos, hash }
 	}
 
 	pub fn clear(&mut self) -> Result<(), Error> {
@@ -512,10 +508,10 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 				if self.cmp_key(key, entry) {
 					let prev_offset = self.get_iterator_prev_offset(entry);
 					let next_offset = self.get_iterator_next_offset(entry);
-					let prev =
-						u64::from_be_bytes(self.data[prev_offset..prev_offset + 8].try_into()?);
-					let next =
-						u64::from_be_bytes(self.data[next_offset..next_offset + 8].try_into()?);
+					let slice = self.data[prev_offset..prev_offset + 8].try_into()?;
+					let prev = u64::from_be_bytes(slice);
+					let slice = self.data[next_offset..next_offset + 8].try_into()?;
+					let next = u64::from_be_bytes(slice);
 
 					if prev != u64::MAX {
 						let offset = self.get_iterator_next_offset(prev.try_into()?);
@@ -1612,6 +1608,9 @@ mod test {
 			}
 			i += 1;
 		}
+
+		assert!(!sh.bring_to_front(&[3])?);
+		assert!(!sh.bring_to_front(&[3, 0])?);
 
 		Ok(())
 	}

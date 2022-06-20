@@ -73,11 +73,11 @@ pub fn bytes_to_usize_hex(bytes: &[u8]) -> Result<usize, Error> {
 		bytes_len -= 1;
 
 		if !((bytes[itt] >= '0' as u8 && bytes[itt] <= '9' as u8)
-			|| (bytes[itt] <= 'f' as u8 && bytes[itt] >= 'a' as u8))
+			|| (bytes[itt] >= 'a' as u8 && bytes[itt] <= 'f' as u8))
 		{
 			return Err(ErrorKind::UnexpectedData(format!(
-				"Illegal character in number: {}",
-				bytes[itt],
+				"Illegal character in number: '{}'",
+				bytes[itt] as char,
 			))
 			.into());
 		}
@@ -157,7 +157,10 @@ pub fn bytes_parse_number_header(bytes: &[u8], index: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod test {
-	use crate::bytes_find;
+	use crate::byte_utils::{
+		bytes_find, bytes_parse_number, bytes_parse_number_header, bytes_parse_number_hex,
+		bytes_to_usize, bytes_to_usize_hex,
+	};
 	use nioruntime_err::Error;
 
 	#[test]
@@ -168,6 +171,30 @@ mod test {
 		assert_eq!(bytes_find("abcd".as_bytes(), "abc".as_bytes()), Some(0));
 		assert_eq!(bytes_find("abcd".as_bytes(), "bcd".as_bytes()), Some(1));
 		assert_eq!(bytes_find("abcde".as_bytes(), "bcd".as_bytes()), Some(1));
+		Ok(())
+	}
+
+	#[test]
+	fn test_bytes_to_usize_hex() -> Result<(), Error> {
+		assert_eq!(bytes_to_usize_hex(b"012").unwrap(), 18);
+		assert!(bytes_to_usize_hex(b"012g").is_err());
+		assert_eq!(bytes_to_usize_hex(b"012f").unwrap(), 303);
+		assert!(bytes_parse_number_hex(b"012g").is_none());
+		assert!(bytes_parse_number_hex(b"012\r").is_some());
+		Ok(())
+	}
+
+	#[test]
+	fn test_other() -> Result<(), Error> {
+		assert!(bytes_to_usize(b"012a").is_err());
+		assert_eq!(bytes_to_usize(b"012").unwrap(), 12);
+		assert!(bytes_parse_number_hex(b"x\r").is_none());
+		assert!(bytes_parse_number_hex(b"0\r").is_some());
+		assert!(bytes_parse_number(b"V\r").is_none());
+		assert!(bytes_parse_number(b"0\r").is_some());
+		assert!(bytes_parse_number(b"00").is_none());
+		assert!(bytes_parse_number_header(b"abc", 0).is_none());
+		assert!(bytes_parse_number_header(b"x: 1\r", 0).is_some());
 		Ok(())
 	}
 }
