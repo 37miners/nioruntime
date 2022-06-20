@@ -179,6 +179,9 @@ mod test {
 		assert_eq!(bytes_to_usize_hex(b"012").unwrap(), 18);
 		assert!(bytes_to_usize_hex(b"012g").is_err());
 		assert_eq!(bytes_to_usize_hex(b"012f").unwrap(), 303);
+		assert_eq!(bytes_to_usize_hex(b"f").unwrap(), 15);
+		assert_eq!(bytes_to_usize_hex(b"e").unwrap(), 14);
+		assert_eq!(bytes_to_usize_hex(b"ff").unwrap(), 255);
 		assert!(bytes_parse_number_hex(b"012g").is_none());
 		assert!(bytes_parse_number_hex(b"012\r").is_some());
 		Ok(())
