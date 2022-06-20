@@ -457,6 +457,23 @@ mod test {
 	debug!();
 
 	#[derive(PartialEq, Debug)]
+	struct BadSer {
+		f1: u8,
+	}
+
+	impl Serializable for BadSer {
+		fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+			writer.write_u8(self.f1)?;
+			Ok(())
+		}
+
+		fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
+			reader.read_empty_bytes(1)?;
+			Ok(BadSer { f1: 1 })
+		}
+	}
+
+	#[derive(PartialEq, Debug)]
 	struct TestSer {
 		f1: u8,
 		f2: u16,
@@ -556,6 +573,22 @@ mod test {
 			let err: Error = ErrorKind::IOError(format!("{}", e.to_string())).into();
 			assert_eq!(map_io_err(e).inner().to_string(), err.inner().to_string());
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_bad_ser() -> Result<(), Error> {
+		let ser_in = BadSer { f1: 10 };
+		let mut ser_vec = vec![];
+		serialize(&mut ser_vec, &ser_in)?;
+
+		let mut cursor = Cursor::new(ser_vec);
+		cursor.set_position(0);
+		let mut reader = BinReader::new(&mut cursor);
+
+		let ser_out = BadSer::read(&mut reader);
+		assert!(ser_out.is_err());
+
 		Ok(())
 	}
 }
