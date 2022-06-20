@@ -125,15 +125,12 @@ impl StaticThreadPool {
 		let stp = crate::lockr!(STATIC_THREAD_POOL)?;
 
 		let tp = stp.get(&self.id);
-		match tp {
-			Some(tp) => tp.execute(f)?,
-			None => {
-				return Err(ErrorKind::InternalError(format!(
-					"static thread pool id = {} doesn't exist error",
-					self.id
-				))
-				.into())
-			}
+		if tp.is_some() {
+			tp.unwrap().execute(f)?;
+		} else {
+			let msg = format!("static thread pool id = {} doesn't exist error", self.id);
+			let ekind = ErrorKind::InternalError(msg).into();
+			return Err(ekind);
 		}
 		Ok(())
 	}
@@ -176,11 +173,12 @@ impl ThreadPoolImpl {
 	}
 
 	pub fn start(&mut self, size: usize) -> Result<(), Error> {
+		let poison_err = |_e: std::sync::PoisonError<std::sync::MutexGuard<usize>>| -> Error {
+			let error: Error = ErrorKind::PoisonError("size lock".to_string()).into();
+			error
+		};
 		{
-			let mut self_size = self.size.lock().map_err(|_e| {
-				let error: Error = ErrorKind::PoisonError("size lock".to_string()).into();
-				error
-			})?;
+			let mut self_size = self.size.lock().map_err(poison_err)?;
 			(*self_size) = size;
 		}
 		for _id in 0..size {
@@ -235,21 +233,22 @@ impl ThreadPoolImpl {
 	}
 
 	pub fn stop(&self) -> Result<(), Error> {
+		let poison_err = |_e: std::sync::PoisonError<std::sync::MutexGuard<usize>>| -> Error {
+			let error: Error = ErrorKind::PoisonError("size lock".to_string()).into();
+			error
+		};
 		let size = {
-			let size = self.size.lock().map_err(|_e| {
-				let error: Error = ErrorKind::PoisonError("stop size lock".to_string()).into();
-				error
-			});
+			let size = self.size.lock().map_err(poison_err)?;
 			size
-		}?;
+		};
 		for _ in 0..*size {
 			let f = async {};
 			let f = FuturesHolder { inner: Box::pin(f) };
-			let tx = self.tx.lock().map_err(|e| {
-				let error: Error =
-					ErrorKind::PoisonError(format!("tx.lock stop tp: {}", e.to_string())).into();
+			let tx = self.tx.lock().map_err(|_e| {
+				let error: Error = ErrorKind::PoisonError("size lock".to_string()).into();
 				error
 			})?;
+
 			tx.send((f, true)).map_err(|_e| {
 				let error: Error = ErrorKind::InternalError("send failed".to_string()).into();
 				error
@@ -339,7 +338,8 @@ fn test_thread_pool() -> Result<(), Error> {
 
 #[test]
 fn test_stop_thread_pool() -> Result<(), Error> {
-	let tp = StaticThreadPool::new()?;
+	let mut tp = StaticThreadPool::new()?;
+	tp.set_on_panic(move || Ok(()))?;
 	tp.start(10)?;
 	let tp = Arc::new(Mutex::new(tp));
 	let x = Arc::new(Mutex::new(0));
@@ -399,5 +399,24 @@ fn test_stop_thread_pool() -> Result<(), Error> {
 		break;
 	}
 
+	Ok(())
+}
+
+#[test]
+fn test_bad_static() -> Result<(), Error> {
+	let mut tp = StaticThreadPool::new()?;
+	tp.id = 1;
+	assert!(tp.set_on_panic(move || Ok(())).is_err());
+	assert!(tp.start(1).is_err());
+	assert!(tp.stop().is_err());
+	assert!(tp.execute(async move {}).is_err());
+	Ok(())
+}
+
+#[test]
+fn test_lock_poison() -> Result<(), Error> {
+	let tp = StaticThreadPool::new()?;
+	tp.start(1)?;
+	tp.start(1)?;
 	Ok(())
 }
