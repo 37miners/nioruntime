@@ -101,7 +101,7 @@ const SIZEOF_U128: usize = std::mem::size_of::<u128>();
 const MAX_EVENTS: i32 = 100;
 #[cfg(target_os = "windows")]
 const WINSOCK_BUF_SIZE: winapi::c_int = 100_000_000;
-const TLS_CHUNKS: usize = 32768;
+const TLS_CHUNKS: usize = 5_120;
 
 #[cfg(unix)]
 type SelectorHandle = i32;
@@ -112,8 +112,6 @@ type SelectorHandle = u64;
 const HANDLE_SIZE: usize = 8;
 #[cfg(unix)]
 const HANDLE_SIZE: usize = 4;
-
-const HANDLE_INFO_SIZE: usize = 17;
 
 #[cfg(unix)]
 type Handle = RawFd;
@@ -146,43 +144,6 @@ impl ConnectionContext {
 impl Drop for ConnectionContext {
 	fn drop(&mut self) {
 		self.buffer.drain(..);
-	}
-}
-
-struct HandleInfo {
-	connection_id: u128,
-	flags: u8,
-}
-
-impl HandleInfo {
-	fn new(connection_id: u128, flags: u8) -> Self {
-		Self {
-			connection_id,
-			flags,
-		}
-	}
-
-	fn to_bytes(&self, b: &mut [u8]) -> Result<(), Error> {
-		if b.len() != HANDLE_INFO_SIZE {
-			Err(ErrorKind::OtherError("Wrong length".into()).into())
-		} else {
-			(&mut b[0..16]).clone_from_slice(&u128::to_be_bytes(self.connection_id));
-			b[16] = self.flags;
-			Ok(())
-		}
-	}
-
-	fn _from_bytes(b: &[u8]) -> Result<Self, Error> {
-		if b.len() != HANDLE_INFO_SIZE {
-			Err(ErrorKind::OtherError("Wrong length".into()).into())
-		} else {
-			let connection_id = u128::from_be_bytes(b[0..16].try_into()?);
-			let flags = b[16];
-			Ok(Self {
-				connection_id,
-				flags,
-			})
-		}
 	}
 }
 
@@ -271,17 +232,18 @@ impl ConnectionData {
 	pub fn write(&self, data: &[u8]) -> Result<(), Error> {
 		match &self.connection_info.tls_server {
 			Some(tls_conn) => {
-				let mut wbuf = vec![];
 				{
 					let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 					let mut start = 0;
 					loop {
+						let mut wbuf = vec![];
 						let mut end = data.len();
 						if end - start > TLS_CHUNKS {
 							end = start + TLS_CHUNKS;
 						}
 						tls_conn.writer().write_all(&data[start..end])?;
 						tls_conn.write_tls(&mut wbuf)?;
+						self.do_write(&wbuf)?;
 
 						if end == data.len() {
 							break;
@@ -289,30 +251,30 @@ impl ConnectionData {
 						start += TLS_CHUNKS;
 					}
 				}
-				self.do_write(&wbuf)
+				Ok(())
 			}
 			None => match &self.connection_info.tls_client {
 				Some(tls_conn) => {
-					let mut wbuf = vec![];
 					{
 						let mut tls_conn = nioruntime_util::lockw!(tls_conn)?;
 						let mut start = 0;
 						loop {
+							let mut wbuf = vec![];
 							let mut end = data.len();
 							if end - start > TLS_CHUNKS {
 								end = start + TLS_CHUNKS;
 							}
 							tls_conn.writer().write_all(&data[start..end])?;
 							tls_conn.write_tls(&mut wbuf)?;
+							self.do_write(&wbuf)?;
 							if end == data.len() {
 								break;
 							}
 							start += TLS_CHUNKS;
 						}
 					}
-					let ret = self.do_write(&wbuf);
 
-					ret
+					Ok(())
 				}
 				None => self.do_write(data),
 			},
@@ -472,6 +434,12 @@ where
 		+ Unpin,
 {
 	pub fn new(config: EventHandlerConfig) -> Result<Self, Error> {
+		if config.read_buffer_size < 6_120 {
+			return Err(ErrorKind::EventHandlerConfigurationError(
+				"read_buffer_len must be greater than or equal to 6_120".to_string(),
+			)
+			.into());
+		}
 		let mut guarded_data = vec![];
 		let mut wakeup = vec![];
 		for _ in 0..config.threads {
@@ -1642,7 +1610,6 @@ where
 					if pt_len > ctx.buffer.len() {
 						ctx.buffer.resize(pt_len, 0u8);
 					}
-
 					let buf = &mut ctx.buffer[0..pt_len];
 					tls_conn.reader().read_exact(&mut buf[..pt_len])?;
 				}
@@ -2426,20 +2393,12 @@ where
 
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					let handle_info = HandleInfo::new(item.id, 0);
-					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
-					handle_info.to_bytes(&mut handle_info_bytes)?;
-
 					ctx.input_events.insert(Event {
 						handle: item.handle,
 						etype: EventType::Read,
 					});
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					let handle_info = HandleInfo::new(item.id, 0);
-					let mut handle_info_bytes = [0u8; HANDLE_INFO_SIZE];
-					handle_info.to_bytes(&mut handle_info_bytes)?;
-
 					debug!(
 						"pushing accept handle: {} to tid={}",
 						item.handles[ctx.tid], ctx.tid
@@ -2616,6 +2575,7 @@ impl WriteStatus {
 	}
 
 	fn set_close_oncomplete(&mut self) {
+		self.set_is_closed();
 		self.flags |= FLAG_CLOSE_ONCOMPLETE;
 	}
 
@@ -3321,14 +3281,15 @@ mod tests {
 
 		evh.set_on_read(move |conn_data, buf, _, _| {
 			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
-
 			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
 				assert_eq!(buf, [5, 6, 7, 8, 9]);
 				*(lockw!(client_on_read_count)?) += 1;
 			} else {
-				assert_eq!(buf, [1, 2, 3, 4]);
-				conn_data.write(&[5, 6, 7, 8, 9])?;
-				*(lockw!(server_on_read_count)?) += 1;
+				if buf.len() <= 5 {
+					assert_eq!(buf, [1, 2, 3, 4]);
+					conn_data.write(&[5, 6, 7, 8, 9])?;
+					*(lockw!(server_on_read_count)?) += 1;
+				}
 			}
 			Ok(())
 		})?;
@@ -3409,6 +3370,8 @@ mod tests {
 		let server_on_read_count = Arc::new(RwLock::new(0));
 		let client_on_read_count_clone = client_on_read_count.clone();
 		let server_on_read_count_clone = server_on_read_count.clone();
+		let len_sum = Arc::new(RwLock::new(0));
+		let len_sum_clone = len_sum.clone();
 
 		evh.set_on_housekeep(move |_, _| Ok(()))?;
 		evh.set_on_read(move |conn_data, buf, _, _| {
@@ -3417,8 +3380,14 @@ mod tests {
 				conn_data.connection_info.handle,
 				buf
 			)?;
-
-			if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
+			warn!("onreadbuf.len={}", buf.len())?;
+			{
+				let mut len_sum = lockw!(len_sum_clone)?;
+				*len_sum += buf.len();
+			}
+			if buf.len() > 5 {
+				assert_eq!(buf[0], 0);
+			} else if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
 				assert_eq!(buf, [5, 6, 7, 8, 9]);
 				*(lockw!(client_on_read_count)?) += 1;
 			} else {
@@ -3462,6 +3431,24 @@ mod tests {
 
 		assert_eq!(*(lockr!(server_on_read_count_clone)?), 1);
 		assert_eq!(*(lockr!(client_on_read_count_clone)?), 1);
+
+		// write a large chunk
+		let mut buf = vec![];
+		for _ in 0..20_000 {
+			buf.push(0);
+		}
+		conn_info.write(&buf)?;
+		conn_info.write(&buf)?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			let len_sum = lockr!(len_sum)?;
+			warn!("len_sum = {}", *len_sum)?;
+			if *len_sum == 40_009 {
+				break;
+			}
+			assert!(*len_sum < 40_009);
+		}
 
 		Ok(())
 	}
@@ -3775,8 +3762,10 @@ mod tests {
 
 		let on_close_counter = Arc::new(RwLock::new(0));
 		let on_read_counter = Arc::new(RwLock::new(0));
+		let closing_success = Arc::new(RwLock::new(false));
 		let on_close_counter_clone = on_close_counter.clone();
 		let on_read_counter_clone = on_read_counter.clone();
+		let closing_success_clone = closing_success.clone();
 
 		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_close(move |_conn_data, _, _| {
@@ -3796,8 +3785,11 @@ mod tests {
 				info!("closing conn {}", conn_data.get_connection_id())?;
 				conn_data.close()?;
 
-				// close a second time to ensure no double closes
-				conn_data.close()?;
+				// test some functions with close.
+				std::thread::sleep(std::time::Duration::from_millis(50));
+				assert!(conn_data.close().is_err());
+				assert!(conn_data.async_complete().is_err());
+				(*(lockw!(closing_success_clone)?)) = true;
 			}
 			Ok(())
 		})?;
@@ -3831,6 +3823,7 @@ mod tests {
 
 		assert_eq!(*(lockr!(on_close_counter)?), 1);
 		assert_eq!(*(lockr!(on_read_counter)?), 5);
+		assert_eq!(*(lockr!(closing_success)?), true);
 
 		Ok(())
 	}
@@ -3893,7 +3886,9 @@ mod tests {
 		let error_complete_count = Arc::new(RwLock::new(0));
 		let error_complete_count_clone = error_complete_count.clone();
 
-		evh.set_on_read(move |_conn_data, buf, _, _| {
+		evh.set_on_read(move |mut conn_data, buf, _, _| {
+			assert!(conn_data.get_accept_handle().is_some());
+			assert!(conn_data.get_buffer().len() == 0);
 			match buf[0] {
 				// sleep to wait for other requests to queue up
 				0 => {
