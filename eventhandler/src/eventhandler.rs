@@ -3366,6 +3366,7 @@ mod tests {
 		let client_id = Arc::new(RwLock::new(0));
 		let client_id_clone = client_id.clone();
 
+		let write_50k = Arc::new(RwLock::new(false));
 		let client_on_read_count = Arc::new(RwLock::new(0));
 		let server_on_read_count = Arc::new(RwLock::new(0));
 		let client_on_read_count_clone = client_on_read_count.clone();
@@ -3387,6 +3388,19 @@ mod tests {
 			}
 			if buf.len() > 5 {
 				assert_eq!(buf[0], 0);
+
+				{
+					let mut write_50k = lockw!(write_50k)?;
+					if *write_50k {
+						let mut nbuf = vec![];
+						for _ in 0..50_000 {
+							nbuf.push(0);
+						}
+						warn!("write 50k")?;
+						conn_data.write(&nbuf)?;
+					}
+					*write_50k = true;
+				}
 			} else if conn_data.get_connection_id() == *lockr!(client_id_clone)? {
 				assert_eq!(buf, [5, 6, 7, 8, 9]);
 				*(lockw!(client_on_read_count)?) += 1;
@@ -3444,10 +3458,10 @@ mod tests {
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			let len_sum = lockr!(len_sum)?;
 			warn!("len_sum = {}", *len_sum)?;
-			if *len_sum == 40_009 {
+			if *len_sum == 90_009 {
 				break;
 			}
-			assert!(*len_sum < 40_009);
+			assert!(*len_sum < 90_009);
 		}
 
 		Ok(())
@@ -3789,6 +3803,7 @@ mod tests {
 				std::thread::sleep(std::time::Duration::from_millis(50));
 				assert!(conn_data.close().is_err());
 				assert!(conn_data.async_complete().is_err());
+				assert!(conn_data.write(&[0]).is_err());
 				(*(lockw!(closing_success_clone)?)) = true;
 			}
 			Ok(())
