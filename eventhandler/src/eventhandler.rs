@@ -153,6 +153,7 @@ pub struct ConnectionData {
 	guarded_data: Arc<RwLock<GuardedData>>,
 	wakeup: Wakeup,
 	tid: usize,
+	debug_pending: bool,
 }
 
 impl ConnectionData {
@@ -161,6 +162,7 @@ impl ConnectionData {
 		guarded_data: &Arc<RwLock<GuardedData>>,
 		wakeup: &Wakeup,
 		tid: usize,
+		debug_pending: bool,
 	) -> Self {
 		let connection_info = connection_info.clone();
 		let guarded_data = guarded_data.clone();
@@ -170,6 +172,7 @@ impl ConnectionData {
 			guarded_data,
 			wakeup,
 			tid,
+			debug_pending,
 		}
 	}
 
@@ -299,7 +302,7 @@ impl ConnectionData {
 				.into());
 			}
 
-			if (*write_status).is_pending() {
+			if (*write_status).is_pending() || self.debug_pending {
 				// there are pending writes, we cannot write here.
 				// return that 0 bytes were written and pass on to
 				// main thread loop
@@ -367,6 +370,8 @@ pub struct EventHandlerConfig {
 	pub max_rwhandles: usize,
 	pub max_handle_numeric_value: usize,
 	pub housekeeper_frequency: isize,
+	pub debug_pending: bool,
+	pub debug_fatal: bool,
 }
 
 impl Default for EventHandlerConfig {
@@ -377,6 +382,8 @@ impl Default for EventHandlerConfig {
 			max_rwhandles: 16_000,
 			max_handle_numeric_value: 16_100,
 			housekeeper_frequency: 1_000,
+			debug_pending: false,
+			debug_fatal: false,
 		}
 	}
 }
@@ -435,10 +442,8 @@ where
 {
 	pub fn new(config: EventHandlerConfig) -> Result<Self, Error> {
 		if config.read_buffer_size < 6_120 {
-			return Err(ErrorKind::EventHandlerConfigurationError(
-				"read_buffer_len must be greater than or equal to 6_120".to_string(),
-			)
-			.into());
+			let msg = "read_buffer_len must be greater than or equal to 6_120".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 		let mut guarded_data = vec![];
 		let mut wakeup = vec![];
@@ -513,22 +518,18 @@ where
 	) -> Result<(), Error> {
 		for handle in &handles {
 			if *handle >= self.config.max_handle_numeric_value.try_into()? {
-				return Err(ErrorKind::MaxHandlesExceeded(format!(
-					"Max numeric handle exceeded. Limit = {}",
-					self.config.max_handle_numeric_value,
-				))
-				.into());
+				let max = self.config.max_handle_numeric_value;
+				let msg = format!("Max numeric handle exceeded. Limit = {}", max);
+				return Err(ErrorKind::MaxHandlesExceeded(msg).into());
 			}
 		}
 		self.check_callbacks()?;
 
 		if handles.len() != self.config.threads.try_into()? {
-			return Err(ErrorKind::EventHandlerConfigurationError(format!(
-				"must add exactly the number of handles as threads. {} != {}",
-				handles.len(),
-				self.config.threads,
-			))
-			.into());
+			let len = handles.len();
+			let th = self.config.threads;
+			let msg = format!("handles not equal to threads threads. {} != {}", len, th);
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 
 		let tls_config = match tls_config {
@@ -541,9 +542,9 @@ where
 						key: Arc::new(
 							RsaSigningKey::new(&load_private_key(&tls_config.private_key_file)?)
 								.map_err(|e| {
-									let error: Error =
-										ErrorKind::InternalError(format!("Signing error: {}", e))
-											.into();
+									let msg = format!("Signing error: {}", e);
+									let ekind = ErrorKind::InternalError(msg);
+									let error: Error = ekind.into();
 									error
 								})?,
 						),
@@ -551,12 +552,13 @@ where
 						sct_list: None,
 					},
 				)?;
-				Some(
-					ServerConfig::builder()
-						.with_safe_defaults()
-						.with_no_client_auth()
-						.with_cert_resolver(Arc::new(cert_resolver)),
-				)
+
+				let builder = ServerConfig::builder();
+				let builder = builder.with_safe_defaults();
+				let builder = builder.with_no_client_auth();
+				let builder = builder.with_cert_resolver(Arc::new(cert_resolver));
+
+				Some(builder)
 			}
 			None => None,
 		};
@@ -595,28 +597,24 @@ where
 
 	fn check_callbacks(&self) -> Result<(), Error> {
 		if self.callbacks.on_read.is_none() {
-			return Err(ErrorKind::EventHandlerConfigurationError(
-				"set_on_read must be called before calling start".to_string(),
-			)
-			.into());
+			let msg = "set_on_read must be called before calling start".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 		if self.callbacks.on_accept.is_none() {
-			return Err(ErrorKind::EventHandlerConfigurationError(
-				"set_on_accept must be called before calling start".to_string(),
-			)
-			.into());
+			let msg = "set_on_accept must be called before calling start".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 		if self.callbacks.on_close.is_none() {
-			return Err(ErrorKind::EventHandlerConfigurationError(
-				"set_on_close must be called before calling start".to_string(),
-			)
-			.into());
+			let msg = "set_on_close must be called before calling start".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 		if self.callbacks.on_panic.is_none() {
-			return Err(ErrorKind::EventHandlerConfigurationError(
-				"set_on_panic must be called before calling start".to_string(),
-			)
-			.into());
+			let msg = "set_on_panic must be called before calling start".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
+		}
+		if self.callbacks.on_housekeep.is_none() {
+			let msg = "set_on_housekeep must be called before calling start".to_string();
+			return Err(ErrorKind::EventHandlerConfigurationError(msg).into());
 		}
 
 		Ok(())
@@ -625,12 +623,10 @@ where
 	fn do_start(&self) -> Result<(), Error> {
 		let stop_count = Arc::new(RwLock::new(0));
 		for i in 0..self.config.threads {
-			self.start_thread(
-				self.guarded_data[i].clone(),
-				self.wakeup[i].clone(),
-				i,
-				stop_count.clone(),
-			)?;
+			let gd = self.guarded_data[i].clone();
+			let wk = self.wakeup[i].clone();
+			let sc = stop_count.clone();
+			self.start_thread(gd, wk, i, sc)?;
 		}
 		Ok(())
 	}
@@ -696,40 +692,51 @@ where
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
 
 		let mut step_allocator = StepAllocator::new(StepAllocatorConfig::default());
-		let mut connection_index_handle_map = StaticHash::new(StaticHashConfig {
-			max_entries: self.config.max_handle_numeric_value,
-			key_len: HANDLE_SIZE,
-			entry_len: SIZEOF_USIZE,
-			max_load_factor: 1.0,
-			iterator: false,
-		})?;
+		let max_entries = self.config.max_handle_numeric_value;
+		let key_len = HANDLE_SIZE;
+		let entry_len = SIZEOF_USIZE;
+		let max_load_factor = 1.0;
+		let iterator = false;
+		let shc = StaticHashConfig {
+			max_entries,
+			key_len,
+			max_load_factor,
+			entry_len,
+			iterator,
+		};
+		let mut connection_index_handle_map = StaticHash::new(shc)?;
 
-		let mut connection_index_id_map = StaticHash::new(StaticHashConfig {
-			max_entries: self.config.max_handle_numeric_value,
-			key_len: SIZEOF_U128,
-			entry_len: SIZEOF_USIZE,
-			max_load_factor: 1.0,
-			iterator: false,
-		})?;
+		let max_entries = self.config.max_handle_numeric_value;
+		let key_len = SIZEOF_U128;
+		let entry_len = SIZEOF_USIZE;
+		let max_load_factor = 1.0;
+		let iterator = false;
+		let shc = StaticHashConfig {
+			max_entries,
+			key_len,
+			max_load_factor,
+			entry_len,
+			iterator,
+		};
+		let mut connection_index_id_map = StaticHash::new(shc)?;
 
 		let config = self.config.clone();
 
 		// add the wakeup handle to all hashtables
-		let connection_info =
-			EventConnectionInfo::read_write_connection(wakeup.wakeup_handle_read, None, None, None);
+		let whr = wakeup.wakeup_handle_read;
+		let connection_info = EventConnectionInfo::read_write_connection(whr, None, None, None);
 
-		Self::insert_step_allocator(
-			connection_info.clone(),
-			&mut step_allocator,
-			&mut connection_index_handle_map,
-			&mut connection_index_id_map,
-			ctx.tid,
-		)?;
+		let ci = connection_info.clone();
+		let sa = &mut step_allocator;
+		let cihm = &mut connection_index_handle_map;
+		let ciim = &mut connection_index_id_map;
+		let tid = ctx.tid;
+		Self::insert_step_allocator(ci, sa, cihm, ciim, tid)?;
 
-		ctx.input_events.insert(Event {
-			handle: wakeup.wakeup_handle_read,
-			etype: EventType::Read,
-		});
+		let handle = wakeup.wakeup_handle_read;
+		let etype = EventType::Read;
+		let event = Event { handle, etype };
+		ctx.input_events.insert(event);
 
 		let ctx = Arc::new(RwLock::new(ctx));
 		let connection_index_handle_map = Arc::new(RwLock::new(connection_index_handle_map));
@@ -751,8 +758,8 @@ where
 				let jh = std::thread::spawn(move || -> Result<(), Error> {
 					let mut events: &mut HashSet<Event> = &mut *lockwp!(events);
 					let mut ctx = &mut *lockwp!(ctx);
-					let mut connection_index_handle_map =
-						&mut *lockwp!(connection_index_handle_map);
+					let cihm = &connection_index_handle_map;
+					let mut connection_index_handle_map = &mut *lockwp!(cihm);
 					let mut connection_index_id_map = &mut *lockwp!(connection_index_id_map);
 					let mut step_allocator = &mut *lockwp!(step_allocator);
 					let callbacks = &mut *lockwp!(callbacks);
@@ -761,17 +768,18 @@ where
 
 					// process any remaining events from a panic
 					let next = ctx.counter + 1;
-					match Self::thread_loop(
-						&mut ctx,
-						&config,
-						&mut events,
-						&wakeup,
-						&callbacks,
-						&mut connection_index_handle_map,
-						&mut connection_index_id_map,
-						&mut step_allocator,
-						next,
-					) {
+					let a = &mut ctx;
+					let b = &config;
+					let c = &mut events;
+					let d = &wakeup;
+					let e = &callbacks;
+					let f = &mut connection_index_handle_map;
+					let g = &mut connection_index_id_map;
+					let h = &mut step_allocator;
+					let i = next;
+
+					let tl = Self::thread_loop(a, b, c, d, e, f, g, h, i);
+					match tl {
 						Ok(do_stop) => {
 							stop = do_stop;
 						}
@@ -887,6 +895,13 @@ where
 		step_allocator: &mut StepAllocator,
 		start: usize,
 	) -> Result<bool, Error> {
+		if config.debug_fatal {
+			let msg = "thread loop fatal test".to_string();
+			let ekind = ErrorKind::InternalError(msg);
+			let error = ekind.into();
+			return Err(error);
+		}
+
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
 		// and we don't need to get new events yet.
 		if start == 0 {
@@ -1228,7 +1243,7 @@ where
 	}
 
 	fn close_connection(
-		_config: &EventHandlerConfig,
+		config: &EventHandlerConfig,
 		id: u128,
 		ctx: &mut Context,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
@@ -1289,6 +1304,7 @@ where
 														&ctx.guarded_data,
 														&wakeup,
 														ctx.tid,
+														config.debug_pending,
 													),
 													&mut connection_context,
 													&mut ctx.user_data,
@@ -1463,6 +1479,7 @@ where
 						&ctx.guarded_data,
 						&wakeup,
 						ctx.tid,
+						config.debug_pending,
 					);
 					match (on_accept)(&conn_data, &mut connection_context, &mut ctx.user_data) {
 						Ok(_) => {}
@@ -1499,7 +1516,7 @@ where
 		let (len, do_read_now) = match connection_info.tls_server {
 			Some(ref tls_server) => {
 				let (raw_len, tls_len) =
-					Self::do_tls_server_read(&connection_info, ctx, wakeup, tls_server)?;
+					Self::do_tls_server_read(&connection_info, ctx, wakeup, tls_server, config)?;
 				let do_read_now = raw_len <= 0 || tls_len > 0;
 				let len = if tls_len > 0 {
 					tls_len.try_into()?
@@ -1510,8 +1527,13 @@ where
 			}
 			None => match connection_info.tls_client {
 				Some(ref tls_client) => {
-					let (raw_len, tls_len) =
-						Self::do_tls_client_read(&connection_info, ctx, wakeup, tls_client)?;
+					let (raw_len, tls_len) = Self::do_tls_client_read(
+						&connection_info,
+						ctx,
+						wakeup,
+						tls_client,
+						config,
+					)?;
 					let do_read_now = raw_len <= 0 || tls_len > 0;
 					let len = if tls_len > 0 {
 						tls_len.try_into()?
@@ -1547,6 +1569,7 @@ where
 		ctx: &mut Context,
 		wakeup: &Wakeup,
 		tls_client: &Arc<RwLock<ClientConnection>>,
+		config: &EventHandlerConfig,
 	) -> Result<(isize, usize), Error> {
 		let mut pt_len = 0;
 		let handle = connection_info.handle;
@@ -1581,8 +1604,13 @@ where
 		}
 
 		if len > 0 {
-			let connection_data =
-				&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
+			let connection_data = &ConnectionData::new(
+				connection_info,
+				&ctx.guarded_data,
+				&wakeup,
+				ctx.tid,
+				config.debug_pending,
+			);
 			connection_data.do_write(&wbuf)?;
 		}
 
@@ -1594,6 +1622,7 @@ where
 		ctx: &mut Context,
 		wakeup: &Wakeup,
 		tls_server: &Arc<RwLock<ServerConnection>>,
+		config: &EventHandlerConfig,
 	) -> Result<(isize, usize), Error> {
 		let mut pt_len = 0;
 		let handle = connection_info.handle;
@@ -1626,8 +1655,13 @@ where
 		}
 
 		if len > 0 {
-			let connection_data =
-				&ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
+			let connection_data = &ConnectionData::new(
+				connection_info,
+				&ctx.guarded_data,
+				&wakeup,
+				ctx.tid,
+				config.debug_pending,
+			);
 
 			connection_data.do_write(&wbuf)?;
 		}
@@ -1657,8 +1691,13 @@ where
 			// non-wakeup, so execute on_read callback
 			match &callbacks.on_read {
 				Some(on_read) => {
-					let connection_data =
-						ConnectionData::new(connection_info, &ctx.guarded_data, &wakeup, ctx.tid);
+					let connection_data = ConnectionData::new(
+						connection_info,
+						&ctx.guarded_data,
+						&wakeup,
+						ctx.tid,
+						config.debug_pending,
+					);
 					match (on_read)(
 						connection_data,
 						&ctx.buffer[0..len.try_into()?],
@@ -2208,7 +2247,7 @@ where
 
 	fn process_new(
 		ctx: &mut Context,
-		_config: &EventHandlerConfig,
+		config: &EventHandlerConfig,
 		connection_index_handle_map: &mut StaticHash<(), ()>,
 		connection_index_id_map: &mut StaticHash<(), ()>,
 		step_allocator: &mut StepAllocator,
@@ -2246,6 +2285,7 @@ where
 				step_allocator,
 				wakeup,
 				callbacks,
+				config,
 			)?;
 			ctx.nwrites.clear();
 		}
@@ -2274,6 +2314,7 @@ where
 		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
+		config: &EventHandlerConfig,
 	) -> Result<(), Error> {
 		debug!("process nwrites with {} connections", ctx.nwrites.len())?;
 		for connection_id in &ctx.nwrites {
@@ -2341,8 +2382,13 @@ where
 					if async_complete {
 						match callbacks.on_read.as_ref() {
 							Some(on_read) => {
-								let connection_data =
-									ConnectionData::new(&item, &ctx.guarded_data, &wakeup, ctx.tid);
+								let connection_data = ConnectionData::new(
+									&item,
+									&ctx.guarded_data,
+									&wakeup,
+									ctx.tid,
+									config.debug_pending,
+								);
 								connection_context.is_async_complete = true;
 								match (on_read)(
 									connection_data,
@@ -3061,6 +3107,7 @@ impl EvhParams {
 			&guarded_data,
 			&wakeup,
 			tid,
+			config.debug_pending,
 		))
 	}
 
@@ -3141,6 +3188,111 @@ mod tests {
 		let mut evh = EventHandler::new(EventHandlerConfig {
 			max_handle_numeric_value: 500,
 			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let lock = Arc::new(RwLock::new(0));
+		let lock_clone1 = lock.clone();
+		let lock_clone2 = lock.clone();
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		let cid_accept = Arc::new(RwLock::new(0));
+		let cid_accept_clone = cid_accept.clone();
+		let cid_read = Arc::new(RwLock::new(0));
+		let cid_read_clone = cid_read.clone();
+
+		evh.set_on_accept(move |conn_data, _, _| {
+			{
+				let mut cid = cid_accept.write().unwrap();
+				*cid = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone1.write().unwrap();
+				*lock += 1;
+			}
+			Ok(())
+		})?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		evh.set_on_read(move |conn_data, buf, _, _| {
+			assert_eq!(buf, [1, 2, 3, 4]);
+			{
+				let mut cid_read = cid_read.write().unwrap();
+				*cid_read = conn_data.get_connection_id();
+			}
+			{
+				let mut lock = lock_clone2.write().unwrap();
+				*lock += 1;
+			}
+
+			conn_data.write(&[5, 6, 7, 8, 9])?;
+			Ok(())
+		})?;
+
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+		let mut stream = TcpStream::connect(addr)?;
+		stream.write(&[1, 2, 3, 4])?;
+		loop {
+			{
+				let lock = lock.write().unwrap();
+				if *lock > 1 {
+					break;
+				}
+			}
+			std::thread::sleep(std::time::Duration::from_millis(1));
+		}
+		let mut buf = [0u8; 10];
+		let len = stream.read(&mut buf)?;
+		assert_eq!(&buf[0..len], &[5, 6, 7, 8, 9]);
+
+		{
+			let lock = lock.read().unwrap();
+			assert_eq!(*lock, 2);
+		}
+
+		{
+			let cid_accept = cid_accept_clone.read().unwrap();
+			let cid_read = cid_read_clone.read().unwrap();
+			assert_eq!(*cid_read, *cid_accept);
+			assert!(*cid_read != 0);
+		}
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_pending() -> Result<(), Error> {
+		let port = 8090;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
+			threads: 3,
+			debug_pending: true,
 			..EventHandlerConfig::default()
 		})?;
 
@@ -3391,7 +3543,7 @@ mod tests {
 
 				{
 					let mut write_50k = lockw!(write_50k)?;
-					if *write_50k {
+					if *write_50k == false {
 						let mut nbuf = vec![];
 						for _ in 0..50_000 {
 							nbuf.push(0);
@@ -3412,6 +3564,18 @@ mod tests {
 			Ok(())
 		})?;
 		evh.start()?;
+
+		// test bad private key
+		assert!(evh
+			.add_listener_handles(
+				handles.clone(),
+				Some(TLSServerConfig {
+					certificates_file: "./src/resources/cert.pem".to_string(),
+					private_key_file: "./src/resources/badkey.pem".to_string(),
+					sni_host: "localhost".to_string(),
+				}),
+			)
+			.is_err());
 
 		evh.add_listener_handles(
 			handles,
@@ -3456,12 +3620,14 @@ mod tests {
 
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(1));
-			let len_sum = lockr!(len_sum)?;
-			warn!("len_sum = {}", *len_sum)?;
-			if *len_sum == 90_009 {
-				break;
+			{
+				let len_sum = lockr!(len_sum)?;
+				warn!("len_sum = {}", *len_sum)?;
+				if *len_sum == 90_009 {
+					break;
+				}
+				assert!(*len_sum < 90_009);
 			}
-			assert!(*len_sum < 90_009);
 		}
 
 		Ok(())
@@ -3688,17 +3854,32 @@ mod tests {
 			Ok(())
 		})?;
 		evh.start()?;
-		evh.add_listener_handles(handles, None)?;
+
+		handles.push(1);
+		assert!(evh.add_listener_handles(handles.clone(), None).is_err());
+		handles.pop();
+		evh.add_listener_handles(handles.clone(), None)?;
+		handles.pop();
+		// test too high numeric value
+		handles.push(1000);
+		assert!(evh.add_listener_handles(handles.clone(), None).is_err());
 
 		let mut stream1 = TcpStream::connect(addr.clone())?;
 		let mut stream2 = TcpStream::connect(addr.clone())?;
 		let mut stream3 = TcpStream::connect(addr)?;
-		std::thread::sleep(std::time::Duration::from_millis(1000));
 		stream1.write(&[5, 6, 7, 8, 9])?;
 		stream2.write(&[5, 6, 7, 8, 9])?;
 		stream3.write(&[5, 6, 7, 8, 9])?;
-		std::thread::sleep(std::time::Duration::from_millis(1000));
-		assert_eq!(*(lockr!(resp_len)?), 10);
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(10));
+			let resp_len = lockr!(resp_len)?;
+			if *resp_len < 10 {
+				continue;
+			}
+			assert_eq!(*resp_len, 10);
+			break;
+		}
 
 		Ok(())
 	}
@@ -3737,6 +3918,59 @@ mod tests {
 				break;
 			}
 		}
+
+		Ok(())
+	}
+
+	fn check_config(evh_config: &EventHandlerConfig, valid: bool) -> Result<(), Error> {
+		let evh = EventHandler::new(*evh_config);
+
+		if !valid {
+			assert!(evh.is_err());
+		} else {
+			assert!(evh.is_ok());
+		}
+
+		match evh {
+			Ok(mut evh) => {
+				assert!(evh.start().is_err());
+				evh.set_on_read(move |_, _, _, _| Ok(()))?;
+				assert!(evh.start().is_err());
+				evh.set_on_accept(move |_, _, _| Ok(()))?;
+				assert!(evh.start().is_err());
+				evh.set_on_close(move |_, _, _| Ok(()))?;
+				assert!(evh.start().is_err());
+				evh.set_on_panic(move || Ok(()))?;
+				assert!(evh.start().is_err());
+				evh.set_on_housekeep(move |_, _| Ok(()))?;
+				assert!(evh.start().is_ok());
+			}
+			Err(_) => {}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_bad_config() -> Result<(), Error> {
+		check_config(
+			&EventHandlerConfig {
+				read_buffer_size: 1_000,
+				..EventHandlerConfig::default()
+			},
+			false,
+		)?;
+
+		check_config(
+			&EventHandlerConfig {
+				read_buffer_size: 10_000,
+				debug_fatal: true,
+				..EventHandlerConfig::default()
+			},
+			true,
+		)?;
+
+		// wait so threads can start to get fatal
+		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		Ok(())
 	}
@@ -3946,14 +4180,12 @@ mod tests {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
-
 		let mut stream1 = TcpStream::connect(addr.clone())?;
 		let mut stream2 = TcpStream::connect(addr.clone())?;
 		let mut stream3 = TcpStream::connect(addr.clone())?;
 		let mut stream4 = TcpStream::connect(addr)?;
 
 		stream1.write(&[0])?;
-
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			if *(lockw!(in_wait_mode)?) {
@@ -3980,7 +4212,6 @@ mod tests {
 			}
 			break;
 		}
-
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			let on_panic_counter = lockr!(on_panic_counter)?;
@@ -3991,7 +4222,6 @@ mod tests {
 			assert_eq!(*on_panic_counter, 1);
 			break;
 		}
-
 		{
 			(*(lockw!(in_wait_mode)?)) = false;
 		}
@@ -4007,7 +4237,6 @@ mod tests {
 		stream1.write(&[4])?;
 		stream2.write(&[5])?;
 		stream3.write(&[6])?;
-
 		loop {
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			{
