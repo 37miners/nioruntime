@@ -357,6 +357,13 @@ fn main() -> Result<(), Error> {
 			info!("Starting EventHandler!")?;
 		}
 
+		if tls && !args.is_present("sni_host") {
+			return Err(ErrorKind::ApplicationError(
+				"sni_host must be specified with tls enabled".to_string(),
+			)
+			.into());
+		}
+
 		if tls && !args.is_present("tls_certificates_file") {
 			return Err(ErrorKind::ApplicationError(
 				"tls_certificates_file must be specified with tls enabled".to_string(),
@@ -375,6 +382,7 @@ fn main() -> Result<(), Error> {
 			Some(TLSServerConfig {
 				private_key_file: args.value_of("tls_private_key_file").unwrap().to_string(),
 				certificates_file: args.value_of("tls_certificates_file").unwrap().to_string(),
+				sni_host: args.value_of("sni_host").unwrap().to_string(),
 			})
 		} else {
 			None
@@ -497,6 +505,7 @@ fn main() -> Result<(), Error> {
 				listeners: vec![(
 					ListenerType::Plain,
 					SocketAddr::from_str(&format!("0.0.0.0:{}", port)[..])?,
+					None,
 				)],
 				evh_config: EventHandlerConfig {
 					threads,

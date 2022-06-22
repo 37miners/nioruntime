@@ -118,6 +118,17 @@ type Handle = RawFd;
 #[cfg(windows)]
 type Handle = u64;
 
+macro_rules! try_or_warn {
+	($a:expr, $b:expr) => {
+		match $a {
+			Ok(_) => {}
+			Err(e) => {
+				warn!("{}: {}", $b, e)?;
+			}
+		}
+	};
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectionContext {
 	pub buffer: Vec<u8>,
@@ -842,14 +853,10 @@ where
 				}
 
 				let callbacks = lockwp!(callbacks_clone);
-				match &(*callbacks).on_panic {
-					Some(on_panic) => {
-						let panic_res = (on_panic)();
-						if panic_res.is_err() {
-							println!("on_panic generated error: {:?}", panic_res);
-						}
-					}
-					None => {}
+				let on_panic = &(*callbacks).on_panic.as_ref().unwrap();
+				let panic_res = (on_panic)();
+				if panic_res.is_err() {
+					warn!("on_panic generated error: {:?}", panic_res)?;
 				}
 			}
 			Ok(())
@@ -866,16 +873,11 @@ where
 
 		if now - ctx.housekeeper_last > config.housekeeper_frequency.try_into()? {
 			debug!("house keep: tid={},now={}", ctx.tid, now)?;
-			match &callbacks.on_housekeep {
-				Some(on_housekeeper) => match (on_housekeeper)(&mut ctx.user_data, ctx.tid) {
-					Ok(_) => {}                                                       //============
-					Err(e) => error!("housekeeper callback generated error: {}", e)?, //============
-				},
-				None => {
-					//============
-					error!("housekeeper not set")?;
-				}
-			}
+			let on_housekeeper = callbacks.on_housekeep.as_ref().unwrap();
+			let a = &mut ctx.user_data;
+			let b = ctx.tid;
+			let msg = "housekeeper callback generated error";
+			try_or_warn!((on_housekeeper)(a, b), msg);
 			ctx.housekeeper_last = now;
 		}
 
@@ -1187,17 +1189,15 @@ where
 
 		match x {
 			Some((id, _handle)) => {
-				Self::close_connection(
-					config,
-					id,
-					ctx,
-					callbacks,
-					connection_index_handle_map,
-					connection_index_id_map,
-					step_allocator,
-					wakeup,
-					true,
-				)?;
+				let a = config;
+				let b = id;
+				let c = ctx;
+				let d = callbacks;
+				let e = connection_index_handle_map;
+				let f = connection_index_id_map;
+				let g = step_allocator;
+				let h = wakeup;
+				Self::close_connection(a, b, c, d, e, f, g, h, true)?;
 			}
 			None => {}
 		}
@@ -1234,18 +1234,18 @@ where
 							match connection_info {
 								EventConnectionInfo::ReadWriteConnection(ref c) => {
 									{
-										ctx.input_events.remove(&Event {
-											handle,
-											etype: EventType::Read,
-										});
-										ctx.input_events.remove(&Event {
-											handle,
-											etype: EventType::Write,
-										});
-										ctx.input_events.remove(&Event {
-											handle,
-											etype: EventType::Accept,
-										});
+										let etype = EventType::Read;
+										let event = Event { handle, etype };
+										ctx.input_events.remove(&event);
+
+										let etype = EventType::Write;
+										let event = Event { handle, etype };
+										ctx.input_events.remove(&event);
+
+										let etype = EventType::Accept;
+										let event = Event { handle, etype };
+										ctx.input_events.remove(&event);
+
 										ctx.saturating_handles.remove(&handle);
 										{
 											let mut write_status = lockw!(c.write_status)?;
@@ -1257,25 +1257,19 @@ where
 											*cur_connections = (*cur_connections).saturating_sub(1);
 										}
 									}
-									match callbacks.on_close.as_ref() {
-										Some(on_close) => {
-											match connection_hash_data.connection_context.as_mut() {
-												Some(mut connection_context) => (on_close)(
-													&ConnectionData::new(
-														connection_info
-															.get_read_write_connection_info()?,
-														&ctx.guarded_data,
-														&wakeup,
-														ctx.tid,
-														config.debug_pending,
-													),
-													&mut connection_context,
-													&mut ctx.user_data,
-												)?,
-												None => error!("no context found for id = {}", id)?,
-											}
-										}
-										None => warn!("no on_close callback")?,
+									let on_close = callbacks.on_close.as_ref().unwrap();
+									let a = connection_info.get_read_write_connection_info()?;
+									let b = &ctx.guarded_data;
+									let c = &wakeup;
+									let d = ctx.tid;
+									let e = config.debug_pending;
+									match connection_hash_data.connection_context.as_mut() {
+										Some(mut connection_context) => (on_close)(
+											&ConnectionData::new(a, b, c, d, e),
+											&mut connection_context,
+											&mut ctx.user_data,
+										)?,
+										None => error!("no context found for id = {}", id)?,
 									}
 
 									if close_handle {
@@ -1435,24 +1429,21 @@ where
 
 			let mut connection_context = ConnectionContext::new(remote_peer, local_peer);
 
-			match &callbacks.on_accept {
-				Some(on_accept) => {
-					let conn_data = ConnectionData::new(
-						connection_info.get_read_write_connection_info()?,
-						&ctx.guarded_data,
-						&wakeup,
-						ctx.tid,
-						config.debug_pending,
-					);
-					match (on_accept)(&conn_data, &mut connection_context, &mut ctx.user_data) {
-						Ok(_) => {}
-						Err(e) => {
-							warn!("on_accept Callback resulted in error: {}", e)?;
-						}
-					}
-				}
-				None => error!("no handler for on_accept!")?,
-			};
+			let on_accept = callbacks.on_accept.as_ref().unwrap();
+
+			let a = connection_info.get_read_write_connection_info()?;
+			let b = &ctx.guarded_data;
+			let c = &wakeup;
+			let d = ctx.tid;
+			let e = config.debug_pending;
+
+			let conn_data = ConnectionData::new(a, b, c, d, e);
+
+			let a = &conn_data;
+			let b = &mut connection_context;
+			let c = &mut ctx.user_data;
+			let msg = "on_accept Callback resulted in error";
+			try_or_warn!((on_accept)(a, b, c), msg);
 
 			ctx.accepted_connections.push(connection_info);
 			Ok(true)
@@ -1490,13 +1481,11 @@ where
 			}
 			None => match connection_info.tls_client {
 				Some(ref tls_client) => {
-					let (raw_len, tls_len) = Self::do_tls_client_read(
-						&connection_info,
-						ctx,
-						wakeup,
-						tls_client,
-						config,
-					)?;
+					let a = &connection_info;
+					let c = wakeup;
+					let d = tls_client;
+					let e = config;
+					let (raw_len, tls_len) = Self::do_tls_client_read(a, ctx, c, d, e)?;
 					let do_read_now = raw_len <= 0 || tls_len > 0;
 					let len = if tls_len > 0 {
 						tls_len.try_into()?
@@ -1513,15 +1502,14 @@ where
 		};
 
 		if do_read_now {
-			Self::process_read_result(
-				connection_info,
-				len,
-				wakeup,
-				callbacks,
-				ctx,
-				config,
-				connection_context,
-			)?;
+			let a = connection_info;
+			let b = len;
+			let c = wakeup;
+			let d = callbacks;
+			let f = config;
+			let g = connection_context;
+
+			Self::process_read_result(a, b, c, d, ctx, f, g)?;
 		}
 
 		Ok(len)
@@ -1567,13 +1555,12 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(
-				connection_info,
-				&ctx.guarded_data,
-				&wakeup,
-				ctx.tid,
-				config.debug_pending,
-			);
+			let a = connection_info;
+			let b = &ctx.guarded_data;
+			let c = &wakeup;
+			let d = ctx.tid;
+			let e = config.debug_pending;
+			let connection_data = &ConnectionData::new(a, b, c, d, e);
 			connection_data.do_write(&wbuf)?;
 		}
 
@@ -1618,13 +1605,12 @@ where
 		}
 
 		if len > 0 {
-			let connection_data = &ConnectionData::new(
-				connection_info,
-				&ctx.guarded_data,
-				&wakeup,
-				ctx.tid,
-				config.debug_pending,
-			);
+			let a = connection_info;
+			let b = &ctx.guarded_data;
+			let c = &wakeup;
+			let d = ctx.tid;
+			let e = config.debug_pending;
+			let connection_data = &ConnectionData::new(a, b, c, d, e);
 
 			connection_data.do_write(&wbuf)?;
 		}
@@ -1652,31 +1638,20 @@ where
 		} else if len > 0 {
 			debug!("read {} bytes", len)?;
 			// non-wakeup, so execute on_read callback
-			match &callbacks.on_read {
-				Some(on_read) => {
-					let connection_data = ConnectionData::new(
-						connection_info,
-						&ctx.guarded_data,
-						&wakeup,
-						ctx.tid,
-						config.debug_pending,
-					);
-					match (on_read)(
-						connection_data,
-						&ctx.buffer[0..len.try_into()?],
-						connection_context,
-						&mut ctx.user_data,
-					) {
-						Ok(_) => {}
-						Err(e) => {
-							warn!("on_read Callback resulted in error: {}", e)?;
-						}
-					}
-				}
-				None => {
-					error!("no on_read callback found!")?;
-				}
-			}
+			let on_read = callbacks.on_read.as_ref().unwrap();
+
+			let a = connection_info;
+			let b = &ctx.guarded_data;
+			let c = &wakeup;
+			let d = ctx.tid;
+			let e = config.debug_pending;
+			let connection_data = ConnectionData::new(a, b, c, d, e);
+
+			let a = connection_data;
+			let b = &ctx.buffer[0..len.try_into()?];
+			let c = connection_context;
+			let d = &mut ctx.user_data;
+			try_or_warn!((on_read)(a, b, c, d), "on_read Callback resulted in error");
 		}
 
 		// now that read reasult has been processed, we resize the buffer if it was made
@@ -1782,18 +1757,16 @@ where
 			}
 		}
 
+		let a = config;
+		let c = ctx;
+		let d = callbacks;
+		let e = connection_index_handle_map;
+		let f = connection_index_id_map;
+		let g = step_allocator;
+		let h = wakeup;
 		for rem in to_remove {
-			Self::close_connection(
-				config,
-				rem,
-				ctx,
-				callbacks,
-				connection_index_handle_map,
-				connection_index_id_map,
-				step_allocator,
-				wakeup,
-				true,
-			)?;
+			let b = rem;
+			Self::close_connection(a, b, c, d, e, f, g, h, true)?;
 		}
 
 		Ok(())
@@ -2360,13 +2333,8 @@ where
 								let a = connection_data;
 								let b = &ctx.buffer[0..0];
 								let d = &mut ctx.user_data;
-								match (on_read)(a, b, connection_context, d) {
-									Ok(_) => {} //============
-									Err(e) => {
-										//============
-										warn!("on_read Callback resulted in error: {}", e)?;
-									}
-								}
+								let msg = "on_read Callback resulted in error";
+								try_or_warn!((on_read)(a, b, connection_context, d), msg);
 								connection_context.is_async_complete = false;
 							}
 							None => warn!("no onread handler found")?, //============
@@ -3616,6 +3584,18 @@ mod tests {
 			)
 			.is_err());
 
+		// test empty private key file
+		assert!(evh
+			.add_listener_handles(
+				handles.clone(),
+				Some(TLSServerConfig {
+					certificates_file: "./src/resources/cert.pem".to_string(),
+					private_key_file: "./src/resources/emptykey.pem".to_string(),
+					sni_host: "localhost".to_string(),
+				}),
+			)
+			.is_err());
+
 		evh.add_listener_handles(
 			handles,
 			Some(TLSServerConfig {
@@ -4115,13 +4095,12 @@ mod tests {
 
 	#[test]
 	fn test_panic() -> Result<(), Error> {
-		do_test_panic(true)?;
-		do_test_panic(false)?;
+		do_test_panic(true, 8700)?;
+		do_test_panic(false, 8701)?;
 		Ok(())
 	}
 
-	fn do_test_panic(do_err: bool) -> Result<(), Error> {
-		let port = 8700;
+	fn do_test_panic(do_err: bool, port: u16) -> Result<(), Error> {
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
@@ -4300,6 +4279,122 @@ mod tests {
 			break;
 		}
 
+		Ok(())
+	}
+
+	#[test]
+	fn test_max_rwhandles2() -> Result<(), Error> {
+		let port = 8144;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_rwhandles: 1,
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+		evh.set_on_read(move |_, _, _, _| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
+		evh.start()?;
+
+		let stream = TcpStream::connect(addr.clone())?;
+		let handle = stream.as_raw_fd();
+
+		assert!(evh.add_handle(handle, None).is_ok());
+
+		let stream = TcpStream::connect(addr)?;
+		let handle = stream.as_raw_fd();
+
+		assert!(evh.add_handle(handle, None).is_err());
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_max_handles() -> Result<(), Error> {
+		let port = 8144;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 1,
+			threads: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..3 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+		evh.set_on_read(move |_, _, _, _| Ok(()))?;
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
+		evh.start()?;
+
+		let stream = TcpStream::connect(addr)?;
+		let handle = stream.as_raw_fd();
+
+		assert!(evh.add_handle(handle, None).is_err());
+
+		Ok(())
+	}
+
+	fn do_error(err: bool) -> Result<(), Error> {
+		if err {
+			Err(ErrorKind::InternalError("do_error".to_string()).into())
+		} else {
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn test_try_or_warn() -> Result<(), Error> {
+		try_or_warn!(do_error(false), "false");
+		try_or_warn!(do_error(true), "true");
 		Ok(())
 	}
 }

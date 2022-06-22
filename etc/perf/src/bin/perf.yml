@@ -76,6 +76,11 @@ args:
         long: tls_certificates_file
         value_name: tls_certificates_file
         takes_value: true
+    - sni_host:
+        help: the sni_host to use for the server
+        long: sni_host
+        value_name: sni_host
+        takes_value: true
     - http:
         help: test against http
         short: v
