@@ -319,6 +319,7 @@ impl ConnectionData {
 						.write_buffer
 						.append(&mut data[start_data..].to_vec());
 				} else if start_data == 0 && errno().0 == libc::EAGAIN {
+					//============
 					// blocking so add it to the buffer
 					(*write_status).set_is_pending(true);
 					(*write_status)
@@ -333,6 +334,7 @@ impl ConnectionData {
 		if res == len.try_into()? {
 			Ok(())
 		} else if res < 0 {
+			//============
 			let e = errno().0;
 			if e == libc::EAGAIN {
 				// can't write right now. Would block. Pass to selector
@@ -370,6 +372,7 @@ pub struct EventHandlerConfig {
 	pub max_rwhandles: usize,
 	pub max_handle_numeric_value: usize,
 	pub housekeeper_frequency: isize,
+	pub step_size: usize,
 	pub debug_pending: bool,
 	pub debug_fatal: bool,
 }
@@ -382,6 +385,7 @@ impl Default for EventHandlerConfig {
 			max_rwhandles: 16_000,
 			max_handle_numeric_value: 16_100,
 			housekeeper_frequency: 1_000,
+			step_size: 100,
 			debug_pending: false,
 			debug_fatal: false,
 		}
@@ -545,7 +549,7 @@ where
 									let msg = format!("Signing error: {}", e);
 									let ekind = ErrorKind::InternalError(msg);
 									let error: Error = ekind.into();
-									error
+									return error;
 								})?,
 						),
 						ocsp: None,
@@ -640,12 +644,12 @@ where
 	) -> Result<(), Error> {
 		let handle = connection_info.get_handle(tid);
 		let id = connection_info.get_connection_id();
-		let next = match step_allocator.next() {
-			Some(next) => next,
-			None => {
-				step_allocator.step(&ConnectionHashData::new());
-				step_allocator.next().unwrap()
-			}
+		let next = step_allocator.next();
+		let next = if next.is_some() {
+			next.unwrap()
+		} else {
+			step_allocator.step(&ConnectionHashData::new());
+			step_allocator.next().unwrap()
 		};
 
 		#[cfg(unix)]
@@ -691,7 +695,9 @@ where
 		let events = Arc::new(RwLock::new(HashSet::new()));
 		let mut ctx = Context::new(tid, guarded_data, self.config, self.cur_connections.clone())?;
 
-		let mut step_allocator = StepAllocator::new(StepAllocatorConfig::default());
+		let mut step_allocator = StepAllocator::new(StepAllocatorConfig {
+			step_size: self.config.step_size,
+		});
 		let max_entries = self.config.max_handle_numeric_value;
 		let key_len = HANDLE_SIZE;
 		let entry_len = SIZEOF_USIZE;
@@ -789,30 +795,21 @@ where
 					}
 
 					if stop {
-						return Ok(());
+						return Ok(()); //============
 					}
 
 					loop {
-						match Self::thread_loop(
-							&mut ctx,
-							&config,
-							&mut events,
-							&wakeup,
-							&callbacks,
-							&mut connection_index_handle_map,
-							&mut connection_index_id_map,
-							&mut step_allocator,
-							0,
-						) {
+						let tl = Self::thread_loop(a, b, c, d, e, f, g, h, 0);
+						match tl {
 							Ok(do_stop) => {
 								stop = do_stop;
 								if do_stop {
-									break;
+									break; //============
 								}
 							}
 							Err(e) => {
 								fatal!("unexpected error in thread loop: {}", e)?;
-								break;
+								break; //============
 							}
 						}
 					}
@@ -841,17 +838,17 @@ where
 					}
 				}
 				if stop {
-					break;
+					break; //============
 				}
 
 				let callbacks = lockwp!(callbacks_clone);
 				match &(*callbacks).on_panic {
-					Some(on_panic) => match (on_panic)() {
-						Ok(_) => {}
-						Err(e) => {
-							println!("on_panic generated error: {}", e.to_string());
+					Some(on_panic) => {
+						let panic_res = (on_panic)();
+						if panic_res.is_err() {
+							println!("on_panic generated error: {:?}", panic_res);
 						}
-					},
+					}
 					None => {}
 				}
 			}
@@ -871,10 +868,11 @@ where
 			debug!("house keep: tid={},now={}", ctx.tid, now)?;
 			match &callbacks.on_housekeep {
 				Some(on_housekeeper) => match (on_housekeeper)(&mut ctx.user_data, ctx.tid) {
-					Ok(_) => {}
-					Err(e) => error!("housekeeper callback generated error: {}", e)?,
+					Ok(_) => {}                                                       //============
+					Err(e) => error!("housekeeper callback generated error: {}", e)?, //============
 				},
 				None => {
+					//============
 					error!("housekeeper not set")?;
 				}
 			}
@@ -902,18 +900,17 @@ where
 			return Err(error);
 		}
 
+		let c = config;
+		let d = callbacks;
+		let e = connection_index_handle_map;
+		let f = connection_index_id_map;
+		let g = step_allocator;
+		let h = wakeup;
+
 		// this is logic to deal with panics. If there was a panic, start will be > 0.
 		// and we don't need to get new events yet.
 		if start == 0 {
-			let stop = Self::process_new(
-				ctx,
-				config,
-				connection_index_handle_map,
-				connection_index_id_map,
-				step_allocator,
-				wakeup,
-				callbacks,
-			)?;
+			let stop = Self::process_new(ctx, c, e, f, g, h, d)?;
 			if stop {
 				return Ok(stop);
 			}
@@ -931,6 +928,7 @@ where
 		ctx.counter = start;
 
 		let events = {
+			//============
 			let mut ret = vec![];
 			for event in events.iter() {
 				ret.push(event);
@@ -940,24 +938,16 @@ where
 
 		loop {
 			if ctx.counter >= events.len() {
-				break;
+				break; //============
 			}
 			let event = &events[ctx.counter];
+			let a = event;
 			match event.etype {
 				EventType::Read => {
-					let res = Self::process_read_event(
-						event,
-						ctx,
-						config,
-						callbacks,
-						connection_index_handle_map,
-						connection_index_id_map,
-						step_allocator,
-						wakeup,
-					);
+					let res = Self::process_read_event(a, ctx, c, d, e, f, g, h);
 
 					match res {
-						Ok(_) => {}
+						Ok(_) => {} //============
 						Err(e) => {
 							match e.kind() {
 								ErrorKind::HandleNotFoundError(_e) => {
@@ -965,32 +955,15 @@ where
 									// ignore.
 								}
 								_ => {
+									//============
 									return Err(e);
 								}
 							}
 						}
 					}
 				}
-				EventType::Write => Self::process_write_event(
-					event,
-					ctx,
-					config,
-					callbacks,
-					connection_index_handle_map,
-					connection_index_id_map,
-					step_allocator,
-					wakeup,
-				)?,
-				EventType::Error => Self::process_error_event(
-					event,
-					ctx,
-					config,
-					callbacks,
-					connection_index_handle_map,
-					connection_index_id_map,
-					step_allocator,
-					wakeup,
-				)?,
+				EventType::Write => Self::process_write_event(a, ctx, c, d, e, f, g, h)?,
+				EventType::Error => Self::process_error_event(a, ctx, c, d, e, f, g, h)?,
 				EventType::Accept => {} // accepts are returned as read.
 			}
 			ctx.counter += 1;
@@ -1001,16 +974,8 @@ where
 				handle: handle,
 				etype: EventType::Read,
 			};
-			let res = Self::process_read_event(
-				&event,
-				ctx,
-				config,
-				callbacks,
-				connection_index_handle_map,
-				connection_index_id_map,
-				step_allocator,
-				wakeup,
-			);
+			let a = &event;
+			let res = Self::process_read_event(a, ctx, c, d, e, f, g, h);
 
 			match res {
 				Ok(_) => {}
@@ -1074,17 +1039,15 @@ where
 			}
 		};
 
-		Self::close_connection(
-			config,
-			connection_info.get_connection_id(),
-			ctx,
-			callbacks,
-			connection_index_handle_map,
-			connection_index_id_map,
-			step_allocator,
-			wakeup,
-			false,
-		)?;
+		let a = config;
+		let b = connection_info.get_connection_id();
+		let c = ctx;
+		let d = callbacks;
+		let e = connection_index_handle_map;
+		let f = connection_index_id_map;
+		let g = step_allocator;
+		let h = wakeup;
+		Self::close_connection(a, b, c, d, e, f, g, h, false)?;
 
 		Ok(())
 	}
@@ -1787,16 +1750,17 @@ where
 							if (*write_status).close_oncomplete() {
 								to_remove.push(connection_id);
 							} else {
-								ctx.input_events.insert(Event {
-									handle: connection_info.get_handle(),
-									etype: EventType::Read,
-								});
+								let handle = connection_info.get_handle();
+								let etype = EventType::Read;
+								let event = Event { handle, etype };
+								ctx.input_events.insert(event);
 							}
 
 							break; // we're done
 						}
-						let (wr, _len) =
-							Self::write_loop(event.handle, &mut (*write_status).write_buffer)?;
+						let h = event.handle;
+						let wb = &mut (*write_status).write_buffer;
+						let (wr, _len) = Self::write_loop(h, wb)?;
 
 						match wr {
 							WriteResult::Ok => {}
@@ -2051,31 +2015,33 @@ where
 							EpollOp::EpollCtlAdd
 						}
 					}
-					None => EpollOp::EpollCtlAdd,
+					None => EpollOp::EpollCtlAdd, //============
 				};
 				ctx.filter_set.set(handle_as_usize, true);
 
 				let mut event = EpollEvent::new(interest, evt.handle.try_into().unwrap_or(0));
 				let res = epoll_ctl(epollfd, op, evt.handle, &mut event);
 				match res {
-					Ok(_) => {}
+					Ok(_) => {} //============
 					Err(e) => {
+						//============
 						events.insert(Event {
 							handle: fd,
 							etype: EventType::Error,
 						});
-						error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op)?
+						error!("Error epoll_ctl3: {}, fd={}, op={:?}", e, fd, op)? //============
 					}
 				}
 			} else {
 				return Err(
+					//============
 					ErrorKind::InternalError(format!("unexpected etype: {:?}", evt.etype)).into(),
 				);
 			}
 		}
 
 		let results = epoll_wait(
-			epollfd,
+			epollfd, //============
 			&mut ctx.epoll_events,
 			match ctx.saturating_handles.len() > 0 || wakeup {
 				true => 0,
@@ -2090,20 +2056,20 @@ where
 						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLOUT).is_empty() {
 							events.insert(Event {
 								handle: ctx.epoll_events[i].data() as Handle,
-								etype: EventType::Write,
+								etype: EventType::Write, //============
 							});
 						}
 						if !(ctx.epoll_events[i].events() & EpollFlags::EPOLLIN).is_empty() {
 							events.insert(Event {
 								handle: ctx.epoll_events[i].data() as Handle,
-								etype: EventType::Read,
+								etype: EventType::Read, //============
 							});
 						}
 					}
 				}
 			}
 			Err(e) => {
-				error!("Error with epoll wait = {}", e.to_string())?;
+				error!("Error with epoll wait = {}", e.to_string())?; //============
 			}
 		}
 		Ok(())
@@ -2116,6 +2082,7 @@ where
 		target_os = "openbsd",
 		target_os = "freebsd"
 	))]
+	#[cfg(not(tarpaulin_include))]
 	fn get_events(
 		config: &EventHandlerConfig,
 		ctx: &mut Context,
@@ -2212,6 +2179,7 @@ where
 	}
 
 	#[cfg(any(target_os = "macos", dragonfly, netbsd, openbsd))]
+	#[cfg(not(tarpaulin_include))]
 	fn duration_to_timespec(d: Duration) -> timespec {
 		let tv_sec = d.as_secs() as i64;
 		let tv_nsec = d.subsec_nanos() as i64;
@@ -2228,6 +2196,7 @@ where
 	}
 
 	#[cfg(all(target_os = "freebsd", target_arch = "x86"))]
+	#[cfg(not(tarpaulin_include))]
 	fn duration_to_timespec(d: Duration) -> Result<timespec, Error> {
 		let tv_sec = d.as_secs() as i32;
 		let tv_nsec = d.subsec_nanos() as i32;
@@ -2266,27 +2235,21 @@ where
 		} else {
 			ctx.add_pending.append(&mut ctx.accepted_connections);
 
-			debug!(
-				"adding pending conns: {:?} on tid={}",
-				ctx.add_pending, ctx.tid
-			)?;
+			let tid = ctx.tid;
+			let pen = &ctx.add_pending;
+			debug!("adding pending conns: {:?} on tid={}", pen, tid)?;
 
-			Self::process_pending(
-				ctx,
-				connection_index_handle_map,
-				connection_index_id_map,
-				step_allocator,
-			)?;
+			let b = connection_index_handle_map;
+			let c = connection_index_id_map;
+			let d = step_allocator;
+			let e = wakeup;
+			let f = callbacks;
+			let g = config;
+
+			Self::process_pending(ctx, b, c, d)?;
 			ctx.add_pending.clear();
 
-			Self::process_nwrites(
-				ctx,
-				connection_index_id_map,
-				step_allocator,
-				wakeup,
-				callbacks,
-				config,
-			)?;
+			Self::process_nwrites(ctx, c, d, e, f, g)?;
 			ctx.nwrites.clear();
 		}
 
@@ -2324,7 +2287,7 @@ where
 				Some(index) => {
 					let index = usize::from_be_bytes(index.try_into()?);
 					match step_allocator
-						.get_mut(index)?
+						.get_mut(index)? //============
 						.data_as_mut::<ConnectionHashData>()
 					{
 						Some(connection_hash_data) => match &connection_hash_data.connection_info {
@@ -2334,35 +2297,39 @@ where
 										(connection_info, connection_context)
 									}
 									None => {
+										//============
 										return Err(ErrorKind::HandleNotFoundError(format!(
 											"Connection info was not found for id : {}",
 											connection_id
 										))
-										.into());
+										.into()); //============
 									}
 								}
 							}
 							None => {
+								//============
 								return Err(ErrorKind::HandleNotFoundError(format!(
 									"Connection info was not found for id : {}",
 									connection_id
 								))
-								.into());
+								.into()); //============
 							}
 						},
 						None => {
+							//============
 							return Err(ErrorKind::HandleNotFoundError(format!(
 								"Connection hash_data was not found for id: {}",
 								connection_id
 							))
-							.into())
+							.into()); //============
 						}
 					}
 				}
 				None => {
+					//============
 					// connection already closed
 					debug!("Attempt to write on closed connection: {:?}", connection_id)?;
-					continue;
+					continue; //============
 				}
 			};
 
@@ -2390,30 +2357,28 @@ where
 									config.debug_pending,
 								);
 								connection_context.is_async_complete = true;
-								match (on_read)(
-									connection_data,
-									&ctx.buffer[0..0],
-									connection_context,
-									&mut ctx.user_data,
-								) {
-									Ok(_) => {}
+								let a = connection_data;
+								let b = &ctx.buffer[0..0];
+								let d = &mut ctx.user_data;
+								match (on_read)(a, b, connection_context, d) {
+									Ok(_) => {} //============
 									Err(e) => {
+										//============
 										warn!("on_read Callback resulted in error: {}", e)?;
 									}
 								}
 								connection_context.is_async_complete = false;
 							}
-							None => warn!("no onread handler found")?,
+							None => warn!("no onread handler found")?, //============
 						}
 					}
 
-					ctx.input_events.insert(Event {
-						handle: item.handle,
-						etype: EventType::Write,
-					});
+					let handle = item.handle;
+					let etype = EventType::Write;
+					ctx.input_events.insert(Event { handle, etype });
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					warn!("Got a write request on listener: {:?}", item)?;
+					warn!("Got a write request on listener: {:?}", item)?; //============
 				}
 			}
 		}
@@ -2428,32 +2393,27 @@ where
 		step_allocator: &mut StepAllocator,
 	) -> Result<(), Error> {
 		debug!("process_pending with {} connections", ctx.add_pending.len())?;
+		let b = step_allocator;
+		let c = connection_index_handle_map;
+		let d = connection_index_id_map;
 		for pending in &ctx.add_pending {
-			Self::insert_step_allocator(
-				pending.clone(),
-				step_allocator,
-				connection_index_handle_map,
-				connection_index_id_map,
-				ctx.tid,
-			)?;
+			let a = pending.clone();
+			Self::insert_step_allocator(a, b, c, d, ctx.tid)?;
 
 			match pending {
 				EventConnectionInfo::ReadWriteConnection(item) => {
-					ctx.input_events.insert(Event {
-						handle: item.handle,
-						etype: EventType::Read,
-					});
+					let handle = item.handle;
+					let etype = EventType::Read;
+					ctx.input_events.insert(Event { handle, etype });
 				}
 				EventConnectionInfo::ListenerConnection(item) => {
-					debug!(
-						"pushing accept handle: {} to tid={}",
-						item.handles[ctx.tid], ctx.tid
-					)?;
+					let i = item.handles[ctx.tid];
+					let t = ctx.tid;
+					debug!("pushing accept handle: {} to tid={}", i, t)?;
 
-					ctx.input_events.insert(Event {
-						handle: item.handles[ctx.tid],
-						etype: EventType::Accept,
-					});
+					let handle = item.handles[ctx.tid];
+					let etype = EventType::Accept;
+					ctx.input_events.insert(Event { handle, etype });
 				}
 			}
 		}
@@ -2546,8 +2506,9 @@ fn make_config(trusted_cert_full_chain_file: Option<String>) -> Result<Arc<Clien
 			for i in 0..full_chain_certs.len() {
 				root_store.add(&full_chain_certs[i]).map_err(|e| {
 					let error: Error = ErrorKind::SetupError(format!(
+						//============
 						"adding certificate to root store generated error: {}",
-						e.to_string()
+						e.to_string() //============
 					))
 					.into();
 					error
@@ -2579,8 +2540,9 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 	let mut reader = BufReader::new(keyfile);
 
 	loop {
+		//============
 		match rustls_pemfile::read_one(&mut reader)? {
-			Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)),
+			Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)), //============
 			Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(PrivateKey(key)),
 			None => break,
 			_ => {}
@@ -2588,6 +2550,7 @@ fn load_private_key(filename: &str) -> Result<PrivateKey, Error> {
 	}
 
 	Err(ErrorKind::TLSError(format!("no private keys found in file: {}", filename)).into())
+	//============
 }
 
 #[derive(Debug, Clone)]
@@ -2720,12 +2683,13 @@ struct ListenerConnection {
 
 impl Debug for ListenerConnection {
 	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-		f.debug_struct("ListenerConnection")
+		//============
+		f.debug_struct("ListenerConnection") //============
 			.field("id", &self.id)
 			.field("handles", &self.handles)
 			.field("tls_server_config", &self.tls_server_config.is_some())
 			.finish()?;
-		Ok(())
+		Ok(()) //============
 	}
 }
 
@@ -2747,6 +2711,7 @@ impl EventConnectionInfo {
 			EventConnectionInfo::ReadWriteConnection(r) => Ok(&r),
 			_ => {
 				Err(ErrorKind::InvalidType("this is not a ReadWriteConnection".to_string()).into())
+				//============
 			}
 		}
 	}
@@ -2795,7 +2760,7 @@ impl EventConnectionInfo {
 		match self {
 			EventConnectionInfo::ReadWriteConnection(connection_info) => Ok(connection_info),
 			EventConnectionInfo::ListenerConnection(_) => {
-				Err(ErrorKind::WrongConnectionType("this is a listener".to_string()).into())
+				Err(ErrorKind::WrongConnectionType("this is a listener".to_string()).into()) //============
 			}
 		}
 	}
@@ -3043,6 +3008,7 @@ impl EvhParams {
 	) -> Result<ConnectionData, Error> {
 		if handle >= self.config.max_handle_numeric_value.try_into()? {
 			return Err(ErrorKind::MaxHandlesExceeded(format!(
+				//============
 				"Max numeric handle exceeded. Limit = {}",
 				self.config.max_handle_numeric_value,
 			))
@@ -3064,6 +3030,7 @@ impl EvhParams {
 		};
 
 		if cap_exceeded {
+			//============
 			return Err(ErrorKind::MaxHandlesExceeded(format!(
 				"Max Handles exceeded. Limit = {}",
 				config.max_rwhandles,
@@ -3385,6 +3352,78 @@ mod tests {
 	}
 
 	#[test]
+	fn test_step() -> Result<(), Error> {
+		let port = 8107;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
+			threads: 1,
+			step_size: 3,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..1 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		let c = Arc::new(RwLock::new(0));
+		let cc = c.clone();
+
+		evh.set_on_read(move |conn_data, buf, _, _| {
+			info!("callback on {:?} with buf={:?}", conn_data, buf)?;
+			assert_eq!(buf, &[0, 1, 2, 3]);
+			let mut c = lockw!(c)?;
+			*c += 1;
+			Ok(())
+		})?;
+
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
+
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+
+		for _ in 0..5 {
+			let mut stream = TcpStream::connect(addr.clone())?;
+			stream.set_nonblocking(true)?;
+			stream.write(&[0, 1, 2, 3])?;
+		}
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			let c = lockr!(cc)?;
+			if *c == 5 {
+				break;
+			}
+			assert!(*c < 5);
+		}
+
+		Ok(())
+	}
+
+	#[test]
 	fn test_client() -> Result<(), Error> {
 		let port = 8100;
 		let addr = loop {
@@ -3666,11 +3705,8 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_accept(move |_conn_data, _, _| Ok(()))?;
-		evh.set_on_close(move |conn_data, _, _| {
-			warn!("connection closed: {:?}", conn_data.get_connection_id())?;
-			Ok(())
-		})?;
+		evh.set_on_accept(move |_, _, _| Ok(()))?;
+		evh.set_on_close(move |_, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
 		let stream = TcpStream::connect(addr)?;
@@ -4079,6 +4115,12 @@ mod tests {
 
 	#[test]
 	fn test_panic() -> Result<(), Error> {
+		do_test_panic(true)?;
+		do_test_panic(false)?;
+		Ok(())
+	}
+
+	fn do_test_panic(do_err: bool) -> Result<(), Error> {
 		let port = 8700;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
@@ -4118,7 +4160,11 @@ mod tests {
 		evh.set_on_panic(move || {
 			let mut on_panic_counter = lockw!(on_panic_counter_clone)?;
 			*on_panic_counter += 1;
-			Ok(())
+			if do_err {
+				Err(ErrorKind::InternalError("".to_string()).into())
+			} else {
+				Ok(())
+			}
 		})?;
 
 		evh.set_on_housekeep(move |_, _| Ok(()))?;
