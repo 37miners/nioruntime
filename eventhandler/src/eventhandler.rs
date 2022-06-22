@@ -1059,39 +1059,33 @@ where
 		ctx: &mut Context,
 		config: &EventHandlerConfig,
 		callbacks: &Callbacks<OnRead, OnAccept, OnClose, OnPanic, OnHousekeep>,
-		connection_index_handle_map: &mut StaticHash<(), ()>,
-		connection_index_id_map: &mut StaticHash<(), ()>,
+		cihm: &mut StaticHash<(), ()>,
+		ciim: &mut StaticHash<(), ()>,
 		step_allocator: &mut StepAllocator,
 		wakeup: &Wakeup,
 	) -> Result<(), Error> {
 		debug!("process read: {:?}", event)?;
 
 		let x: Option<(u128, Handle)> = {
-			let (connection_info, connection_context) =
-				match connection_index_handle_map.get_raw(&event.handle.to_be_bytes()) {
-					Some(index) => {
-						let index = usize::from_be_bytes(index.try_into()?);
-						match step_allocator
-							.get_mut(index)?
-							.data_as_mut::<ConnectionHashData>()
-						{
-							Some(connection_hash_data) => match &mut connection_hash_data
-								.connection_info
-							{
-								Some(connection_info) => {
-									match &mut connection_hash_data.connection_context {
-										Some(connection_context) => {
-											(connection_info, connection_context)
-										}
-										None => {
-											return Err(ErrorKind::HandleNotFoundError(format!(
-												"Connection handle was not found for event 4: {:?}",
-												event
-											))
-											.into());
-										}
+			let (ci, cc) = match cihm.get_raw(&event.handle.to_be_bytes()) {
+				Some(index) => {
+					let index = usize::from_be_bytes(index.try_into()?);
+					match step_allocator
+						.get_mut(index)?
+						.data_as_mut::<ConnectionHashData>()
+					{
+						Some(connection_hash_data) => {
+							match &mut connection_hash_data.connection_info {
+								Some(ci) => match &mut connection_hash_data.connection_context {
+									Some(cc) => (ci, cc),
+									None => {
+										return Err(ErrorKind::HandleNotFoundError(format!(
+											"Connection handle was not found for event 4: {:?}",
+											event
+										))
+										.into());
 									}
-								}
+								},
 								None => {
 									return Err(ErrorKind::HandleNotFoundError(format!(
 										"Connection handle was not found for event 5: {:?}",
@@ -1099,28 +1093,29 @@ where
 									))
 									.into());
 								}
-							},
-							None => {
-								return Err(ErrorKind::HandleNotFoundError(format!(
-									"Connection handle was not found for event 6: {:?}",
-									event
-								))
-								.into())
 							}
 						}
+						None => {
+							return Err(ErrorKind::HandleNotFoundError(format!(
+								"Connection handle was not found for event 6: {:?}",
+								event
+							))
+							.into())
+						}
 					}
-					None => {
-						return Err(ErrorKind::HandleNotFoundError(format!(
-							"Connection handle was not found for event 7: {:?}",
-							event
-						))
-						.into())
-					}
-				};
+				}
+				None => {
+					return Err(ErrorKind::HandleNotFoundError(format!(
+						"Connection handle was not found for event 7: {:?}",
+						event
+					))
+					.into())
+				}
+			};
 
 			let handle = event.handle;
 
-			match &*connection_info {
+			match &*ci {
 				EventConnectionInfo::ListenerConnection(c) => {
 					loop {
 						if !Self::process_accept(
@@ -1142,14 +1137,7 @@ where
 					let mut sat_count = 0;
 					loop {
 						set_errno(Errno(0));
-						len = Self::process_read(
-							&c,
-							ctx,
-							wakeup,
-							callbacks,
-							config,
-							connection_context,
-						)?;
+						len = Self::process_read(&c, ctx, wakeup, callbacks, config, cc)?;
 						debug!("len={}, c={:?}", len, c)?;
 						if len <= 0 {
 							ctx.saturating_handles.remove(&c.get_handle());
@@ -1171,14 +1159,11 @@ where
 						} else {
 							debug!(
 								"error/close for {}, handle={}: {}",
-								connection_info.get_connection_id(),
-								connection_info.get_handle(ctx.tid),
+								ci.get_connection_id(),
+								ci.get_handle(ctx.tid),
 								std::io::Error::last_os_error()
 							)?;
-							Some((
-								connection_info.get_connection_id(),
-								connection_info.get_handle(ctx.tid),
-							))
+							Some((ci.get_connection_id(), ci.get_handle(ctx.tid)))
 						}
 					} else {
 						None
@@ -1193,8 +1178,8 @@ where
 				let b = id;
 				let c = ctx;
 				let d = callbacks;
-				let e = connection_index_handle_map;
-				let f = connection_index_id_map;
+				let e = cihm;
+				let f = ciim;
 				let g = step_allocator;
 				let h = wakeup;
 				Self::close_connection(a, b, c, d, e, f, g, h, true)?;
@@ -1264,9 +1249,9 @@ where
 									let d = ctx.tid;
 									let e = config.debug_pending;
 									match connection_hash_data.connection_context.as_mut() {
-										Some(mut connection_context) => (on_close)(
+										Some(mut cc) => (on_close)(
 											&ConnectionData::new(a, b, c, d, e),
-											&mut connection_context,
+											&mut cc,
 											&mut ctx.user_data,
 										)?,
 										None => error!("no context found for id = {}", id)?,
@@ -2594,7 +2579,7 @@ pub struct ReadWriteConnection {
 
 impl Debug for ReadWriteConnection {
 	fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-		f.debug_struct("ListenerConnection")
+		f.debug_struct("ReadWriteConnection")
 			.field("id", &self.id)
 			.field("handle", &self.handle)
 			.field("accept_handle", &self.accept_handle)
@@ -2916,7 +2901,7 @@ impl Context {
 
 		let cap = config.max_handle_numeric_value;
 		let mut filter_set: BitVec = BitVec::with_capacity(cap);
-		filter_set.resize(cap, false);
+		filter_set.resize(cap + 100, false);
 
 		Ok(Self {
 			counter: 0,
@@ -4170,7 +4155,7 @@ mod tests {
 						let mut in_wait_mode = lockw!(in_wait_mode_clone)?;
 						*in_wait_mode = true;
 					}
-					std::thread::sleep(std::time::Duration::from_millis(100));
+					std::thread::sleep(std::time::Duration::from_millis(500));
 				}
 				// respond normally
 				1 | 2 | 3 => {
@@ -4395,6 +4380,121 @@ mod tests {
 	fn test_try_or_warn() -> Result<(), Error> {
 		try_or_warn!(do_error(false), "false");
 		try_or_warn!(do_error(true), "true");
+		Ok(())
+	}
+
+	#[test]
+	fn test_saturating() -> Result<(), Error> {
+		test_saturating_impl(false)?;
+		// note panic has small delay to wait for housekeeper to discover. It should be very rare so this is ok.
+		test_saturating_impl(true)?;
+		Ok(())
+	}
+
+	fn test_saturating_impl(panic: bool) -> Result<(), Error> {
+		let msg_len = 1_000_000;
+		let port = 8100;
+		let addr = loop {
+			if portpicker::is_free_tcp(port) {
+				break format!("127.0.0.1:{}", port);
+			}
+		};
+
+		info!("Starting Eventhandler on {}", addr)?;
+		let mut evh = EventHandler::new(EventHandlerConfig {
+			max_handle_numeric_value: 500,
+			threads: 1,
+			read_buffer_size: 6_120,
+			..EventHandlerConfig::default()
+		})?;
+
+		let std_sa = SocketAddr::from_str(&addr).unwrap();
+		let inet_addr = InetAddr::from_std(&std_sa);
+		let sock_addr = SockAddr::new_inet(inet_addr);
+
+		let mut handles = vec![];
+		let mut listeners = vec![];
+		for _ in 0..1 {
+			let fd = get_fd()?;
+			bind(fd, &sock_addr)?;
+			listen(fd, 10)?;
+
+			let listener = unsafe { TcpListener::from_raw_fd(fd) };
+			listener.set_nonblocking(true)?;
+			handles.push(listener.as_raw_fd());
+			listeners.push(listener);
+		}
+
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
+		let stream = TcpStream::connect(addr.clone())?;
+		let handle2 = stream.as_raw_fd();
+
+		let stream = TcpStream::connect(addr.clone())?;
+		let handle = stream.as_raw_fd();
+		let client_id = Arc::new(RwLock::new(0));
+		let client_id_clone = client_id.clone();
+
+		let server_on_read_count = Arc::new(RwLock::new(0));
+		let server_on_read_count_clone = server_on_read_count.clone();
+		let success = Arc::new(RwLock::new(false));
+		let success_clone = success.clone();
+
+		evh.set_on_accept(move |conn_data, _, _| {
+			info!("accept {}", conn_data.get_connection_id())?;
+
+			let mut client_id = lockw!(client_id)?;
+			*client_id = conn_data.get_connection_id();
+
+			Ok(())
+		})?;
+
+		evh.set_on_read(move |conn_data, buf, _, _| {
+			info!(
+				"callback on {} with buf.len={}",
+				conn_data.get_connection_id(),
+				buf.len()
+			)?;
+			if conn_data.get_connection_id() == *(lockr!(client_id_clone)?) {
+				*(lockw!(server_on_read_count)?) += buf.len();
+				if !*(lockr!(success)?) {
+					std::thread::sleep(std::time::Duration::from_millis(10));
+				}
+			} else {
+				assert!(*(lockr!(server_on_read_count)?) < msg_len);
+				*(lockw!(success)?) = true;
+				if panic {
+					let a: Option<u8> = None;
+					a.unwrap();
+				}
+			}
+			Ok(())
+		})?;
+
+		evh.set_on_housekeep(move |_, _| Ok(()))?;
+
+		evh.start()?;
+		evh.add_listener_handles(handles, None)?;
+		let conn_info2 = evh.add_handle(handle2, None)?;
+		let conn_info = evh.add_handle(handle, None)?;
+
+		let mut msg: Vec<u8> = vec![];
+		for i in 0..msg_len {
+			msg.push((i % 256) as u8);
+		}
+		conn_info.write(&msg)?;
+		conn_info2.write(&[0, 0, 0])?;
+
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if *(lockr!(server_on_read_count_clone)?) >= msg.len() {
+				break;
+			}
+		}
+
+		assert_eq!(*(lockr!(server_on_read_count_clone)?), msg.len());
+		assert!(*lockr!(success_clone)?);
 		Ok(())
 	}
 }
