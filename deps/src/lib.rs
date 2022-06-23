@@ -57,6 +57,7 @@ pub use hkdf;
 pub use hmac;
 pub use lazy_static;
 pub use libc;
+pub use lmdb_zero;
 pub use native_tls;
 pub use nix;
 pub use num_enum;

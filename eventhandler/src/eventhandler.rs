@@ -3504,9 +3504,6 @@ mod tests {
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		let stream = TcpStream::connect(addr)?;
-		stream.set_nonblocking(true)?;
-		let handle = stream.as_raw_fd();
 		let client_id = Arc::new(RwLock::new(0));
 		let client_id_clone = client_id.clone();
 
@@ -3590,6 +3587,11 @@ mod tests {
 			}),
 		)?;
 
+		std::thread::sleep(std::time::Duration::from_millis(100));
+
+		let stream = TcpStream::connect(addr)?;
+		stream.set_nonblocking(true)?;
+		let handle = stream.as_raw_fd();
 		let conn_info = evh.add_handle(
 			handle,
 			Some(TLSClientConfig {

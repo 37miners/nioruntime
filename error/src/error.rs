@@ -166,6 +166,9 @@ pub enum ErrorKind {
 	/// HexError
 	#[fail(display = "HexError: {}", _0)]
 	HexError(String),
+	/// LmdbError
+	#[fail(display = "LmdbError: {}", _0)]
+	LmdbError(String),
 	/// ParseFloatError
 	#[fail(display = "ParseFloatError: {}", _0)]
 	ParseFloatError(String),
@@ -414,6 +417,14 @@ impl From<ParseFloatError> for Error {
 				"Error parsing float: {}",
 				e
 			))),
+		}
+	}
+}
+
+impl From<nioruntime_deps::lmdb_zero::Error> for Error {
+	fn from(e: nioruntime_deps::lmdb_zero::Error) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::LmdbError(format!("Error parsing float: {}", e))),
 		}
 	}
 }

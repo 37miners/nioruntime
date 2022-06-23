@@ -14,6 +14,7 @@
 
 mod byte_utils;
 mod hex;
+pub mod lmdb;
 mod macros;
 pub mod ser;
 pub mod slabs;
