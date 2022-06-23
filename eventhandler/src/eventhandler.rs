@@ -4045,6 +4045,7 @@ mod tests {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
+		std::thread::sleep(std::time::Duration::from_millis(100));
 
 		let mut stream1 = TcpStream::connect(addr.clone())?;
 		let mut stream2 = TcpStream::connect(addr.clone())?;
@@ -4190,6 +4191,7 @@ mod tests {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
+		std::thread::sleep(std::time::Duration::from_millis(100));
 		let mut stream1 = TcpStream::connect(addr.clone())?;
 		let mut stream2 = TcpStream::connect(addr.clone())?;
 		let mut stream3 = TcpStream::connect(addr.clone())?;
