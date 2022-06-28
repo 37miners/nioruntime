@@ -187,6 +187,9 @@ pub enum ErrorKind {
 	/// Invalid MaxLoadCapacity
 	#[fail(display = "Invalid Max Load Capacity")]
 	InvalidMaxLoadCapacity,
+	/// CapacityExceeded
+	#[fail(display = "Capacity Exceeded: {}", _0)]
+	CapacityExceeded(String),
 	/// Too large write for serialization
 	#[fail(display = "TooLargeWrite: {}", _0)]
 	TooLargeWriteErr(String),

@@ -196,7 +196,7 @@ impl Store {
 			&lmdb::DatabaseOptions::new(lmdb::db::CREATE),
 		)?));
 
-		info!(
+		debug!(
 			"Resized database from {} to {}",
 			env_info.mapsize, new_mapsize
 		)?;
@@ -265,7 +265,27 @@ impl Store {
 		})?;
 		let tx = Arc::new(lmdb::ReadTransaction::new(self.env.clone())?);
 		let cursor = Arc::new(tx.cursor(db.clone())?);
-		Ok(PrefixIterator::new(tx, cursor, prefix, deserialize))
+		Ok(PrefixIterator::new(tx, cursor, prefix, deserialize, false))
+	}
+
+	/// Produces an iterator from the provided key prefix. Iteration occurs in reverse order.
+	pub fn iter_rev<F, T>(
+		&self,
+		prefix: &[u8],
+		deserialize: F,
+	) -> Result<PrefixIterator<F, T>, Error>
+	where
+		F: Fn(&[u8], &[u8]) -> Result<T, Error>,
+	{
+		let lock = lockr!(self.db)?;
+		let db = lock.as_ref().ok_or_else(|| {
+			let error: Error = ErrorKind::LmdbError("db is None".to_string()).into();
+			error
+		})?;
+		let tx = Arc::new(lmdb::ReadTransaction::new(self.env.clone())?);
+		let cursor = tx.cursor(db.clone())?;
+		let cursor = Arc::new(cursor);
+		Ok(PrefixIterator::new(tx, cursor, prefix, deserialize, true))
 	}
 
 	/// Builds a new batch to be used with this store.
@@ -346,6 +366,18 @@ impl<'a> Batch<'a> {
 		self.store.iter(prefix, deserialize)
 	}
 
+	/// Produces an iterator from the provided key prefix. Iteration occurs in reverse order.
+	pub fn iter_rev<F, T>(
+		&self,
+		prefix: &[u8],
+		deserialize: F,
+	) -> Result<PrefixIterator<F, T>, Error>
+	where
+		F: Fn(&[u8], &[u8]) -> Result<T, Error>,
+	{
+		self.store.iter_rev(prefix, deserialize)
+	}
+
 	/// Gets a `Serializable` value from the db by provided key and default deserialization strategy.
 	pub fn get_ser<T: ser::Serializable>(&self, key: &[u8]) -> Result<Option<T>, Error> {
 		self.get_with(key, |_, mut data| match ser::deserialize(&mut data) {
@@ -382,6 +414,7 @@ where
 	seek: bool,
 	prefix: Vec<u8>,
 	deserialize: F,
+	reverse: bool,
 }
 
 impl<F, T> Iterator for PrefixIterator<F, T>
@@ -394,10 +427,18 @@ where
 		let access = self.tx.access();
 		let cursor = Arc::get_mut(&mut self.cursor).expect("failed to get cursor");
 		let kv: Result<(&[u8], &[u8]), _> = if self.seek {
-			cursor.next(&access)
+			if self.reverse {
+				cursor.prev(&access)
+			} else {
+				cursor.next(&access)
+			}
 		} else {
 			self.seek = true;
-			cursor.seek_range_k(&access, &self.prefix[..])
+			if self.reverse {
+				cursor.last::<[u8], [u8]>(&access)
+			} else {
+				cursor.seek_range_k(&access, &self.prefix[..])
+			}
 		};
 		kv.ok()
 			.filter(|(k, _)| k.starts_with(self.prefix.as_slice()))
@@ -419,6 +460,7 @@ where
 		cursor: Arc<lmdb::Cursor<'static, 'static>>,
 		prefix: &[u8],
 		deserialize: F,
+		reverse: bool,
 	) -> PrefixIterator<F, T> {
 		PrefixIterator {
 			tx,
@@ -426,6 +468,7 @@ where
 			seek: false,
 			prefix: prefix.to_vec(),
 			deserialize,
+			reverse,
 		}
 	}
 }
@@ -437,7 +480,7 @@ mod test {
 	use nioruntime_err::Error;
 	use std::io::Cursor;
 
-	#[derive(Debug, PartialEq, Eq)]
+	#[derive(Debug, PartialEq, Eq, Clone)]
 	struct TestData {
 		f1: u8,
 		f2: u128,
@@ -473,6 +516,53 @@ mod test {
 			writer.write_u128(self.f2)?;
 			Ok(())
 		}
+	}
+
+	#[test]
+	fn test_reverse() -> Result<(), Error> {
+		let store = Store::new(".lmdbrev.nio", None, Some("test"), None, true)?;
+		let td1 = TestData { f1: 10, f2: 20 };
+		let td2 = TestData { f1: 100, f2: 200 };
+		let td3 = TestData { f1: 101, f2: 201 };
+		{
+			let batch = store.batch()?;
+			batch.put_ser(b"ha", &td1)?;
+			batch.put_ser(b"hb", &td2)?;
+			batch.put_ser(b"hc", &td3)?;
+			batch.commit()?;
+		}
+
+		{
+			let batch = store.batch()?;
+
+			let mut itt = batch.iter(&(b"h")[..], |_k, v| {
+				let mut cursor = Cursor::new(v.to_vec());
+				cursor.set_position(0);
+				let mut reader = BinReader::new(&mut cursor);
+				Ok(TestData::read(&mut reader)?)
+			})?;
+
+			assert!(itt.next() == Some(td1.clone()));
+			assert!(itt.next() == Some(td2.clone()));
+			assert!(itt.next() == Some(td3.clone()));
+			assert!(itt.next() == None);
+
+			let mut itt = batch.iter_rev(&(b"h")[..], |_k, v| {
+				let mut cursor = Cursor::new(v.to_vec());
+				cursor.set_position(0);
+				let mut reader = BinReader::new(&mut cursor);
+				Ok(TestData::read(&mut reader)?)
+			})?;
+
+			assert!(itt.next() == Some(td3));
+			assert!(itt.next() == Some(td2));
+			assert!(itt.next() == Some(td1));
+			assert!(itt.next() == None);
+		}
+
+		std::fs::remove_dir_all(".lmdbrev.nio")?;
+
+		Ok(())
 	}
 
 	#[test]

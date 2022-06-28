@@ -17,8 +17,10 @@ use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
 };
+use crate::stats::{LOG_ITEM_SIZE, MAX_LOG_STR_LEN};
 use crate::types::*;
 use crate::websocket::{process_websocket_data, WsHandler};
+use crate::LogItem;
 use include_dir::include_dir;
 use nioruntime_deps::base64;
 use nioruntime_deps::bytefmt;
@@ -86,6 +88,7 @@ pub struct HttpServer<ApiHandler> {
 	api_config: Arc<RwLock<HttpApiConfig>>,
 	api_handler: Option<Pin<Box<ApiHandler>>>,
 	ws_handler: Option<Pin<Box<WsHandler>>>,
+	stat_handler: StatHandler,
 	evh_params: Option<EvhParams>,
 }
 
@@ -129,6 +132,15 @@ where
 			Self::init_temp_dir(&temp_dir)?;
 		}
 
+		let stat_handler = StatHandler::new(
+			config.main_log_queue_size,
+			config.debug_log_queue,
+			config.request_log_config.clone(),
+			config.lmdb_dir.clone(),
+			config.debug_show_stats,
+			config.stats_frequency,
+		)?;
+
 		Ok(Self {
 			config,
 			_listeners: vec![],
@@ -136,6 +148,7 @@ where
 			api_handler: None,
 			ws_handler: None,
 			evh_params: None,
+			stat_handler,
 		})
 	}
 
@@ -177,9 +190,10 @@ where
 		let api_config = self.api_config.clone();
 		let api_handler = self.api_handler.clone();
 		let ws_handler = self.ws_handler.clone();
+		let stat_handler = self.stat_handler.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			let thread_context = Self::init_user_data(user_data, &config1)?;
+			let thread_context = Self::init_user_data(user_data, &config1, &stat_handler)?;
 			let (nconns, nupdates) = match Self::process_on_read(
 				thread_context,
 				&conn_data,
@@ -192,6 +206,7 @@ where
 				&evh_params,
 				&slabs,
 				ws_handler.as_ref(),
+				&stat_handler,
 			) {
 				Ok((nconns, nupdates)) => (nconns, nupdates),
 				Err(e) => {
@@ -266,15 +281,25 @@ where
 
 			Ok(())
 		})?;
+
+		let stat_handler = self.stat_handler.clone();
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
-			Self::process_on_accept(conn_data, ctx, &config2, user_data)
+			Self::process_on_accept(conn_data, ctx, &config2, user_data, &stat_handler)
 		})?;
+		let stat_handler = self.stat_handler.clone();
 		evh.set_on_close(move |conn_data, ctx, user_data| {
-			Self::process_on_close(conn_data, ctx, &config3, user_data)
+			Self::process_on_close(conn_data, ctx, &config3, user_data, &stat_handler)
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
+		let stat_handler = self.stat_handler.clone();
 		evh.set_on_housekeep(move |user_data, tid| {
-			match Self::process_on_housekeeper(&config4, user_data, &evh_params_clone, tid) {
+			match Self::process_on_housekeeper(
+				&config4,
+				user_data,
+				&evh_params_clone,
+				tid,
+				&stat_handler,
+			) {
 				Ok(_) => {}
 				Err(e) => debug!("housekeeping generated error: {}", e)?,
 			}
@@ -307,6 +332,8 @@ where
 			evh.add_listener_handles(handles, tls_config)?;
 		}
 
+		self.run_stats_processor()?;
+
 		self.show_config()?;
 
 		set_config_option!(Settings::Level, true)?;
@@ -315,7 +342,7 @@ where
 			self.config.start.elapsed().as_millis()
 		);
 		info!("{}", server_startup.cyan())?;
-		set_config_option!(Settings::LineNum, true)?;
+		set_config_option!(Settings::LineNum, false)?;
 		if !self.config.debug {
 			set_config_option!(Settings::Stdout, false)?;
 		}
@@ -429,6 +456,20 @@ where
 
 		self.startup_line("virtual_hosts", &format!("{:?}", virtual_host_map))?;
 		self.startup_line("virtual_ips", &format!("{:?}", virtual_ip_map))?;
+
+		self.startup_line(
+			"requestlog",
+			&self.config.request_log_config.file_path.as_ref().unwrap(),
+		)?;
+
+		self.startup_line(
+			"requestlog_max_age",
+			&Self::format_time(self.config.request_log_config.max_age_millis),
+		)?;
+		self.startup_line(
+			"requestlog_max_size",
+			&Self::format_bytes(self.config.request_log_config.max_size.try_into()?),
+		)?;
 
 		self.startup_line("mainlog", &self.config.mainlog)?;
 
@@ -618,10 +659,58 @@ where
 		)?;
 
 		self.startup_line(
+			"max_active_connections",
+			&format!(
+				"{}",
+				self.config
+					.max_active_connections
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"max_async_connections",
+			&format!(
+				"{}",
+				self.config
+					.max_async_connections
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
 			"housekeeper_frequency",
 			&format!(
 				"{}",
 				Self::format_time(self.config.evh_config.housekeeper_frequency.try_into()?)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"thread_log_queue_size",
+			&format!(
+				"{}",
+				self.config
+					.thread_log_queue_size
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"main_log_queue_size",
+			&format!(
+				"{}",
+				self.config
+					.main_log_queue_size
+					.to_formatted_string(&Locale::en)
+			)[..],
+		)?;
+
+		self.startup_line(
+			"stats_frequency",
+			&format!(
+				"{}",
+				Self::format_time(self.config.stats_frequency.try_into()?)
 			)[..],
 		)?;
 
@@ -630,6 +719,9 @@ where
 		self.debug_flag("--debug", self.config.debug)?;
 		self.debug_flag("--debug_api", self.config.debug_api)?;
 		self.debug_flag("--debug_websocket", self.config.debug_websocket)?;
+		self.debug_flag("--debug_proxy", self.config.debug_proxy)?;
+		self.debug_flag("--debug_log_queue", self.config.debug_log_queue)?;
+		self.debug_flag("--debug_show_stats", self.config.debug_show_stats)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
 
@@ -681,11 +773,12 @@ where
 	fn init_user_data<'a>(
 		user_data: &'a mut Box<dyn Any + Send + Sync>,
 		config: &HttpConfig,
+		stat_handler: &StatHandler,
 	) -> Result<&'a mut ThreadContext, Error> {
 		match user_data.downcast_ref::<ThreadContext>() {
 			Some(_) => {}
 			None => {
-				let mut value = ThreadContext::new(config)?;
+				let mut value = ThreadContext::new(config, stat_handler)?;
 				for (k, v) in &config.mime_map {
 					value
 						.mime_map
@@ -700,12 +793,27 @@ where
 
 	fn process_async(
 		ctx: &mut ConnectionContext,
-		thread_context: &ThreadContext,
+		thread_context: &mut ThreadContext,
 		conn_data: &ConnectionData,
+		config: &HttpConfig,
 	) -> Result<(), Error> {
 		if ctx.is_async_complete {
 			let mut async_connections = lockw!(thread_context.async_connections)?;
-			async_connections.remove_raw(&conn_data.get_connection_id().to_be_bytes());
+			match async_connections.remove_raw(&conn_data.get_connection_id().to_be_bytes()) {
+				Some(li_bytes) => {
+					let mut log_item = LogItem::default();
+					log_item.read(li_bytes.try_into()?)?;
+					Self::process_stats(
+						&mut log_item,
+						Some(&mut thread_context.log_slabs),
+						&mut thread_context.next_log_slab,
+						None,
+						&mut thread_context.dropped_log_items,
+						config,
+					)?;
+				}
+				None => {}
+			}
 		}
 		Ok(())
 	}
@@ -761,6 +869,10 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		stat_handler: &StatHandler,
+		dropped_log_items: &mut u64,
 	) -> Result<
 		(
 			bool,
@@ -837,6 +949,10 @@ where
 				mime_map,
 				async_connections,
 				local_peer,
+				log_slabs,
+				next_log_slab,
+				stat_handler,
+				dropped_log_items,
 			)?;
 		}
 
@@ -855,9 +971,10 @@ where
 		evh_params: &EvhParams,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
+		stat_handler: &StatHandler,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let now = SystemTime::now();
-		Self::process_async(ctx, thread_context, conn_data)?;
+		Self::process_async(ctx, thread_context, conn_data, config)?;
 		Self::update_conn_info(thread_context, conn_data, now)?;
 
 		let remote_peer = &ctx.remote_peer.clone();
@@ -932,6 +1049,10 @@ where
 			&mut thread_context.mime_map,
 			&mut thread_context.async_connections,
 			local_peer,
+			&mut thread_context.log_slabs,
+			&mut thread_context.next_log_slab,
+			stat_handler,
+			&mut thread_context.dropped_log_items,
 		)?;
 
 		if was_post_await {
@@ -956,6 +1077,7 @@ where
 						&mut thread_context.proxy_state,
 						&mut thread_context.idle_proxy_connections,
 						now,
+						&mut thread_context.async_connections,
 					)?;
 					return Ok((vec![], vec![]));
 				}
@@ -997,6 +1119,10 @@ where
 					&mut thread_context.mime_map,
 					&mut thread_context.async_connections,
 					local_peer,
+					&mut thread_context.log_slabs,
+					&mut thread_context.next_log_slab,
+					stat_handler,
+					&mut thread_context.dropped_log_items,
 				)?;
 
 				match nconn {
@@ -1053,6 +1179,10 @@ where
 				&mut thread_context.mime_map,
 				&mut thread_context.async_connections,
 				local_peer,
+				&mut thread_context.log_slabs,
+				&mut thread_context.next_log_slab,
+				stat_handler,
+				&mut thread_context.dropped_log_items,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1088,6 +1218,10 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		stat_handler: &StatHandler,
+		dropped_log_items: &mut u64,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1125,6 +1259,10 @@ where
 				mime_map,
 				async_connections,
 				local_peer,
+				log_slabs,
+				next_log_slab,
+				stat_handler,
+				dropped_log_items,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1191,6 +1329,10 @@ where
 		webroot: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		local_peer: &Option<SocketAddr>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		stat_handler: &StatHandler,
+		dropped_log_items: &mut u64,
 	) -> Result<
 		(
 			bool,
@@ -1232,6 +1374,7 @@ where
 					&remote_peer,
 					now,
 					slabs,
+					stat_handler.clone(),
 				) {
 					Ok((ctx, nconn, update_info)) => {
 						if clen > 0 {
@@ -1254,7 +1397,12 @@ where
 
 						match Self::send_file(
 							HTTP_CODE_502,
+							502,
+							&headers.get_uri(),
 							&config.error_page,
+							&headers.get_query(),
+							headers.get_user_agent(),
+							headers.get_referer(),
 							conn_data,
 							config,
 							cache,
@@ -1272,6 +1420,10 @@ where
 							false,
 							headers.get_header_value(HOST_BYTES)?,
 							local_peer,
+							log_slabs,
+							next_log_slab,
+							stat_handler,
+							dropped_log_items,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1378,6 +1530,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		stat_handler: &StatHandler,
+		dropped_log_items: &mut u64,
 	) -> Result<
 		(
 			usize,
@@ -1405,7 +1561,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					ErrorKind::HttpError400(_) => {
 						match Self::send_file(
 							HTTP_CODE_400,
+							400,
+							&[],
 							&config.error_page,
+							&[],
+							&[],
+							&[],
 							conn_data,
 							config,
 							cache,
@@ -1423,6 +1584,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
+							log_slabs,
+							next_log_slab,
+							stat_handler,
+							dropped_log_items,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1434,7 +1599,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					ErrorKind::HttpError405(_) => {
 						match Self::send_file(
 							HTTP_CODE_405,
+							405,
+							&[],
 							&config.error_page,
+							&[],
+							&[],
+							&[],
 							conn_data,
 							config,
 							cache,
@@ -1452,6 +1622,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
+							log_slabs,
+							next_log_slab,
+							stat_handler,
+							dropped_log_items,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1463,7 +1637,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					ErrorKind::HttpError431(_) => {
 						match Self::send_file(
 							HTTP_CODE_431,
+							431,
+							&[],
 							&config.error_page,
+							&[],
+							&[],
+							&[],
 							conn_data,
 							config,
 							cache,
@@ -1481,6 +1660,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
+							log_slabs,
+							next_log_slab,
+							stat_handler,
+							dropped_log_items,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1493,7 +1676,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						error!("Internal server error: {}", e)?;
 						match Self::send_file(
 							HTTP_CODE_500,
+							500,
 							&config.error_page,
+							&[],
+							&[],
+							&[],
+							&[],
 							conn_data,
 							config,
 							cache,
@@ -1511,6 +1699,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
+							log_slabs,
+							next_log_slab,
+							stat_handler,
+							dropped_log_items,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1528,7 +1720,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let (len, key, nconn, update_info) = match headers {
 			Some(headers) => {
 				if config.show_request_headers {
-					warn!("HTTP Request:\n{}", headers)?;
+					warn!(
+						"HTTP Request ({}):\n{}",
+						conn_data.get_connection_id(),
+						headers
+					)?;
 				}
 				match ws_handler {
 					Some(ws_handler) => {
@@ -1549,7 +1745,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if headers.content_len()? > config.max_content_len {
 					match Self::send_file(
 						HTTP_CODE_413,
+						413,
+						headers.get_uri(),
 						&config.error_page,
+						&headers.get_query(),
+						headers.get_user_agent(),
+						headers.get_referer(),
 						conn_data,
 						config,
 						cache,
@@ -1567,6 +1768,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						false,
 						headers.get_header_value(HOST_BYTES)?,
 						local_peer,
+						log_slabs,
+						next_log_slab,
+						stat_handler,
+						dropped_log_items,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -1630,6 +1835,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						webroot,
 						mime_map,
 						local_peer,
+						log_slabs,
+						next_log_slab,
+						stat_handler,
+						dropped_log_items,
 					)?;
 
 					match api_context {
@@ -1645,6 +1854,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				// check for api mapping/extension
 				let was_api = {
 					Self::process_api(
+						now,
 						buffer,
 						was_proxy,
 						&headers,
@@ -1655,6 +1865,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						conn_data,
 						temp_dir,
 						slabs,
+						log_slabs,
+						next_log_slab,
+						dropped_log_items,
+						config,
+						stat_handler,
 					)?
 				};
 
@@ -1673,7 +1888,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 					let gzip = if headers.accept_gzip() {
 						if config.gzip_extensions.len() == 0 {
-							true
+							false
 						} else {
 							if config
 								.gzip_extensions
@@ -1691,7 +1906,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 					match Self::send_file(
 						HTTP_CODE_200,
+						200,
 						&headers.get_uri(),
+						&headers.get_uri(),
+						&headers.get_query(),
+						&headers.get_user_agent(),
+						&headers.get_referer(),
 						conn_data,
 						config,
 						cache,
@@ -1709,6 +1929,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						gzip,
 						headers.get_header_value(HOST_BYTES)?,
 						local_peer,
+						log_slabs,
+						next_log_slab,
+						stat_handler,
+						dropped_log_items,
 					) {
 						Ok(k) => {
 							key = k;
@@ -1718,7 +1942,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								ErrorKind::HttpError404(_) => {
 									match Self::send_file(
 										HTTP_CODE_404,
+										404,
+										&headers.get_uri(),
 										&config.error_page,
+										&headers.get_query(),
+										&headers.get_user_agent(),
+										&headers.get_referer(),
 										conn_data,
 										config,
 										cache,
@@ -1736,6 +1965,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
+										log_slabs,
+										next_log_slab,
+										stat_handler,
+										dropped_log_items,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1747,12 +1980,17 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								ErrorKind::HttpError405(_) => {
 									match Self::send_file(
 										HTTP_CODE_405,
+										405,
+										&headers.get_uri(),
 										&config.error_page,
+										&headers.get_query(),
+										&headers.get_user_agent(),
+										&headers.get_referer(),
 										conn_data,
 										config,
 										cache,
 										headers.get_version(),
-										headers.get_method(),
+										&HttpMethod::Get,
 										range,
 										&mime_map,
 										&async_connections,
@@ -1765,6 +2003,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
+										log_slabs,
+										next_log_slab,
+										stat_handler,
+										dropped_log_items,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1776,7 +2018,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								ErrorKind::HttpError403(_) => {
 									match Self::send_file(
 										HTTP_CODE_403,
+										403,
+										&headers.get_uri(),
 										&config.error_page,
+										&headers.get_query(),
+										headers.get_user_agent(),
+										headers.get_referer(),
 										conn_data,
 										config,
 										cache,
@@ -1794,6 +2041,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
+										log_slabs,
+										next_log_slab,
+										stat_handler,
+										dropped_log_items,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1806,7 +2057,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 									error!("Internal server error: {}", e)?;
 									match Self::send_file(
 										HTTP_CODE_500,
+										500,
+										&headers.get_uri(),
 										&config.error_page,
+										&headers.get_query(),
+										headers.get_user_agent(),
+										headers.get_referer(),
 										conn_data,
 										config,
 										cache,
@@ -1824,6 +2080,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
+										log_slabs,
+										next_log_slab,
+										stat_handler,
+										dropped_log_items,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -1857,7 +2117,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		match key {
 			Some(key) => {
-				//let ch = &mut thread_context.cache_hits;
 				ch.insert_raw(&key, &[0u8; 16])?;
 			}
 			None => {}
@@ -1867,6 +2126,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn process_api(
+		now: SystemTime,
 		buf: &[u8],
 		was_proxy: bool,
 		headers: &HttpHeaders,
@@ -1877,6 +2137,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		conn_data: &ConnectionData,
 		temp_dir: &String,
 		slabs: &Arc<RwLock<SlabAllocator>>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		dropped_log_items: &mut u64,
+		config: &HttpConfig,
+		stat_handler: &StatHandler,
 	) -> Result<bool, Error> {
 		let api_config = lockr!(api_config)?;
 		if was_proxy {
@@ -1887,12 +2152,61 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			match api_handler {
 				Some(api_handler) => {
 					let clen = headers.content_len()?;
+
+					let mut uri = [0u8; MAX_LOG_STR_LEN];
+					let headers_uri = headers.get_uri();
+					let mut max = headers_uri.len();
+					if max > MAX_LOG_STR_LEN {
+						max = MAX_LOG_STR_LEN;
+					};
+					uri[0..max].clone_from_slice(&headers_uri[0..max]);
+
+					let mut query = [0u8; MAX_LOG_STR_LEN];
+					let headers_query = headers.get_query();
+					let mut max = headers_query.len();
+					if max > MAX_LOG_STR_LEN {
+						max = MAX_LOG_STR_LEN;
+					};
+					query[0..max].clone_from_slice(&headers_query[0..max]);
+
+					let headers_user_agent = headers.get_user_agent();
+					let mut user_agent = [0u8; MAX_LOG_STR_LEN];
+					let mut max = headers_user_agent.len();
+					if max > MAX_LOG_STR_LEN {
+						max = MAX_LOG_STR_LEN;
+					};
+					user_agent[0..max].clone_from_slice(&headers_user_agent[0..max]);
+
+					let mut referer = [0u8; MAX_LOG_STR_LEN];
+					let headers_referer = headers.get_referer();
+					let mut max = headers_referer.len();
+					if max > MAX_LOG_STR_LEN {
+						max = MAX_LOG_STR_LEN;
+					}
+					referer[0..max].clone_from_slice(&headers_referer[0..max]);
+
+					let log_item = LogItem {
+						http_method: headers.get_method().clone(),
+						http_version: headers.get_version().clone(),
+						uri,
+						query,
+						referer,
+						user_agent,
+						content_len: clen.try_into()?,
+						start_micros: now.duration_since(UNIX_EPOCH)?.as_micros() as u64,
+						end_micros: 0,
+						uri_requested: uri,
+						response_code: 200,
+					};
+
 					let mut ctx = ApiContext::new(
 						async_connections.clone(),
 						conn_data.clone(),
 						slabs.clone(),
 						false,
 						None,
+						stat_handler.clone(),
+						log_item,
 					);
 					if clen > 0 {
 						let headers_len = headers.len();
@@ -1916,6 +2230,18 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						}
 					}
 					(api_handler)(conn_data, &headers, &mut ctx)?;
+
+					if !ctx.is_async() {
+						Self::process_stats(
+							ctx.log_item(),
+							Some(log_slabs),
+							next_log_slab,
+							None,
+							dropped_log_items,
+							config,
+						)?;
+					}
+
 					Ok(true)
 				}
 				None => {
@@ -1969,7 +2295,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn send_file(
 		code: &[u8],
+		response_code: u16,
+		uri_requested: &[u8],
 		uri: &[u8],
+		query: &[u8],
+		user_agent: &[u8],
+		referer: &[u8],
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		cache: &Arc<RwLock<HttpCache>>,
@@ -1987,6 +2318,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		gzip: bool,
 		host: Option<Vec<Vec<u8>>>,
 		local_peer: &Option<SocketAddr>,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		stat_handler: &StatHandler,
+		dropped_log_items: &mut u64,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -2045,9 +2380,15 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		// try both the exact path and the version with index appended (metadata too expensive)
 		let (found, need_update, key) = Self::try_send_cache(
 			code,
+			response_code,
 			conn_data,
 			&config,
 			&path,
+			&uri_requested.to_vec(),
+			&uri.to_vec(),
+			&query.to_vec(),
+			&user_agent.to_vec(),
+			&referer.to_vec(),
 			&cache,
 			now,
 			http_version,
@@ -2057,6 +2398,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			if_modified_since,
 			if_none_match,
 			gzip,
+			log_slabs,
+			next_log_slab,
+			dropped_log_items,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -2068,15 +2412,22 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					false => {}
 				},
 			}
+
 			return Ok(Some(key));
 		} else if !found {
 			let mut path2 = path.clone();
 			path2.extend_from_slice(INDEX_HTML_BYTES);
 			let (found, need_update, key) = Self::try_send_cache(
 				code,
+				response_code,
 				conn_data,
 				config,
 				&path2,
+				&uri_requested.to_vec(),
+				&uri.to_vec(),
+				&query.to_vec(),
+				&user_agent.to_vec(),
+				&referer.to_vec(),
 				cache,
 				now,
 				http_version,
@@ -2086,6 +2437,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if_modified_since,
 				if_none_match,
 				gzip,
+				log_slabs,
+				next_log_slab,
+				dropped_log_items,
 			)?;
 
 			if found && !need_update {
@@ -2128,7 +2482,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		Self::load_cache(
 			code,
+			response_code,
 			path,
+			uri_requested.to_vec(),
+			uri.to_vec(),
+			query.to_vec(),
+			user_agent.to_vec(),
+			referer.to_vec(),
 			conn_data.clone(),
 			config.clone(),
 			md,
@@ -2145,6 +2505,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			if_modified_since,
 			if_none_match,
 			gzip,
+			stat_handler,
 		)?;
 
 		Ok(None)
@@ -2190,9 +2551,15 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	// found, need_update, key
 	fn try_send_cache(
 		code: &[u8],
+		response_code: u16,
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		path: &Vec<u8>,
+		uri_requested: &Vec<u8>,
+		uri: &Vec<u8>,
+		query: &Vec<u8>,
+		user_agent: &Vec<u8>,
+		headers_referer: &Vec<u8>,
 		cache: &Arc<RwLock<HttpCache>>,
 		now: SystemTime,
 		http_version: &HttpVersion,
@@ -2202,6 +2569,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		if_modified_since: &Option<Vec<Vec<u8>>>,
 		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
+		log_slabs: &mut SlabAllocator,
+		next_log_slab: &mut u64,
+		dropped_log_items: &mut u64,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -2252,22 +2622,35 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							is_304 = true;
 							Self::send_headers(
 								HTTP_CODE_304,
+								304,
 								&conn_data,
 								config,
 								0,
 								None,
 								now_millis,
+								now,
 								last_modified,
 								http_version,
+								http_method,
 								etag,
 								range,
 								path,
+								uri_requested,
+								uri,
+								query,
+								user_agent,
+								headers_referer,
 								mime_map,
 								gzip,
+								Some(log_slabs),
+								next_log_slab,
+								None,
+								dropped_log_items,
 							)?;
 						} else {
 							Self::send_headers(
 								code,
+								response_code,
 								&conn_data,
 								config,
 								len,
@@ -2277,13 +2660,24 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 									Some(&chunk[..wlen])
 								},
 								now_millis,
+								now,
 								last_modified,
 								http_version,
+								http_method,
 								etag,
 								range,
 								path,
+								uri_requested,
+								uri,
+								query,
+								user_agent,
+								headers_referer,
 								mime_map,
 								gzip,
+								Some(log_slabs),
+								next_log_slab,
+								None,
+								dropped_log_items,
 							)?;
 						}
 						headers_sent = true;
@@ -2321,7 +2715,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn load_cache(
 		code: &[u8],
+		response_code: u16,
 		path: Vec<u8>,
+		uri_requested_headers: Vec<u8>,
+		uri_headers: Vec<u8>,
+		query: Vec<u8>,
+		headers_user_agent: Vec<u8>,
+		headers_referer: Vec<u8>,
 		conn_data: ConnectionData,
 		config: HttpConfig,
 		md: Metadata,
@@ -2338,9 +2738,60 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		if_modified_since: &Option<Vec<Vec<u8>>>,
 		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
+		stat_handler: &StatHandler,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
+		let len = md.len();
+
+		let mut uri = [0u8; MAX_LOG_STR_LEN];
+		let mut max = uri_headers.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		uri[0..max].clone_from_slice(&uri_headers[0..max]);
+
+		let mut query_fixed = [0u8; MAX_LOG_STR_LEN];
+		let mut max = query.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		query_fixed[0..max].clone_from_slice(&query[0..max]);
+
+		let mut user_agent = [0u8; MAX_LOG_STR_LEN];
+		let mut max = headers_user_agent.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		user_agent[0..max].clone_from_slice(&headers_user_agent[0..max]);
+
+		let mut referer = [0u8; MAX_LOG_STR_LEN];
+		let mut max = headers_referer.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		}
+		referer[0..max].clone_from_slice(&headers_referer[0..max]);
+
+		let mut uri_requested = [0u8; MAX_LOG_STR_LEN];
+		let mut max = uri_requested_headers.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		}
+		uri_requested[0..max].clone_from_slice(&uri_requested_headers[0..max]);
+
+		let log_item = LogItem {
+			http_method: http_method.clone(),
+			http_version: http_version.clone(),
+			uri,
+			query: query_fixed,
+			referer,
+			user_agent,
+			content_len: len,
+			start_micros: now.duration_since(UNIX_EPOCH)?.as_micros() as u64,
+			end_micros: 0,
+			uri_requested,
+			response_code,
+		};
 
 		let mut ctx = ApiContext::new(
 			async_connections.clone(),
@@ -2348,6 +2799,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			slabs.clone(),
 			false,
 			None,
+			stat_handler.clone(),
+			log_item,
 		);
 
 		ctx.set_async()?;
@@ -2356,6 +2809,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let code = code.to_vec();
 		let if_modified_since = if_modified_since.clone();
 		let if_none_match = if_none_match.clone();
+		let stat_handler = stat_handler.clone();
 
 		std::thread::spawn(move || -> Result<(), Error> {
 			let path_str = std::str::from_utf8(&path)?;
@@ -2376,36 +2830,62 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 			if Self::not_modified(&if_modified_since, &if_none_match, &etag, last_modified)? {
 				is_304 = true;
+				ctx.set_response_code_logging(304)?;
 				Self::send_headers(
 					HTTP_CODE_304,
+					304,
 					&conn_data,
 					&config,
 					0,
 					None,
 					now_u128,
+					now,
 					last_modified,
 					&http_version,
+					&http_method,
 					etag,
 					range,
 					&path,
+					&uri_requested_headers.to_vec(),
+					&uri.to_vec(),
+					&query,
+					&headers_user_agent,
+					&headers_referer,
 					&mime_map,
 					gzip,
+					None,
+					&mut 0,
+					Some(stat_handler),
+					&mut 0,
 				)?;
 			} else {
+				ctx.set_response_code_logging(response_code)?;
 				Self::send_headers(
 					&code,
+					response_code,
 					&conn_data,
 					&config,
 					md.len(),
 					None,
 					now_u128,
+					now,
 					md.modified()?.duration_since(UNIX_EPOCH)?.as_millis(),
 					&http_version,
+					&http_method,
 					etag,
 					range,
 					&path,
+					&uri_requested_headers.to_vec(),
+					&uri.to_vec(),
+					&query,
+					&headers_user_agent,
+					&headers_referer,
 					&mime_map,
 					gzip,
+					None,
+					&mut 0,
+					Some(stat_handler),
+					&mut 0,
 				)?;
 			}
 
@@ -2457,9 +2937,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					true => {
 						conn_data.close()?;
 					}
-					false => ctx.async_complete()?,
+					false => {}
 				},
 			}
+
+			ctx.async_complete()?;
 
 			Ok(())
 		});
@@ -2710,18 +3192,30 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn send_headers(
 		code: &[u8],
+		response_code: u16,
 		conn_data: &ConnectionData,
 		config: &HttpConfig,
 		len: u64,
 		chunk: Option<&[u8]>,
 		now: u128,
+		now_system_time: SystemTime,
 		last_modified: u128,
 		http_version: &HttpVersion,
+		http_method: &HttpMethod,
 		etag: [u8; 8],
 		range: Option<(usize, usize)>,
 		path: &Vec<u8>,
+		uri_requested_headers: &Vec<u8>,
+		uri_headers: &Vec<u8>,
+		query: &Vec<u8>,
+		headers_user_agent: &Vec<u8>,
+		headers_referer: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		gzip: bool,
+		log_slabs: Option<&mut SlabAllocator>,
+		next_log_slab: &mut u64,
+		stat_handler: Option<StatHandler>,
+		dropped_log_items: &mut u64,
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -2843,6 +3337,64 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		conn_data.write(&response)?;
 
+		let mut uri = [0u8; MAX_LOG_STR_LEN];
+		let mut max = uri_headers.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		uri[0..max].clone_from_slice(&uri_headers[0..max]);
+
+		let mut query_fixed = [0u8; MAX_LOG_STR_LEN];
+		let mut max = query.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		query_fixed[0..max].clone_from_slice(&query[0..max]);
+
+		let mut user_agent = [0u8; MAX_LOG_STR_LEN];
+		let mut max = headers_user_agent.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		};
+		user_agent[0..max].clone_from_slice(&headers_user_agent[0..max]);
+
+		let mut referer = [0u8; MAX_LOG_STR_LEN];
+		let mut max = headers_referer.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		}
+		referer[0..max].clone_from_slice(&headers_referer[0..max]);
+
+		let mut uri_requested = [0u8; MAX_LOG_STR_LEN];
+		let mut max = uri_requested_headers.len();
+		if max > MAX_LOG_STR_LEN {
+			max = MAX_LOG_STR_LEN;
+		}
+		uri_requested[0..max].clone_from_slice(&uri_requested_headers[0..max]);
+
+		let mut log_item = LogItem {
+			http_method: http_method.clone(),
+			http_version: http_version.clone(),
+			uri,
+			query: query_fixed,
+			referer,
+			user_agent,
+			content_len: len,
+			start_micros: now_system_time.duration_since(UNIX_EPOCH)?.as_micros() as u64,
+			end_micros: 0,
+			uri_requested,
+			response_code,
+		};
+
+		Self::process_stats(
+			&mut log_item,
+			log_slabs,
+			next_log_slab,
+			stat_handler,
+			dropped_log_items,
+			config,
+		)?;
+
 		Ok(())
 	}
 
@@ -2856,11 +3408,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		_ctx: &mut ConnectionContext,
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
+		stat_handler: &StatHandler,
 	) -> Result<(), Error> {
 		let id = conn_data.get_connection_id();
 		let handle = conn_data.get_handle();
 		debug!("on accept: {}, handle={}", id, handle)?;
-		let thread_context = Self::init_user_data(user_data, config)?;
+		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
 		insert_step_allocator(
 			conn_data.clone(),
 			&mut thread_context.active_connections,
@@ -2875,10 +3428,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		_ctx: &mut ConnectionContext,
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
+		stat_handler: &StatHandler,
 	) -> Result<(), Error> {
 		debug!("on close: {}", conn_data.get_connection_id())?;
 
-		let thread_context = Self::init_user_data(user_data, config)?;
+		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
 
 		let connection_id = conn_data.get_connection_id();
 
@@ -2915,6 +3469,31 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 									Some(state) => {
 										state.cur_connections =
 											state.cur_connections.saturating_sub(1);
+									}
+									None => {}
+								}
+
+								match &proxy_info.response_conn_data {
+									Some(conn_data) => {
+										let mut async_connections =
+											lockw!(thread_context.async_connections)?;
+										match async_connections.remove_raw(
+											&conn_data.get_connection_id().to_be_bytes(),
+										) {
+											Some(li_bytes) => {
+												let mut log_item = LogItem::default();
+												log_item.read(li_bytes.try_into()?)?;
+												Self::process_stats(
+													&mut log_item,
+													Some(&mut thread_context.log_slabs),
+													&mut thread_context.next_log_slab,
+													None,
+													&mut thread_context.dropped_log_items,
+													config,
+												)?;
+											}
+											None => {}
+										}
 									}
 									None => {}
 								}
@@ -2975,7 +3554,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				RotationStatus::Needed => {
 					let nfile = rotate!()?;
 					match nfile {
-						Some(nfile) => info!("Mainlog rotated. Rotated to: '{}'", nfile)?,
+						Some(nfile) => info!("Main log rotated. [{}]", nfile)?,
 						None => {}
 					}
 				}
@@ -2986,15 +3565,151 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		Ok(())
 	}
 
+	fn process_stats_queue(
+		stat_handler: &mut StatHandler,
+		qbytes: &mut Vec<u8>,
+		log_item: &mut LogItem,
+	) -> Result<(), Error> {
+		let (len, log_events) = {
+			let mut queue = lockw!(stat_handler.queue)?;
+			let len = queue.len();
+			(&mut qbytes[0..len * LOG_ITEM_SIZE])
+				.clone_from_slice(&queue.qbytes()[0..len * LOG_ITEM_SIZE]);
+			let log_events = queue.log_events();
+			queue.clear()?;
+			(len, log_events)
+		};
+
+		let mut log_items = vec![];
+		for i in 0..len {
+			log_item.read(qbytes[i * LOG_ITEM_SIZE..(i + 1) * LOG_ITEM_SIZE].try_into()?)?;
+			log_items.push(log_item.clone());
+		}
+
+		match stat_handler
+			.http_stats
+			.store_log_items(log_items, log_events)
+		{
+			Ok(_) => {}
+			Err(e) => {
+				error!("store_log items error: {}", e)?;
+			}
+		}
+
+		Ok(())
+	}
+
+	fn run_stats_processor(&self) -> Result<(), Error> {
+		let mut stat_handler = self.stat_handler.clone();
+		std::thread::spawn(move || -> Result<(), Error> {
+			let mut qbytes = vec![];
+			let cap = {
+				let queue = lockr!(stat_handler.queue)?;
+				queue.capacity()
+			};
+			qbytes.resize(LOG_ITEM_SIZE * cap, 0);
+			let mut log_item = LogItem::default();
+
+			loop {
+				std::thread::sleep(std::time::Duration::from_millis(100));
+				// to remove warning
+				if false {
+					break;
+				}
+				match Self::process_stats_queue(&mut stat_handler, &mut qbytes, &mut log_item) {
+					Ok(_) => {}
+					Err(e) => error!("process_stats_queue generated: {}", e)?,
+				}
+			}
+			Ok(())
+		});
+		Ok(())
+	}
+
+	fn process_stats(
+		log_item: &mut LogItem,
+		log_slabs: Option<&mut SlabAllocator>,
+		next_log_slab: &mut u64,
+		_stat_handler: Option<StatHandler>,
+		dropped_log_items: &mut u64,
+		config: &HttpConfig,
+	) -> Result<(), Error> {
+		match log_slabs {
+			Some(log_slabs) => {
+				if *next_log_slab < config.thread_log_queue_size {
+					log_item.end_micros =
+						SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+					let slab = log_slabs.get_mut(*next_log_slab)?;
+					log_item.write(slab.data.try_into()?)?;
+
+					*next_log_slab += 1;
+				} else {
+					*dropped_log_items += 1;
+				}
+			}
+			None => {}
+		}
+
+		Ok(())
+	}
+
+	fn process_housekeep_log_queue(thread_context: &mut ThreadContext) -> Result<(), Error> {
+		{
+			let mut i = 0;
+			let mut log_item = LogItem::default();
+			let mut queue = lockw!(thread_context.stat_handler.queue)?;
+
+			loop {
+				if i >= thread_context.next_log_slab {
+					break;
+				}
+
+				let slab = thread_context.log_slabs.get(i)?;
+				log_item.read(slab.data.try_into()?)?;
+				match (*queue).push(slab.data) {
+					Ok(_) => {}
+					Err(_e) => {
+						thread_context.dropped_log_items += thread_context.next_log_slab - i;
+						break;
+					}
+				}
+				i += 1;
+			}
+
+			if thread_context.dropped_log_items > 0 {
+				let le = LogEvent {
+					dropped_count: thread_context.dropped_log_items,
+					read_timeout_count: 0,
+					connect_timeout_count: 0,
+					connect_count: 0,
+					disconnect_count: 0,
+				};
+
+				queue.push_log_event(le)?;
+			}
+
+			thread_context.next_log_slab = 0;
+			thread_context.dropped_log_items = 0;
+		}
+
+		Ok(())
+	}
+
 	fn process_on_housekeeper(
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		evh_params: &EvhParams,
 		tid: usize,
+		stat_handler: &StatHandler,
 	) -> Result<(), Error> {
 		Self::check_log_rotation(tid)?;
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
-		let thread_context = Self::init_user_data(user_data, config)?;
+		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
+
+		let res = Self::process_housekeep_log_queue(thread_context);
+		if res.is_err() {
+			warn!("house keep err = {:?}", res)?;
+		}
 
 		process_health_check(thread_context, config, evh_params, tid)?;
 
@@ -3247,6 +3962,11 @@ mod test {
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3353,6 +4073,11 @@ mod test {
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3484,6 +4209,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3583,6 +4313,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3700,6 +4435,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3821,6 +4561,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 				None,
 			)],
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -3875,6 +4620,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
@@ -3912,6 +4662,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4004,6 +4759,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4117,6 +4877,11 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4220,6 +4985,11 @@ Content-Length: 10\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4339,6 +5109,11 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4505,6 +5280,11 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4643,6 +5423,11 @@ Content-Length: 30\r\n\
 			show_request_headers: true,
 			webroot: format!("{}/www1", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs1/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb1", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs1/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
@@ -4680,6 +5465,11 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www2", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs2/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb2", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs2/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4828,6 +5618,11 @@ Content-Length: 30\r\n\
 
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -4940,6 +5735,11 @@ Content-Length: 30\r\n\
 			show_request_headers: true,
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			evh_config: EventHandlerConfig {
@@ -4979,6 +5779,11 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,
@@ -5172,6 +5977,9 @@ Content-Length: 30\r\n\
 		setup_test_dir(root_dir)?;
 
 		let port = 19999;
+		let mut gzip_extensions = HashSet::new();
+		gzip_extensions.insert((b"html").to_vec());
+
 		let config = HttpConfig {
 			listeners: vec![(
 				ListenerType::Plain,
@@ -5180,6 +5988,12 @@ Content-Length: 30\r\n\
 			)],
 			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
 			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
+			gzip_extensions,
 			temp_dir: format!("{}/tmp", root_dir),
 			debug: true,
 			show_request_headers: true,

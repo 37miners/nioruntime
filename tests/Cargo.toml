@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime_tests"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 authors = ["37 Miners, LLC"]
 description = "integration tests for nioruntime"
 license = "Apache-2.0"

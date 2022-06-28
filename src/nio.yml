@@ -50,9 +50,21 @@ args:
         help: Show debugging information for get/post api requests. The debug configuration maps the url /post and /get to a dummy api handler for testing purposes. This flag must NOT be set in a production environment.
         long: debug_api
         takes_value: false
+    - debug_proxy:
+        help: Make a dummy configuration for testing a proxy. It creates a proxy forwarding requests to 127.0.0.1:80 and 127.0.0.1:90.
+        long: debug_proxy
+        takes_value: false
     - debug_websocket:
         help: Show debugging information for websocket requests. The debug configuration creates a dummy websocket handler for testing purposes. This flag must NOT be set in a production environment.
         long: debug_websocket
+        takes_value: false
+    - debug_log_queue:
+        help: Show debugging information related to the log queue. This flag must NOT be set in a production environment.
+        long: debug_log_queue
+        takes_value: false
+    - debug_show_stats:
+        help: Show debugging information related to the stats. This flag must NOT be set in a production environment.
+        long: debug_show_stats
         takes_value: false
     - listen_queue_size:
         help: The size of the tcp listen queue. This limits the number of unaccepted connections in the tcp backlog. The default value is 1,000.
@@ -174,6 +186,21 @@ args:
         long: housekeeper_frequency
         takes_value: true
         value_name: housekeeper_frequency
+    - requestlog:
+        help: The location of the request log file. This file contains information about reqeusts.
+        long: requestlog
+        takes_value: true
+        value_name: requestlog
+    - requestlog_max_size:
+        help: The maximum size in bytes of the request log file. After the requestlog reaches this size, a rotation will occur. The default value is 1 MB.
+        long: requestlog_max_size
+        takes_value: true
+        value_name: requestlog_max_size
+    - requestlog_max_age:
+        help: The maximum age, in milliseconds of the request log file. The default value is 1 hour.
+        long: requestlog_max_age
+        takes_value: true
+        value_name: requestlog_max_age
     - mainlog:
         help: The location of the main log file. This file contains errors and debugging information only.
         long: mainlog
@@ -230,3 +257,18 @@ args:
         takes_value: true
         value_name: virtual_server
         multiple: true
+    - main_log_queue_size:
+        help: The maximum size (in number of entries) of the main log queue. This queue is shared by all threads. The default value is 5,000. If the queue is full at the time of logging, the entry will not be added to the logs. It will however be reported as a dropped log item.
+        long: main_log_queue_size
+        takes_value: true
+        value_name: main_log_queue_size
+    - thread_log_queue_size:
+        help: The maximum size (in number of entries) of the log queue per thread. Each thread has it's own thread queue that is part of its thread context. The default value is 2,000. If the queue is full at the time of logging, the entry will not be added to the logs. It will however be reported as a dropped log item. Setting this value to 0 effectively disables logging.
+        long: thread_log_queue_size
+        takes_value: true
+        value_name: thread_log_queue_size
+    - stats_frequency:
+        help: The frequency in milliseconds at which the statistical information is stored in the LMDB. The default value is 10_000 (10 seconds).
+        long: stats_frequency
+        takes_value: true
+        value_name: stats_frequency

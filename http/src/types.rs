@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+use crate::stats::{HttpStats, HttpStatsConfig, LOG_ITEM_SIZE};
+use crate::LogItem;
 use nioruntime_deps::base58;
 use nioruntime_deps::digest::Digest;
 use nioruntime_deps::dirs;
@@ -101,6 +103,8 @@ pub const UPGRADE_BYTES: &[u8] = "Upgrade".as_bytes();
 pub const WEBSOCKET_BYTES: &[u8] = "websocket".as_bytes();
 pub const SEC_WEBSOCKET_KEY_BYTES: &[u8] = "Sec-WebSocket-Key".as_bytes();
 pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
+pub const USER_AGENT_BYTES: &[u8] = "User-Agent".as_bytes();
+pub const HTTP_REFERER_BYTES: &[u8] = "Referer".as_bytes();
 pub const EXPECT_BYTES: &[u8] = "Expect".as_bytes();
 pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
 pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
@@ -386,6 +390,109 @@ impl ProxyState {
 	}
 }
 
+#[derive(Debug)]
+pub struct StatQueue {
+	qbytes: Vec<u8>,
+	len: usize,
+	capacity: usize,
+	log_events: Vec<LogEvent>,
+}
+
+impl StatQueue {
+	fn new(capacity: usize) -> Self {
+		let len = 0;
+		let mut qbytes = vec![];
+		for _ in 0..capacity * LOG_ITEM_SIZE {
+			qbytes.push(0);
+		}
+		Self {
+			qbytes,
+			len,
+			capacity,
+			log_events: vec![],
+		}
+	}
+
+	pub fn push(&mut self, data: &[u8]) -> Result<(), Error> {
+		if self.len >= self.capacity {
+			Err(ErrorKind::CapacityExceeded(format!(
+				"queue capacity exceeded: {} >= {}.",
+				self.len, self.capacity
+			))
+			.into())
+		} else {
+			self.qbytes[self.len * LOG_ITEM_SIZE..(self.len + 1) * LOG_ITEM_SIZE]
+				.clone_from_slice(&data[0..LOG_ITEM_SIZE]);
+			self.len += 1;
+			Ok(())
+		}
+	}
+
+	pub fn push_log_event(&mut self, log_event: LogEvent) -> Result<(), Error> {
+		self.log_events.push(log_event);
+		Ok(())
+	}
+
+	pub fn clear(&mut self) -> Result<(), Error> {
+		self.len = 0;
+		self.log_events.clear();
+		Ok(())
+	}
+
+	pub fn capacity(&self) -> usize {
+		self.capacity
+	}
+
+	pub fn len(&self) -> usize {
+		self.len
+	}
+
+	pub fn qbytes(&self) -> &Vec<u8> {
+		&self.qbytes
+	}
+
+	pub fn log_events(&self) -> Vec<LogEvent> {
+		self.log_events.clone()
+	}
+}
+
+#[derive(Clone, Debug)]
+pub struct LogEvent {
+	pub dropped_count: u64,
+	pub read_timeout_count: u64,
+	pub connect_timeout_count: u64,
+	pub connect_count: u64,
+	pub disconnect_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StatHandler {
+	pub queue: Arc<RwLock<StatQueue>>,
+	pub http_stats: HttpStats,
+}
+
+impl StatHandler {
+	pub fn new(
+		capacity: usize,
+		debug_log_queue: bool,
+		request_log_config: LogConfig,
+		lmdb_dir: String,
+		debug_show_stats: bool,
+		stats_frequency: u64,
+	) -> Result<Self, Error> {
+		Ok(Self {
+			queue: Arc::new(RwLock::new(StatQueue::new(capacity))),
+			http_stats: HttpStats::new(HttpStatsConfig {
+				debug_log_queue,
+				debug_show_stats,
+				request_log_config,
+				lmdb_dir,
+				stats_frequency,
+			})?,
+		})
+	}
+}
+
 pub struct ThreadContext {
 	pub header_map: StaticHash<(), ()>,
 	pub cache_hits: StaticHash<(), ()>,
@@ -401,10 +508,14 @@ pub struct ThreadContext {
 	pub webroot: Vec<u8>,
 	pub temp_dir: String,
 	pub sha1: Sha1,
+	pub log_slabs: SlabAllocator,
+	pub next_log_slab: u64,
+	pub stat_handler: StatHandler,
+	pub dropped_log_items: u64,
 }
 
 impl ThreadContext {
-	pub fn new(config: &HttpConfig) -> Result<Self, Error> {
+	pub fn new(config: &HttpConfig, stat_handler: &StatHandler) -> Result<Self, Error> {
 		let header_map_conf = StaticHashConfig {
 			key_len: config.max_header_name_len,
 			entry_len: config.max_header_value_len,
@@ -452,7 +563,7 @@ impl ThreadContext {
 
 		let async_connections = Arc::new(RwLock::new(StaticHash::new(StaticHashConfig {
 			key_len: SIZEOF_U128,
-			entry_len: 0,
+			entry_len: LOG_ITEM_SIZE,
 			max_entries: config.max_async_connections,
 			max_load_factor: 1.0,
 			iterator: false,
@@ -473,6 +584,8 @@ impl ThreadContext {
 		// preallocate a single step here
 		active_connections.step(&ConnectionInfo::new_empty());
 
+		let log_slabs = SlabAllocator::new(config.thread_log_queue_size, LOG_ITEM_SIZE.try_into()?);
+
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
 			cache_hits: StaticHash::new(cache_hits_conf)?,
@@ -488,6 +601,10 @@ impl ThreadContext {
 			webroot,
 			temp_dir,
 			sha1: Sha1::new(),
+			log_slabs,
+			next_log_slab: 0,
+			stat_handler: stat_handler.clone(),
+			dropped_log_items: 0,
 		})
 	}
 }
@@ -505,6 +622,23 @@ pub enum HttpMethod {
 	Trace,
 }
 
+impl Display for HttpMethod {
+	fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+		match self {
+			HttpMethod::Get => write!(f, "GET")?,
+			HttpMethod::Post => write!(f, "POST")?,
+			HttpMethod::Delete => write!(f, "DELETE")?,
+			HttpMethod::Head => write!(f, "HEAD")?,
+			HttpMethod::Put => write!(f, "PUT")?,
+			HttpMethod::Options => write!(f, "OPTIONS")?,
+			HttpMethod::Connect => write!(f, "CONNECT")?,
+			HttpMethod::Patch => write!(f, "PATCH")?,
+			HttpMethod::Trace => write!(f, "TRACE")?,
+		}
+		Ok(())
+	}
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum HttpVersion {
 	V10,
@@ -519,6 +653,8 @@ pub struct HttpHeaders<'a> {
 	version: HttpVersion,
 	uri: &'a [u8],
 	query: &'a [u8],
+	user_agent: &'a [u8],
+	referer: &'a [u8],
 	extension: &'a [u8],
 	header_map: &'a StaticHash<(), ()>,
 	len: usize,
@@ -618,6 +754,10 @@ impl<'a> HttpHeaders<'a> {
 			if_modified_since,
 			if_none_match,
 			accept_encoding,
+			user_agent_start,
+			user_agent_end,
+			referer_start,
+			referer_end,
 		) = match Self::parse_headers(
 			&buffer[(offset + 2)..],
 			config,
@@ -635,6 +775,10 @@ impl<'a> HttpHeaders<'a> {
 				if_modified_since,
 				if_none_match,
 				accept_encoding,
+				user_agent_start,
+				user_agent_end,
+				referer_start,
+				referer_end,
 			)) => (
 				noffset + offset + 2,
 				range,
@@ -645,6 +789,10 @@ impl<'a> HttpHeaders<'a> {
 				if_modified_since,
 				if_none_match,
 				accept_encoding,
+				user_agent_start,
+				user_agent_end,
+				referer_start,
+				referer_end,
 			),
 			None => return Ok(None),
 		};
@@ -653,11 +801,15 @@ impl<'a> HttpHeaders<'a> {
 			return Err(ErrorKind::HttpError431("Request Header Fields Too Large".into()).into());
 		}
 
+		let referer = &buffer[(referer_start + offset + 2)..(referer_end + offset + 2)];
+		let user_agent = &buffer[(user_agent_start + offset + 2)..(user_agent_end + offset + 2)];
 		Ok(Some(Self {
 			method,
 			version,
 			uri,
 			query,
+			user_agent,
+			referer,
 			extension,
 			header_map,
 			len,
@@ -753,6 +905,14 @@ impl<'a> HttpHeaders<'a> {
 
 	pub fn get_uri(&self) -> &[u8] {
 		&self.uri
+	}
+
+	pub fn get_user_agent(&self) -> &[u8] {
+		&self.user_agent
+	}
+
+	pub fn get_referer(&self) -> &[u8] {
+		&self.referer
 	}
 
 	pub fn get_header_value(&self, name: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Error> {
@@ -950,7 +1110,24 @@ impl<'a> HttpHeaders<'a> {
 		header_map: &mut StaticHash<(), ()>,
 		key_buf: &mut Vec<u8>,
 		value_buf: &mut Vec<u8>,
-	) -> Result<Option<(usize, bool, usize, bool, bool, bool, bool, bool, bool)>, Error> {
+	) -> Result<
+		Option<(
+			usize,
+			bool,
+			usize,
+			bool,
+			bool,
+			bool,
+			bool,
+			bool,
+			bool,
+			usize,
+			usize,
+			usize,
+			usize,
+		)>,
+		Error,
+	> {
 		let mut i = 0;
 		let buffer_len = buffer.len();
 		let mut proc_key = true;
@@ -964,6 +1141,10 @@ impl<'a> HttpHeaders<'a> {
 		let mut if_none_match = false;
 		let mut if_modified_since = false;
 		let mut accept_encoding = false;
+		let mut user_agent_start = 0;
+		let mut user_agent_end = 0;
+		let mut referer_start = 0;
+		let mut referer_end = 0;
 
 		loop {
 			if i > config.max_header_size {
@@ -1014,6 +1195,10 @@ impl<'a> HttpHeaders<'a> {
 								if_modified_since,
 								if_none_match,
 								accept_encoding,
+								0,
+								0,
+								0,
+								0,
 							)));
 						}
 					}
@@ -1074,6 +1259,12 @@ impl<'a> HttpHeaders<'a> {
 							0
 						}
 					};
+				} else if bytes_eq(&key_buf[0..key_offset], USER_AGENT_BYTES) {
+					user_agent_end = i;
+					user_agent_start = i - (value_offset - 4);
+				} else if bytes_eq(&key_buf[0..key_offset], HTTP_REFERER_BYTES) {
+					referer_end = i;
+					referer_start = i - (value_offset - 4);
 				} else if value_offset > 4
 					&& bytes_eq(&key_buf[0..key_offset], UPGRADE_BYTES)
 					&& bytes_eq(&value_buf[4..value_offset], WEBSOCKET_BYTES)
@@ -1156,6 +1347,10 @@ impl<'a> HttpHeaders<'a> {
 						if_modified_since,
 						if_none_match,
 						accept_encoding,
+						user_agent_start,
+						user_agent_end,
+						referer_start,
+						referer_end,
 					)));
 				}
 			}
@@ -1319,6 +1514,8 @@ pub struct HttpConfig {
 	pub debug: bool,
 	pub debug_api: bool,
 	pub debug_websocket: bool,
+	pub debug_proxy: bool,
+	pub debug_log_queue: bool,
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
 	pub mainlog_max_size: u64,
@@ -1332,10 +1529,29 @@ pub struct HttpConfig {
 	pub gzip_compression_level: u32,
 	pub gzip_extensions: HashSet<Vec<u8>>,
 	pub evh_config: EventHandlerConfig,
+	pub main_log_queue_size: usize,
+	pub thread_log_queue_size: u64,
+	pub request_log_config: LogConfig,
+	pub lmdb_dir: String,
+	pub debug_show_stats: bool,
+	pub stats_frequency: u64,
 }
 
 impl Default for HttpConfig {
 	fn default() -> Self {
+		let mut version = format!("[niohttp-{}]", VERSION);
+		loop {
+			if version.len() >= 21 {
+				break;
+			}
+			version = format!("{} ", version);
+		}
+		let file_header = format!(
+			"{}: method|uri_rendered|uri_requested|query|User-Agent|Referer|ProcTime\n\
+------------------------------------------------------------------------------------------",
+			version
+		);
+
 		Self {
 			start: Instant::now(),
 			proxy_config: ProxyConfig::default(),
@@ -1352,6 +1568,7 @@ impl Default for HttpConfig {
 			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
 			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
 			temp_dir: "~/.niohttpd/tmp".to_string(),
+			lmdb_dir: "~/.niohttpd/lmdb".to_string(),
 			mainlog_max_age: 6 * 60 * 60 * 1000,
 			mainlog_max_size: 1024 * 1024 * 1,
 			max_cache_files: 1_000,
@@ -1379,8 +1596,25 @@ impl Default for HttpConfig {
 			// /src/main.rs responsible for creating it.
 			debug_websocket: false, // debug: dummy websocket handler (note: we just display the flag here,
 			// /src/main.rs responsible for creating it.
+			debug_proxy: false, // same as above
+			debug_log_queue: false,
+			debug_show_stats: false,
 			debug: false, // general debugging including log to stdout
 			error_page: "/error.html".as_bytes().to_vec(),
+			main_log_queue_size: 10_000,
+			thread_log_queue_size: 2_000,
+			stats_frequency: 10_000,
+			request_log_config: LogConfig {
+				file_path: Some("~/.niohttpd/logs/request.log".to_string()),
+				show_log_level: false,
+				show_line_num: false,
+				show_bt: false,
+				colors: false,
+				show_stdout: false,
+				file_header,
+				auto_rotate: false,
+				..Default::default()
+			},
 			evh_config: EventHandlerConfig::default(),
 			mime_map: vec![
 				("html".to_string(), "text/html".to_string()),
@@ -1597,7 +1831,11 @@ pub struct ApiContext {
 	slab_ids: Vec<u64>,
 	slab_size: usize,
 	is_proxy: bool,
+	is_async: bool,
 	proxy_conn: Option<ConnectionData>,
+	stat_handler: StatHandler,
+	log_item: LogItem,
+	response_code: u16,
 	pub(crate) post_status: Arc<RwLock<PostStatus>>,
 }
 
@@ -1608,6 +1846,8 @@ impl ApiContext {
 		slaballocator: Arc<RwLock<SlabAllocator>>,
 		is_proxy: bool,
 		proxy_conn: Option<ConnectionData>,
+		stat_handler: StatHandler,
+		log_item: LogItem,
 	) -> Self {
 		Self {
 			async_connections,
@@ -1621,8 +1861,21 @@ impl ApiContext {
 			slab_size: 0,
 			post_status: Arc::new(RwLock::new(PostStatus::new())),
 			is_proxy,
+			is_async: false,
 			proxy_conn,
+			stat_handler,
+			log_item,
+			response_code: 200,
 		}
+	}
+
+	pub fn set_response_code_logging(&mut self, response_code: u16) -> Result<(), Error> {
+		self.response_code = response_code;
+		Ok(())
+	}
+
+	pub fn log_item(&mut self) -> &mut LogItem {
+		&mut self.log_item
 	}
 
 	pub fn proxy_conn(&self) -> Option<&ConnectionData> {
@@ -1633,9 +1886,17 @@ impl ApiContext {
 		self.is_proxy
 	}
 
+	pub fn is_async(&self) -> bool {
+		self.is_async
+	}
+
 	pub fn set_async(&mut self) -> Result<(), Error> {
+		self.is_async = true;
 		let mut async_connections = lockw!(self.async_connections)?;
-		async_connections.insert_raw(&self.conn_data.get_connection_id().to_be_bytes(), &[])?;
+		let mut li_bytes = [0u8; LOG_ITEM_SIZE];
+		self.log_item.write(&mut li_bytes)?;
+		async_connections
+			.insert_raw(&self.conn_data.get_connection_id().to_be_bytes(), &li_bytes)?;
 		Ok(())
 	}
 
@@ -1646,7 +1907,27 @@ impl ApiContext {
 
 		{
 			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes());
+
+			match async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes()) {
+				Some(li_bytes) => {
+					let mut log_item = LogItem::default();
+					log_item.read(li_bytes.try_into()?)?;
+					log_item.response_code = self.response_code;
+					log_item.end_micros =
+						SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+					match self
+						.stat_handler
+						.http_stats
+						.store_log_items(vec![log_item], vec![])
+					{
+						Ok(_) => {}
+						Err(e) => {
+							error!("store_log items error: {}", e)?;
+						}
+					}
+				}
+				None => {}
+			}
 		}
 		self.conn_data.async_complete()?;
 		Ok(())
@@ -1676,7 +1957,26 @@ impl ApiContext {
 	pub(crate) fn async_complete_no_file(&mut self) -> Result<(), Error> {
 		{
 			let mut async_connections = lockw!(self.async_connections)?;
-			async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes());
+			match async_connections.remove_raw(&self.conn_data.get_connection_id().to_be_bytes()) {
+				Some(li_bytes) => {
+					let mut log_item = LogItem::default();
+					log_item.read(li_bytes.try_into()?)?;
+					log_item.response_code = self.response_code;
+					log_item.end_micros =
+						SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+					match self
+						.stat_handler
+						.http_stats
+						.store_log_items(vec![log_item], vec![])
+					{
+						Ok(_) => {}
+						Err(e) => {
+							error!("store_log items error: {}", e)?;
+						}
+					}
+				}
+				None => {}
+			}
 		}
 		self.conn_data.async_complete()?;
 		Ok(())
@@ -1770,7 +2070,6 @@ impl ApiContext {
 			}
 		}
 
-		// make sure pull_bytes cannot be called. (either/or)
 		self.offset = self.expected;
 
 		Ok(())

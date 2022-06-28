@@ -15,11 +15,13 @@
 mod cache;
 mod http;
 mod proxy;
+mod stats;
 mod test;
 mod types;
 mod websocket;
 
 pub use crate::http::HttpServer;
+pub use crate::stats::LogItem;
 pub use crate::types::{
 	ApiContext, HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ListenerType, ProxyConfig,
 	ProxyEntry, ProxyRotation, Upstream,

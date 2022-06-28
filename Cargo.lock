@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "built",
  "clap",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_deps"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "arrayref",
  "backtrace",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_derive"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
@@ -1267,14 +1267,14 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_err"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
 ]
 
 [[package]]
 name = "nioruntime_evh"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
@@ -1284,10 +1284,11 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_http"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "include_dir",
  "nioruntime_deps",
+ "nioruntime_derive",
  "nioruntime_err",
  "nioruntime_evh",
  "nioruntime_log",
@@ -1296,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_log"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",
@@ -1304,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_tests"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_derive",
@@ -1315,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_tor"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "backtrace",
  "chrono",
@@ -1349,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "nioruntime_util"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 dependencies = [
  "nioruntime_deps",
  "nioruntime_err",

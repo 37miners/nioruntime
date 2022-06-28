@@ -22,6 +22,8 @@ use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_http::{send_websocket_message, ApiContext, HttpConfig, HttpServer, ListenerType};
+use nioruntime_http::{ProxyConfig, ProxyRotation};
+use nioruntime_http::{ProxyEntry, Upstream};
 use nioruntime_log::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -36,10 +38,10 @@ info!();
 
 const POST_BYTES: &[u8] = "/post".as_bytes();
 const EMPTY_REPLY: &[u8] = b"HTTP/1.1 200 Ok\r\n\
-Server: nioruntime httpd/0.0.3-beta.1\r\n\
+Server: nioruntime httpd/0.0.3-beta.3\r\n\
 Content-Type: text/html\r\n\
 Content-Length: 8\r\n\
-Connection: close\r\n\r\n\
+Connection: keep-alive\r\n\r\n\
 Empty.\r\n";
 
 // include build information
@@ -431,6 +433,31 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let requestlog = match args.is_present("requestlog") {
+		true => args.value_of("requestlog").unwrap(),
+		false => match file_args.is_present("requestlog") {
+			true => file_args.value_of("requestlog").unwrap(),
+			false => "~/.niohttpd/logs/request.log",
+		},
+	}
+	.to_string();
+
+	let requestlog_max_age = match args.is_present("requestlog_max_age") {
+		true => args.value_of("requestlog_max_age").unwrap().parse()?,
+		false => match file_args.is_present("requestlog_max_age") {
+			true => file_args.value_of("requestlog_max_age").unwrap().parse()?,
+			false => 3_600_000,
+		},
+	};
+
+	let requestlog_max_size = match args.is_present("requestlog_max_size") {
+		true => args.value_of("requestlog_max_size").unwrap().parse()?,
+		false => match file_args.is_present("requestlog_max_size") {
+			true => file_args.value_of("requestlog_max_size").unwrap().parse()?,
+			false => 1_000_000,
+		},
+	};
+
 	let mainlog = match args.is_present("mainlog") {
 		true => args.value_of("mainlog").unwrap(),
 		false => match file_args.is_present("mainlog") {
@@ -576,7 +603,7 @@ fn real_main() -> Result<(), Error> {
 				.value_of("max_async_connections")
 				.unwrap()
 				.parse()?,
-			false => max_rwhandles,
+			false => max_rwhandles / threads,
 		},
 	};
 
@@ -599,6 +626,14 @@ fn real_main() -> Result<(), Error> {
 				.unwrap()
 				.parse()?,
 			false => 1_000,
+		},
+	};
+
+	let stats_frequency = match args.is_present("stats_frequency") {
+		true => args.value_of("stats_frequency").unwrap().parse()?,
+		false => match file_args.is_present("stats_frequency") {
+			true => file_args.value_of("stats_frequency").unwrap().parse()?,
+			false => 10_000,
 		},
 	};
 
@@ -655,10 +690,115 @@ fn real_main() -> Result<(), Error> {
 		false => file_args.is_present("debug_api"),
 	};
 
+	let debug_show_stats = match args.is_present("debug_show_stats") {
+		true => true,
+		false => file_args.is_present("debug_show_stats"),
+	};
+
+	let debug_proxy = match args.is_present("debug_proxy") {
+		true => true,
+		false => file_args.is_present("debug_proxy"),
+	};
+
 	let debug_websocket = match args.is_present("debug_websocket") {
 		true => true,
 		false => file_args.is_present("debug_websocket"),
 	};
+
+	let debug_log_queue = match args.is_present("debug_log_queue") {
+		true => true,
+		false => file_args.is_present("debug_log_queue"),
+	};
+
+	let thread_log_queue_size = match args.is_present("thread_log_queue_size") {
+		true => args.value_of("thread_log_queue_size").unwrap().parse()?,
+		false => match file_args.is_present("thread_log_queue_size") {
+			true => file_args
+				.value_of("thread_log_queue_size")
+				.unwrap()
+				.parse()?,
+			false => 2_000,
+		},
+	};
+
+	let main_log_queue_size = match args.is_present("main_log_queue_size") {
+		true => args.value_of("main_log_queue_size").unwrap().parse()?,
+		false => match file_args.is_present("main_log_queue_size") {
+			true => file_args.value_of("main_log_queue_size").unwrap().parse()?,
+			false => 5_000,
+		},
+	};
+
+	let proxy_config = if debug_proxy {
+		let port1 = 80;
+		let port2 = 90;
+		let mut extensions = HashMap::new();
+		extensions.insert(
+			"php".as_bytes().to_vec(),
+			ProxyEntry::multi_socket_addr(
+				vec![
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+						1,
+					),
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..]).unwrap(),
+						1,
+					),
+				],
+				100,
+				None,
+				ProxyRotation::Random,
+				10,
+				1,
+			),
+		);
+
+		let mut mappings = HashMap::new();
+		mappings.insert(
+			"/testmapping.html".as_bytes().to_vec(),
+			ProxyEntry::multi_socket_addr(
+				vec![
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port1)[..]).unwrap(),
+						1,
+					),
+					Upstream::new(
+						SocketAddr::from_str(&format!("127.0.0.1:{}", port2)[..]).unwrap(),
+						1,
+					),
+				],
+				100,
+				None,
+				ProxyRotation::Random,
+				10,
+				1,
+			),
+		);
+
+		ProxyConfig {
+			extensions,
+			mappings,
+		}
+	} else {
+		ProxyConfig {
+			extensions: HashMap::new(),
+			mappings: HashMap::new(),
+		}
+	};
+
+	let mut version = format!("[niohttp-{}]", built_info::PKG_VERSION);
+	loop {
+		if version.len() >= 21 {
+			break;
+		}
+		version = format!("{} ", version);
+	}
+	let file_header = format!(
+		"{}: method|uri_rendered|uri_requested|query|User-Agent|Referer|ProcTime\n\
+------------------------------------------------------------------------------------------",
+		version
+	);
 
 	let config = HttpConfig {
 		start,
@@ -692,9 +832,29 @@ fn real_main() -> Result<(), Error> {
 		virtual_ips,
 		virtual_hosts,
 		webroot: webroot.as_bytes().to_vec(),
+		stats_frequency,
+		main_log_queue_size,
+		thread_log_queue_size,
 		debug,
 		debug_api,
+		debug_proxy,
 		debug_websocket,
+		debug_log_queue,
+		debug_show_stats,
+		proxy_config,
+		request_log_config: LogConfig {
+			file_path: Some(requestlog),
+			show_log_level: false,
+			show_line_num: false,
+			show_bt: false,
+			colors: false,
+			show_stdout: false,
+			file_header,
+			auto_rotate: false,
+			max_age_millis: requestlog_max_age,
+			max_size: requestlog_max_size,
+			..Default::default()
+		},
 		evh_config: EventHandlerConfig {
 			threads,
 			housekeeper_frequency,

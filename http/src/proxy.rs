@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use crate::http::insert_step_allocator;
+use crate::stats::MAX_LOG_STR_LEN;
 use crate::types::ConnectionInfo;
 use crate::types::*;
+use crate::LogItem;
 use nioruntime_deps::libc;
 use nioruntime_deps::libc::fcntl;
 use nioruntime_deps::nix::sys::socket::AddressFamily::Inet;
@@ -47,6 +49,7 @@ pub fn process_proxy_inbound(
 	proxy_state: &mut HashMap<ProxyEntry, ProxyState>,
 	idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
 	now: SystemTime,
+	_async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 ) -> Result<(), Error> {
 	match conn_info.proxy_info.as_mut() {
 		Some(proxy_info) => {
@@ -71,9 +74,12 @@ pub fn process_proxy_inbound(
 							warn!("proxy request generated error: {}", e)?;
 						}
 					}
+
 					// if complete, call async complete
 					if is_complete && !is_close {
 						conn_data.async_complete()?;
+					} else if is_complete && is_close {
+						conn_data.close()?;
 					}
 				}
 				None => {
@@ -235,6 +241,8 @@ pub fn check_complete(buffer: &[u8]) -> Result<(bool, bool, usize), Error> {
 				// HTTP/1.0
 				// data is still sent and we must close the client connection
 				// when upstream closes
+				// no real good solution might rely on browser to close or the
+				// timeout will occur.
 				Ok((false, false, 0))
 			} else {
 				let mut offset = end_headers + 4;
@@ -298,6 +306,7 @@ pub fn process_proxy_outbound(
 	remote_peer: &Option<SocketAddr>,
 	now: SystemTime,
 	slabs: &Arc<RwLock<SlabAllocator>>,
+	stat_handler: StatHandler,
 ) -> Result<
 	(
 		ApiContext,
@@ -316,6 +325,53 @@ pub fn process_proxy_outbound(
 				// 503 service unavailable
 				inbound.write(HTTP_ERROR_503)?;
 
+				let mut uri = [0u8; MAX_LOG_STR_LEN];
+				let headers_uri = headers.get_uri();
+				let mut max = headers_uri.len();
+				if max > MAX_LOG_STR_LEN {
+					max = MAX_LOG_STR_LEN;
+				};
+				uri[0..max].clone_from_slice(&headers_uri[0..max]);
+
+				let mut query = [0u8; MAX_LOG_STR_LEN];
+				let headers_query = headers.get_query();
+				let mut max = headers_query.len();
+				if max > MAX_LOG_STR_LEN {
+					max = MAX_LOG_STR_LEN;
+				};
+				query[0..max].clone_from_slice(&headers_query[0..max]);
+
+				let headers_user_agent = headers.get_user_agent();
+				let mut user_agent = [0u8; MAX_LOG_STR_LEN];
+				let mut max = headers_user_agent.len();
+				if max > MAX_LOG_STR_LEN {
+					max = MAX_LOG_STR_LEN;
+				};
+				user_agent[0..max].clone_from_slice(&headers_user_agent[0..max]);
+
+				let mut referer = [0u8; MAX_LOG_STR_LEN];
+				let headers_referer = headers.get_referer();
+				let mut max = headers_referer.len();
+				if max > MAX_LOG_STR_LEN {
+					max = MAX_LOG_STR_LEN;
+				}
+				referer[0..max].clone_from_slice(&headers_referer[0..max]);
+
+				let clen = headers.content_len()?;
+				let log_item = LogItem {
+					http_method: headers.get_method().clone(),
+					http_version: headers.get_version().clone(),
+					uri,
+					query,
+					user_agent,
+					referer,
+					content_len: clen.try_into()?,
+					start_micros: now.duration_since(UNIX_EPOCH)?.as_micros() as u64,
+					end_micros: 0,
+					uri_requested: uri,
+					response_code: 200,
+				};
+
 				// we still read the remaining data on this connection
 				let mut ctx = ApiContext::new(
 					async_connections.clone(),
@@ -323,9 +379,10 @@ pub fn process_proxy_outbound(
 					slabs.clone(),
 					true,
 					None,
+					stat_handler,
+					log_item,
 				);
 
-				let clen = headers.content_len()?;
 				let headers_len = headers.len();
 				let buf_len = buffer.len();
 				let end = if clen + headers_len > buf_len {
@@ -335,6 +392,7 @@ pub fn process_proxy_outbound(
 				};
 				let rem = end.saturating_sub(headers_len);
 				ctx.set_expected(rem, &"".to_string(), true)?;
+
 				ctx.set_async()?;
 
 				return Ok((ctx, None, None));
@@ -525,7 +583,7 @@ pub fn process_proxy_outbound(
 				}
 			};
 
-			warn!(
+			info!(
 				"proxy added handle = {}, conn_id = {}",
 				handle,
 				conn_data.get_connection_id()
@@ -548,14 +606,6 @@ pub fn process_proxy_outbound(
 		}
 	};
 
-	let mut ctx = ApiContext::new(
-		async_connections.clone(),
-		inbound.clone(),
-		slabs.clone(),
-		true,
-		Some(proxy_info.proxy_conn.clone()),
-	);
-
 	let clen = headers.content_len()?;
 	let headers_len = headers.len();
 	let buf_len = buffer.len();
@@ -565,7 +615,64 @@ pub fn process_proxy_outbound(
 		clen + headers_len
 	};
 	let rem = clen.saturating_sub(end.saturating_sub(headers_len));
+
+	let mut uri = [0u8; MAX_LOG_STR_LEN];
+	let headers_uri = headers.get_uri();
+	let mut max = headers_uri.len();
+	if max > MAX_LOG_STR_LEN {
+		max = MAX_LOG_STR_LEN;
+	};
+	uri[0..max].clone_from_slice(&headers_uri[0..max]);
+
+	let mut query = [0u8; MAX_LOG_STR_LEN];
+	let headers_query = headers.get_query();
+	let mut max = headers_query.len();
+	if max > MAX_LOG_STR_LEN {
+		max = MAX_LOG_STR_LEN;
+	};
+	query[0..max].clone_from_slice(&headers_query[0..max]);
+
+	let headers_user_agent = headers.get_user_agent();
+	let mut user_agent = [0u8; MAX_LOG_STR_LEN];
+	let mut max = headers_user_agent.len();
+	if max > MAX_LOG_STR_LEN {
+		max = MAX_LOG_STR_LEN;
+	};
+	user_agent[0..max].clone_from_slice(&headers_user_agent[0..max]);
+
+	let mut referer = [0u8; MAX_LOG_STR_LEN];
+	let headers_referer = headers.get_referer();
+	let mut max = headers_referer.len();
+	if max > MAX_LOG_STR_LEN {
+		max = MAX_LOG_STR_LEN;
+	}
+	referer[0..max].clone_from_slice(&headers_referer[0..max]);
+	let log_item = LogItem {
+		http_method: headers.get_method().clone(),
+		http_version: headers.get_version().clone(),
+		uri,
+		query,
+		user_agent,
+		referer,
+		content_len: clen.try_into()?,
+		start_micros: now.duration_since(UNIX_EPOCH)?.as_micros() as u64,
+		end_micros: 0,
+		uri_requested: uri,
+		response_code: 200,
+	};
+
+	let mut ctx = ApiContext::new(
+		async_connections.clone(),
+		inbound.clone(),
+		slabs.clone(),
+		true,
+		Some(proxy_info.proxy_conn.clone()),
+		stat_handler,
+		log_item,
+	);
+
 	ctx.set_expected(rem, &"".to_string(), true)?;
+
 	ctx.set_async()?;
 
 	proxy_info.proxy_conn.write(&buffer[0..end])?;

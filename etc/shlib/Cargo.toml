@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 edition = "2018"
 description = "nioruntime as a shared library"
 license = "Apache-2.0"

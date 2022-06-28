@@ -1,6 +1,6 @@
 [package]
 name = "nioruntime_http"
-version = "0.0.3-beta2"
+version = "0.0.3-beta3"
 authors = ["37 Miners, LLC"]
 description = "http library for nioruntime"
 license = "Apache-2.0"
@@ -11,10 +11,11 @@ edition = "2018"
 
 [dependencies]
 
-nioruntime_util = { path = "../util"         }
-nioruntime_log  = { path = "../log"          }
-nioruntime_err  = { path = "../error"        }
-nioruntime_evh  = { path = "../eventhandler" }
-nioruntime_deps = { path = "../deps"         }
+nioruntime_util =   { path = "../util"         }
+nioruntime_log  =   { path = "../log"          }
+nioruntime_err  =   { path = "../error"        }
+nioruntime_evh  =   { path = "../eventhandler" }
+nioruntime_deps =   { path = "../deps"         }
+nioruntime_derive = { path = "../derive"       }
 
 include_dir = "0.7.2"

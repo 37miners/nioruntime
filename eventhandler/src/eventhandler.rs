@@ -1249,11 +1249,17 @@ where
 									let d = ctx.tid;
 									let e = config.debug_pending;
 									match connection_hash_data.connection_context.as_mut() {
-										Some(mut cc) => (on_close)(
-											&ConnectionData::new(a, b, c, d, e),
-											&mut cc,
-											&mut ctx.user_data,
-										)?,
+										Some(mut cc) => {
+											let msg = "on_close Callback resulted in error";
+											try_or_warn!(
+												(on_close)(
+													&ConnectionData::new(a, b, c, d, e),
+													&mut cc,
+													&mut ctx.user_data,
+												),
+												msg
+											);
+										}
 										None => error!("no context found for id = {}", id)?,
 									}
 
@@ -3097,11 +3103,12 @@ mod tests {
 
 	#[test]
 	fn test_eventhandler() -> Result<(), Error> {
-		let port = 8000;
+		let mut port = 8000;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3201,11 +3208,12 @@ mod tests {
 
 	#[test]
 	fn test_pending() -> Result<(), Error> {
-		let port = 8090;
+		let mut port = 8090;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3306,11 +3314,12 @@ mod tests {
 
 	#[test]
 	fn test_step() -> Result<(), Error> {
-		let port = 8107;
+		let mut port = 8107;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3378,11 +3387,12 @@ mod tests {
 
 	#[test]
 	fn test_client() -> Result<(), Error> {
-		let port = 8100;
+		let mut port = 8109;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3413,8 +3423,6 @@ mod tests {
 		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
 		evh.set_on_panic(move || Ok(()))?;
 
-		let stream = TcpStream::connect(addr)?;
-		let handle = stream.as_raw_fd();
 		let client_id = Arc::new(RwLock::new(0));
 		let client_id_clone = client_id.clone();
 
@@ -3442,13 +3450,25 @@ mod tests {
 
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
+
+		std::thread::sleep(std::time::Duration::from_millis(1000));
+
+		let stream = TcpStream::connect(addr)?;
+		let handle = stream.as_raw_fd();
+
 		let conn_info = evh.add_handle(handle, None)?;
 		{
 			let mut client_id = lockw!(client_id)?;
 			*client_id = conn_info.get_connection_id();
 		}
 		conn_info.write(&[1, 2, 3, 4])?;
+
+		let start = std::time::Instant::now();
 		loop {
+			if start.elapsed().as_secs() > 30 {
+				assert!(false);
+			}
+
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			if *(lockr!(client_on_read_count_clone)?) != 0 {
 				break;
@@ -3463,11 +3483,12 @@ mod tests {
 
 	#[test]
 	fn test_ssl() -> Result<(), Error> {
-		let port = 8200;
+		let mut port = 8200;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3641,11 +3662,12 @@ mod tests {
 
 	#[test]
 	fn test_big_msg() -> Result<(), Error> {
-		let port = 8300;
+		let mut port = 8300;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3750,11 +3772,12 @@ mod tests {
 
 	#[test]
 	fn test_stop() -> Result<(), Error> {
-		let port = 8400;
+		let mut port = 8400;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3810,11 +3833,12 @@ mod tests {
 
 	#[test]
 	fn test_max_rwhandles() -> Result<(), Error> {
-		let port = 8500;
+		let mut port = 8500;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -3980,11 +4004,12 @@ mod tests {
 
 	#[test]
 	fn test_close() -> Result<(), Error> {
-		let port = 8600;
+		let mut port = 8600;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -4047,7 +4072,7 @@ mod tests {
 		})?;
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
-		std::thread::sleep(std::time::Duration::from_millis(100));
+		std::thread::sleep(std::time::Duration::from_millis(500));
 
 		let mut stream1 = TcpStream::connect(addr.clone())?;
 		let mut stream2 = TcpStream::connect(addr.clone())?;
@@ -4088,11 +4113,12 @@ mod tests {
 		Ok(())
 	}
 
-	fn do_test_panic(do_err: bool, port: u16) -> Result<(), Error> {
+	fn do_test_panic(do_err: bool, mut port: u16) -> Result<(), Error> {
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -4273,11 +4299,12 @@ mod tests {
 
 	#[test]
 	fn test_max_rwhandles2() -> Result<(), Error> {
-		let port = 8144;
+		let mut port = 8144;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -4326,11 +4353,12 @@ mod tests {
 
 	#[test]
 	fn test_max_handles() -> Result<(), Error> {
-		let port = 8144;
+		let mut port = 8144;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -4391,17 +4419,19 @@ mod tests {
 	fn test_saturating() -> Result<(), Error> {
 		test_saturating_impl(false)?;
 		// note panic has small delay to wait for housekeeper to discover. It should be very rare so this is ok.
+		std::thread::sleep(std::time::Duration::from_millis(1000));
 		test_saturating_impl(true)?;
 		Ok(())
 	}
 
 	fn test_saturating_impl(panic: bool) -> Result<(), Error> {
 		let msg_len = 1_000_000;
-		let port = 8100;
+		let mut port = 8100;
 		let addr = loop {
 			if portpicker::is_free_tcp(port) {
 				break format!("127.0.0.1:{}", port);
 			}
+			port += 1;
 		};
 
 		info!("Starting Eventhandler on {}", addr)?;
@@ -4429,14 +4459,6 @@ mod tests {
 			listeners.push(listener);
 		}
 
-		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
-		evh.set_on_panic(move || Ok(()))?;
-
-		let stream = TcpStream::connect(addr.clone())?;
-		let handle2 = stream.as_raw_fd();
-
-		let stream = TcpStream::connect(addr.clone())?;
-		let handle = stream.as_raw_fd();
 		let client_id = Arc::new(RwLock::new(0));
 		let client_id_clone = client_id.clone();
 
@@ -4445,12 +4467,15 @@ mod tests {
 		let success = Arc::new(RwLock::new(false));
 		let success_clone = success.clone();
 
+		evh.set_on_close(move |_conn_data, _, _| Ok(()))?;
+		evh.set_on_panic(move || Ok(()))?;
+
 		evh.set_on_accept(move |conn_data, _, _| {
 			info!("accept {}", conn_data.get_connection_id())?;
 
 			let mut client_id = lockw!(client_id)?;
 			*client_id = conn_data.get_connection_id();
-
+			warn!("cid={}", *client_id)?;
 			Ok(())
 		})?;
 
@@ -4461,11 +4486,13 @@ mod tests {
 				buf.len()
 			)?;
 			if conn_data.get_connection_id() == *(lockr!(client_id_clone)?) {
+				warn!("client1 on_read")?;
 				*(lockw!(server_on_read_count)?) += buf.len();
 				if !*(lockr!(success)?) {
 					std::thread::sleep(std::time::Duration::from_millis(10));
 				}
 			} else {
+				warn!("================client2 on read")?;
 				assert!(*(lockr!(server_on_read_count)?) < msg_len);
 				*(lockw!(success)?) = true;
 				if panic {
@@ -4480,6 +4507,17 @@ mod tests {
 
 		evh.start()?;
 		evh.add_listener_handles(handles, None)?;
+
+		std::thread::sleep(std::time::Duration::from_millis(1000));
+
+		let stream = TcpStream::connect(addr.clone())?;
+		let handle2 = stream.as_raw_fd();
+
+		std::thread::sleep(std::time::Duration::from_millis(1000));
+
+		let stream = TcpStream::connect(addr.clone())?;
+		let handle = stream.as_raw_fd();
+
 		let conn_info2 = evh.add_handle(handle2, None)?;
 		let conn_info = evh.add_handle(handle, None)?;
 
@@ -4490,14 +4528,31 @@ mod tests {
 		conn_info.write(&msg)?;
 		conn_info2.write(&[0, 0, 0])?;
 
+		let start = std::time::Instant::now();
 		loop {
+			if start.elapsed().as_secs() > 30 {
+				assert!(false);
+			}
 			std::thread::sleep(std::time::Duration::from_millis(1));
 			if *(lockr!(server_on_read_count_clone)?) >= msg.len() {
 				break;
 			}
 		}
 
+		std::thread::sleep(std::time::Duration::from_millis(100));
 		assert_eq!(*(lockr!(server_on_read_count_clone)?), msg.len());
+
+		let start = std::time::Instant::now();
+		loop {
+			if start.elapsed().as_secs() > 30 {
+				assert!(false);
+			}
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if *(lockr!(success_clone)?) {
+				break;
+			}
+		}
+
 		assert!(*lockr!(success_clone)?);
 		Ok(())
 	}
