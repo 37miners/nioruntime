@@ -288,8 +288,6 @@ impl LogItem {
 	}
 }
 
-pub struct HttpStatsAggregation {}
-
 #[derive(Clone)]
 pub struct HttpStatsConfig {
 	pub request_log_config: LogConfig,
@@ -306,8 +304,8 @@ pub struct StatRecord {
 	pub conns: u64,
 	pub connects: u64,
 	pub disconnects: u64,
-	pub idle_disc: u64,
-	pub rtimeout: u64,
+	pub connect_timeouts: u64,
+	pub read_timeouts: u64,
 	pub timestamp: u128,
 	pub prev_timestamp: u128,
 	pub startup_time: u128,
@@ -321,8 +319,8 @@ impl StatRecord {
 			conns: 0,
 			connects: 0,
 			disconnects: 0,
-			idle_disc: 0,
-			rtimeout: 0,
+			connect_timeouts: 0,
+			read_timeouts: 0,
 			timestamp: 0,
 			prev_timestamp: 0,
 			startup_time,
@@ -332,20 +330,34 @@ impl StatRecord {
 	fn reset(&mut self) -> Result<(), Error> {
 		self.requests = 0;
 		self.dropped_log = 0;
-		self.conns = 0;
 		self.connects = 0;
 		self.disconnects = 0;
-		self.idle_disc = 0;
-		self.rtimeout = 0;
+		self.connect_timeouts = 0;
+		self.read_timeouts = 0;
 		self.prev_timestamp = self.timestamp;
 		Ok(())
+	}
+
+	pub fn get_bytes(&self) -> Vec<u8> {
+		let mut ret = vec![];
+		ret.append(&mut self.requests.to_be_bytes().to_vec());
+		ret.append(&mut self.dropped_log.to_be_bytes().to_vec());
+		ret.append(&mut self.conns.to_be_bytes().to_vec());
+		ret.append(&mut self.connects.to_be_bytes().to_vec());
+		ret.append(&mut self.disconnects.to_be_bytes().to_vec());
+		ret.append(&mut self.connect_timeouts.to_be_bytes().to_vec());
+		ret.append(&mut self.read_timeouts.to_be_bytes().to_vec());
+		ret.append(&mut (self.timestamp as u64).to_be_bytes().to_vec());
+		ret.append(&mut (self.prev_timestamp as u64).to_be_bytes().to_vec());
+		ret.append(&mut (self.startup_time as u64).to_be_bytes().to_vec());
+		ret
 	}
 }
 
 #[derive(Clone)]
 pub struct HttpStats {
 	config: HttpStatsConfig,
-	_db: Arc<RwLock<Store>>,
+	db: Arc<RwLock<Store>>,
 	request_log: Arc<RwLock<Log>>,
 	_startup_time: u128,
 	stat_record_accumulator: Arc<RwLock<StatRecord>>,
@@ -360,7 +372,7 @@ impl Debug for HttpStats {
 // stats data schema:
 // prefix of 0 - sever start timestamps
 // prefix of 1 - stats entries (every 5 seconds (configurable)) requests, dropped log, conns
-// starting, connects, disconnects, idle_disc, rtimeout, server start timestamp to
+// starting, connects, disconnects, connect_timeout, read_timeouts, server start timestamp to
 // link back, timestamp, prev_timestamp
 impl HttpStats {
 	pub fn new(config: HttpStatsConfig) -> Result<Self, Error> {
@@ -428,6 +440,11 @@ impl HttpStats {
 					None => break,
 				}
 				count += 1;
+
+				if count > 10 {
+					// only show first 10
+					break;
+				}
 			}
 		}
 
@@ -449,6 +466,11 @@ impl HttpStats {
 					None => break,
 				}
 				count += 1;
+
+				if count > 10 {
+					// only show first 10
+					break;
+				}
 			}
 		}
 
@@ -458,7 +480,7 @@ impl HttpStats {
 
 		Ok(Self {
 			config,
-			_db: db,
+			db,
 			request_log,
 			_startup_time: startup_time,
 			stat_record_accumulator,
@@ -605,8 +627,17 @@ impl HttpStats {
 		}
 
 		let mut drop_count = 0;
+		let mut connects = 0;
+		let mut disconnects = 0;
+		let mut read_timeouts = 0;
+		let mut connect_timeouts = 0;
+
 		for log_event in log_events {
 			drop_count += log_event.dropped_count;
+			connects += log_event.connect_count;
+			disconnects += log_event.disconnect_count;
+			read_timeouts += log_event.read_timeout_count;
+			connect_timeouts += log_event.connect_timeout_count;
 		}
 
 		if drop_count > 0 && self.config.debug_log_queue {
@@ -618,7 +649,14 @@ impl HttpStats {
 		{
 			let mut stat_record_accumulator = lockw!(self.stat_record_accumulator)?;
 			(*stat_record_accumulator).dropped_log += drop_count;
+			(*stat_record_accumulator).connects += connects;
+			(*stat_record_accumulator).disconnects += disconnects;
+			(*stat_record_accumulator).read_timeouts += read_timeouts;
+			(*stat_record_accumulator).connect_timeouts += connect_timeouts;
 			(*stat_record_accumulator).requests += requests;
+			(*stat_record_accumulator).conns += connects;
+			(*stat_record_accumulator).conns =
+				(*stat_record_accumulator).conns.saturating_sub(disconnects);
 		}
 
 		Ok(())
@@ -640,7 +678,7 @@ impl HttpStats {
 		Ok(())
 	}
 
-	pub fn idle_disconnect(&mut self) -> Result<(), Error> {
+	pub fn connect_timeout(&mut self) -> Result<(), Error> {
 		Ok(())
 	}
 
@@ -648,7 +686,37 @@ impl HttpStats {
 		Ok(())
 	}
 
-	pub fn get_stats_aggregation(&self, _offset: u64) -> Result<HttpStatsAggregation, Error> {
-		Ok(HttpStatsAggregation {})
+	pub fn get_stats_aggregation(
+		&self,
+		offset_start: u64,
+		offset_end: u64,
+	) -> Result<Vec<StatRecord>, Error> {
+		let db = lockw!(self.db)?;
+		let batch = db.batch()?;
+
+		let mut itt = batch.iter_rev(&([1u8])[..], |_k, v| {
+			let mut cursor = Cursor::new(v.to_vec());
+			cursor.set_position(0);
+			let mut reader = BinReader::new(&mut cursor);
+			Ok(StatRecord::read(&mut reader)?)
+		})?;
+
+		let mut count = 0;
+		let mut ret = vec![];
+		loop {
+			match itt.next() {
+				Some(record) => {
+					if count > offset_end {
+						break;
+					}
+					if count >= offset_start {
+						ret.push(record);
+					}
+				}
+				None => break,
+			}
+			count += 1;
+		}
+		Ok(ret)
 	}
 }

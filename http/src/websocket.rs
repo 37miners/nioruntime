@@ -22,9 +22,6 @@ use std::convert::TryInto;
 
 info!();
 
-pub type WsHandler =
-	fn(conn_data: &ConnectionData, message: WebSocketMessage) -> Result<bool, Error>;
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum WebSocketMessageType {
 	Text,
@@ -391,11 +388,18 @@ pub fn send_websocket_message(
 }
 
 // returns true on close, otherwise, false
-pub fn process_websocket_data(
+pub fn process_websocket_data<WsHandler>(
 	conn_data: &ConnectionData,
 	buffer: &[u8],
 	ws_handler: &WsHandler,
-) -> Result<(bool, usize), Error> {
+) -> Result<(bool, usize), Error>
+where
+	WsHandler: Fn(&ConnectionData, WebSocketMessage) -> Result<bool, Error>, //+ Send
+	                                                                         //+ 'static
+	                                                                         //+ Clone
+	                                                                         //+ Sync
+	                                                                         //+ Unpin
+{
 	let mut ret = false;
 	let len = buffer.len();
 	debug!("websocket.rs data[{}]", len)?;

@@ -272,3 +272,8 @@ args:
         long: stats_frequency
         takes_value: true
         value_name: stats_frequency
+    - admin_uri:
+        help: The URI of the admin console. If not specified a random url will be generated. It is important that this URL not be revealed to others.
+        long: admin_uri
+        takes_value: true
+        value_name: admin_uri

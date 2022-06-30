@@ -255,7 +255,9 @@ pub struct ConnectionInfo {
 	pub proxy_info: Option<ProxyInfo>,
 	pub api_context: Option<ApiContext>,
 	pub health_check_info: Option<(ProxyEntry, SocketAddr)>,
+	pub websocket_uri: Option<Vec<u8>>,
 	pub is_websocket: bool,
+	pub is_admin: bool,
 }
 
 impl ConnectionInfo {
@@ -272,6 +274,8 @@ impl ConnectionInfo {
 			api_context: None,
 			health_check_info: None,
 			is_websocket: false,
+			websocket_uri: None,
+			is_admin: false,
 		}
 	}
 
@@ -288,6 +292,8 @@ impl ConnectionInfo {
 			api_context: None,
 			health_check_info: None,
 			is_websocket: false,
+			websocket_uri: None,
+			is_admin: false,
 		}
 	}
 
@@ -512,6 +518,10 @@ pub struct ThreadContext {
 	pub next_log_slab: u64,
 	pub stat_handler: StatHandler,
 	pub dropped_log_items: u64,
+	pub connects: u64,
+	pub disconnects: u64,
+	pub connect_timeouts: u64,
+	pub read_timeouts: u64,
 }
 
 impl ThreadContext {
@@ -605,6 +615,10 @@ impl ThreadContext {
 			next_log_slab: 0,
 			stat_handler: stat_handler.clone(),
 			dropped_log_items: 0,
+			connects: 0,
+			disconnects: 0,
+			connect_timeouts: 0,
+			read_timeouts: 0,
 		})
 	}
 }
@@ -1535,6 +1549,7 @@ pub struct HttpConfig {
 	pub lmdb_dir: String,
 	pub debug_show_stats: bool,
 	pub stats_frequency: u64,
+	pub admin_uri: Vec<u8>,
 }
 
 impl Default for HttpConfig {
@@ -1604,6 +1619,7 @@ impl Default for HttpConfig {
 			main_log_queue_size: 10_000,
 			thread_log_queue_size: 2_000,
 			stats_frequency: 10_000,
+			admin_uri: vec![],
 			request_log_config: LogConfig {
 				file_path: Some("~/.niohttpd/logs/request.log".to_string()),
 				show_log_level: false,

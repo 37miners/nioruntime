@@ -17,11 +17,14 @@ use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
 };
-use crate::stats::{LOG_ITEM_SIZE, MAX_LOG_STR_LEN};
+use crate::stats::{HttpStats, LOG_ITEM_SIZE, MAX_LOG_STR_LEN};
 use crate::types::*;
-use crate::websocket::{process_websocket_data, WsHandler};
+use crate::websocket::{
+	process_websocket_data, send_websocket_message, WebSocketMessage, WebSocketMessageType,
+};
 use crate::LogItem;
 use include_dir::include_dir;
+use nioruntime_deps::base58::ToBase58;
 use nioruntime_deps::base64;
 use nioruntime_deps::bytefmt;
 use nioruntime_deps::chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc, Weekday};
@@ -41,12 +44,14 @@ use nioruntime_deps::nix::sys::socket::{
 use nioruntime_deps::num_format::{Locale, ToFormattedString};
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_deps::rand;
+use nioruntime_deps::rand_core::{OsRng, RngCore};
 use nioruntime_deps::sha1::Sha1;
 use nioruntime_deps::sha2::{Digest, Sha256};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::{ConnectionContext, ConnectionData};
 use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
+use nioruntime_util::bytes_eq;
 use nioruntime_util::bytes_find;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::StaticHash;
@@ -70,6 +75,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 info!();
 
+const WS_ADMIN_GET_STATS_REQUEST: u8 = 0u8;
+const WS_ADMIN_GET_STATS_RESPONSE: u8 = 0u8;
+
 const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
 const SEPARATOR: &str = "\
 ----------\
@@ -82,7 +90,7 @@ const SEPARATOR: &str = "\
 ----------\
 ----------";
 
-pub struct HttpServer<ApiHandler> {
+pub struct HttpServer<ApiHandler, WsHandler> {
 	config: HttpConfig,
 	_listeners: Vec<TcpListener>,
 	api_config: Arc<RwLock<HttpApiConfig>>,
@@ -90,9 +98,10 @@ pub struct HttpServer<ApiHandler> {
 	ws_handler: Option<Pin<Box<WsHandler>>>,
 	stat_handler: StatHandler,
 	evh_params: Option<EvhParams>,
+	internal_files: HashMap<String, Vec<u8>>,
 }
 
-impl<ApiHandler> HttpServer<ApiHandler>
+impl<ApiHandler, WsHandler> HttpServer<ApiHandler, WsHandler>
 where
 	ApiHandler: Fn(&ConnectionData, &HttpHeaders, &mut ApiContext) -> Result<(), Error>
 		+ Send
@@ -100,8 +109,14 @@ where
 		+ Clone
 		+ Sync
 		+ Unpin,
+	WsHandler: Fn(&ConnectionData, &Vec<u8>, WebSocketMessage) -> Result<bool, Error>
+		+ Send
+		+ 'static
+		+ Clone
+		+ Sync
+		+ Unpin,
 {
-	pub fn new(config: HttpConfig) -> Result<Self, Error> {
+	pub fn new(mut config: HttpConfig) -> Result<Self, Error> {
 		Self::check_config(&config)?;
 
 		let home_dir = match dirs::home_dir() {
@@ -141,6 +156,25 @@ where
 			config.stats_frequency,
 		)?;
 
+		if config.admin_uri.len() == 0 {
+			let mut key = [0u8; 32];
+			OsRng.fill_bytes(&mut key);
+			let random_u64_1 = OsRng.next_u64();
+			let random_u64_2 = OsRng.next_u64();
+			let random_u64_3 = OsRng.next_u64();
+			let random_u64_4 = OsRng.next_u64();
+			let mut rand_bytes = vec![];
+			rand_bytes.append(&mut random_u64_1.to_be_bytes().to_vec());
+			rand_bytes.append(&mut random_u64_2.to_be_bytes().to_vec());
+			rand_bytes.append(&mut random_u64_3.to_be_bytes().to_vec());
+			rand_bytes.append(&mut random_u64_4.to_be_bytes().to_vec());
+			let mut rand_bytes = rand_bytes.to_base58().as_bytes().to_vec();
+			let mut admin_uri = vec!['/' as u8];
+			admin_uri.append(&mut rand_bytes);
+			admin_uri.push('/' as u8);
+			config.admin_uri = admin_uri;
+		}
+
 		Ok(Self {
 			config,
 			_listeners: vec![],
@@ -149,6 +183,7 @@ where
 			ws_handler: None,
 			evh_params: None,
 			stat_handler,
+			internal_files: HashMap::new(),
 		})
 	}
 
@@ -162,6 +197,8 @@ where
 	}
 
 	pub fn start(&mut self) -> Result<(), Error> {
+		self.init_internal()?;
+
 		let mut evh = EventHandler::new(self.config.evh_config)?;
 
 		let evh_params = evh.get_evh_params();
@@ -191,6 +228,7 @@ where
 		let api_handler = self.api_handler.clone();
 		let ws_handler = self.ws_handler.clone();
 		let stat_handler = self.stat_handler.clone();
+		let internal = self.internal_files.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
 			let thread_context = Self::init_user_data(user_data, &config1, &stat_handler)?;
@@ -207,6 +245,7 @@ where
 				&slabs,
 				ws_handler.as_ref(),
 				&stat_handler,
+				&internal,
 			) {
 				Ok((nconns, nupdates)) => (nconns, nupdates),
 				Err(e) => {
@@ -714,6 +753,14 @@ where
 			)[..],
 		)?;
 
+		info_no_ts!("{}", SEPARATOR)?;
+		info_no_ts!(
+			"{}:\nhttp://127.0.0.1:8080{}",
+			"admin_uri".yellow(),
+			std::str::from_utf8(&self.config.admin_uri)?
+		)?;
+		info_no_ts!("{}", SEPARATOR)?;
+
 		self.debug_flag("--show_request_headers", self.config.show_request_headers)?;
 		self.debug_flag("--show_response_headers", self.config.show_response_headers)?;
 		self.debug_flag("--debug", self.config.debug)?;
@@ -754,6 +801,22 @@ where
 			let root_dir = root_dir.to_string();
 			let contents = file.contents();
 			Self::create_file_from_bytes(file_path, root_dir, contents)?;
+		}
+
+		Ok(())
+	}
+
+	fn init_internal(&mut self) -> Result<(), Error> {
+		for file in include_dir!("$CARGO_MANIFEST_DIR/src/resources/internal").files() {
+			let file_name = file
+				.path()
+				.file_name()
+				.unwrap()
+				.to_str()
+				.unwrap()
+				.to_string();
+			let contents = file.contents();
+			self.internal_files.insert(file_name, contents.to_vec());
 		}
 
 		Ok(())
@@ -873,6 +936,7 @@ where
 		next_log_slab: &mut u64,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
+		internal: &HashMap<String, Vec<u8>>,
 	) -> Result<
 		(
 			bool,
@@ -953,6 +1017,7 @@ where
 				next_log_slab,
 				stat_handler,
 				dropped_log_items,
+				internal,
 			)?;
 		}
 
@@ -972,6 +1037,7 @@ where
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
 		stat_handler: &StatHandler,
+		internal: &HashMap<String, Vec<u8>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let now = SystemTime::now();
 		Self::process_async(ctx, thread_context, conn_data, config)?;
@@ -1053,6 +1119,7 @@ where
 			&mut thread_context.next_log_slab,
 			stat_handler,
 			&mut thread_context.dropped_log_items,
+			internal,
 		)?;
 
 		if was_post_await {
@@ -1123,6 +1190,7 @@ where
 					&mut thread_context.next_log_slab,
 					stat_handler,
 					&mut thread_context.dropped_log_items,
+					internal,
 				)?;
 
 				match nconn {
@@ -1183,6 +1251,7 @@ where
 				&mut thread_context.next_log_slab,
 				stat_handler,
 				&mut thread_context.dropped_log_items,
+				internal,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1222,6 +1291,7 @@ where
 		next_log_slab: &mut u64,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
+		internal: &HashMap<String, Vec<u8>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1263,6 +1333,7 @@ where
 				next_log_slab,
 				stat_handler,
 				dropped_log_items,
+				internal,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1446,8 +1517,9 @@ where
 		sha1: &mut Sha1,
 	) -> Result<(), Error> {
 		let hash = format!("{}{}", key, WEBSOCKET_GUID);
+		let mut sha1 = sha1.clone();
 		sha1.update(hash.as_bytes());
-		let b = sha1.clone().finalize();
+		let b = sha1.finalize();
 		let msg = format!(
 			"HTTP/1.1 101 Switching Protocols\r\n\
 Upgrade: websocket\r\n\
@@ -1466,11 +1538,35 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		conn_info: &mut ConnectionInfo,
 		buffer: &[u8],
 		sha1: &mut Sha1,
-		ws_handler: &WsHandler,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
+		internal_handler: Option<&dyn Fn(&ConnectionData, WebSocketMessage) -> Result<bool, Error>>,
+		config: &HttpConfig,
 	) -> Result<(bool, usize), Error> {
 		Ok(match conn_info.is_websocket {
 			true => {
-				let (close, len) = process_websocket_data(conn_data, buffer, ws_handler)?;
+				let ws_handler = ws_handler.clone();
+				let (close, len) =
+					process_websocket_data(conn_data, buffer, &move |connection_data,
+					                                                 web_socket_message|
+					      -> Result<bool, Error> {
+						let res = match internal_handler {
+							Some(internal_handler_fn) => {
+								(internal_handler_fn)(connection_data, web_socket_message)?
+							}
+							None => match ws_handler {
+								Some(ws_handler) => ws_handler(
+									connection_data,
+									conn_info.websocket_uri.as_ref().unwrap_or(&vec![]),
+									web_socket_message,
+								)?,
+								None => {
+									warn!("unexpected no internal or extenral handler")?;
+									false
+								}
+							},
+						};
+						Ok(res)
+					})?;
 				if close {
 					conn_data.close()?;
 				}
@@ -1478,7 +1574,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			}
 			false => match headers {
 				Some(headers) => {
-					if headers.has_websocket_upgrade() {
+					let uri = headers.get_uri();
+					if bytes_find(uri, &config.admin_uri) == Some(0) && internal_handler.is_none() {
+						(false, 0)
+					} else if headers.has_websocket_upgrade() {
 						let sec_key = headers.get_header_value(SEC_WEBSOCKET_KEY_BYTES)?;
 						match sec_key {
 							Some(sec_key) => {
@@ -1489,6 +1588,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&from_utf8(&sec_key[0])?.to_string(),
 										sha1,
 									)?;
+									conn_info.websocket_uri = Some(uri.to_vec());
 									(true, headers.len())
 								} else {
 									(false, 0)
@@ -1503,6 +1603,38 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				None => (false, 0),
 			},
 		})
+	}
+
+	fn process_admin_ws(
+		conn_data: &ConnectionData,
+		msg: WebSocketMessage,
+		http_stats: &HttpStats,
+	) -> Result<bool, Error> {
+		match msg.payload[0] {
+			WS_ADMIN_GET_STATS_REQUEST => {
+				let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+				let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
+				let records = http_stats.get_stats_aggregation(start, end)?;
+				let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
+				payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
+				for record in records {
+					payload.append(&mut record.get_bytes());
+				}
+
+				send_websocket_message(
+					conn_data,
+					&WebSocketMessage {
+						payload,
+						mtype: WebSocketMessageType::Binary,
+						mask: false,
+					},
+				)?;
+			}
+			_ => {
+				warn!("unknown ws admin command. msg = {:?}", msg)?;
+			}
+		}
+		Ok(true)
 	}
 
 	fn process_buffer(
@@ -1534,6 +1666,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		next_log_slab: &mut u64,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
+		internal: &HashMap<String, Vec<u8>>,
 	) -> Result<
 		(
 			usize,
@@ -1542,16 +1675,33 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		),
 		Error,
 	> {
-		match ws_handler {
-			Some(ws_handler) => {
-				let (is_ws, len) =
-					Self::check_websocket(conn_data, None, conn_info, buffer, sha1, &ws_handler)?;
+		if conn_info.is_admin && conn_info.is_websocket {
+			let (_is_ws, len) = Self::check_websocket(
+				conn_data,
+				None,
+				conn_info,
+				buffer,
+				sha1,
+				ws_handler,
+				Some(&move |conn_data, msg| {
+					Self::process_admin_ws(conn_data, msg, &stat_handler.http_stats)
+				}),
+				config,
+			)?;
+			return Ok((len, None, None));
+		} else if conn_info.is_websocket {
+			match ws_handler {
+				Some(_) => {
+					let (is_ws, len) = Self::check_websocket(
+						conn_data, None, conn_info, buffer, sha1, ws_handler, None, config,
+					)?;
 
-				if is_ws {
-					return Ok((len, None, None));
+					if is_ws {
+						return Ok((len, None, None));
+					}
 				}
+				None => {}
 			}
-			None => {}
 		}
 
 		let headers = match HttpHeaders::new(buffer, config, header_map, key_buf, value_buf) {
@@ -1727,14 +1877,16 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					)?;
 				}
 				match ws_handler {
-					Some(ws_handler) => {
+					Some(_) => {
 						let (is_ws, len) = Self::check_websocket(
 							conn_data,
 							Some(&headers),
 							conn_info,
 							buffer,
 							sha1,
-							&ws_handler,
+							ws_handler,
+							None,
+							config,
 						)?;
 						if is_ws {
 							return Ok((len, None, None));
@@ -1782,9 +1934,34 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					return Ok((0, None, None));
 				}
 
-				Self::check_expect_100_continue(&headers, conn_data)?;
+				// check for api mapping/extension
+				let was_api = {
+					Self::process_api(
+						now,
+						buffer,
+						&headers,
+						api_config,
+						api_handler,
+						async_connections,
+						conn_info,
+						conn_data,
+						temp_dir,
+						slabs,
+						log_slabs,
+						next_log_slab,
+						dropped_log_items,
+						config,
+						stat_handler,
+					)?
+				};
 
-				let range: Option<(usize, usize)> = if headers.has_range() {
+				if !was_api {
+					Self::check_expect_100_continue(&headers, conn_data)?;
+				}
+
+				let range: Option<(usize, usize)> = if was_api {
+					None
+				} else if headers.has_range() {
 					let range = &headers.get_header_value(RANGE_BYTES)?;
 					match range {
 						Some(range) => {
@@ -1818,7 +1995,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				};
 				let mut key = None;
 
-				let (was_proxy, nconn, update_info) = {
+				let (was_proxy, nconn, update_info) = if was_api {
+					(false, None, None)
+				} else {
 					let (was_proxy, api_context, nconn, update_info) = Self::process_proxy_request(
 						conn_data,
 						config,
@@ -1851,29 +2030,30 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					(was_proxy, nconn, update_info)
 				};
 
-				// check for api mapping/extension
-				let was_api = {
-					Self::process_api(
+				let was_admin = if !was_api && !was_proxy {
+					let (is_admin, is_ws, clen) = Self::process_admin_request(
 						now,
 						buffer,
-						was_proxy,
 						&headers,
-						api_config,
-						api_handler,
-						async_connections,
-						conn_info,
 						conn_data,
-						temp_dir,
-						slabs,
-						log_slabs,
-						next_log_slab,
-						dropped_log_items,
 						config,
 						stat_handler,
-					)?
+						internal,
+						conn_info,
+						sha1,
+						ws_handler,
+					)?;
+
+					if is_admin && is_ws {
+						return Ok((clen, None, None));
+					}
+
+					is_admin
+				} else {
+					false
 				};
 
-				if !was_api && !was_proxy {
+				if !was_api && !was_proxy && !was_admin {
 					let if_modified_since = if headers.has_if_modified_since() {
 						headers.get_header_value(IF_MODIFIED_SINCE)?
 					} else {
@@ -2125,10 +2305,83 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		Ok((len, nconn, update_info))
 	}
 
+	fn process_admin_request(
+		_now: SystemTime,
+		buf: &[u8],
+		headers: &HttpHeaders,
+		conn_data: &ConnectionData,
+		config: &HttpConfig,
+		_stats: &StatHandler,
+		internal: &HashMap<String, Vec<u8>>,
+		conn_info: &mut ConnectionInfo,
+		sha1: &mut Sha1,
+		ws_handler: Option<&Pin<Box<WsHandler>>>,
+	) -> Result<(bool, bool, usize), Error> {
+		let request_uri = headers.get_uri();
+		if bytes_eq(request_uri, &config.admin_uri) {
+			// get_stats_aggregation
+			//let stat_record = stats.http_stats.get_stats_aggregation(0, 10)?;
+			//let mut content = format!("{:?}", stat_record);
+			let query = headers.get_query();
+
+			let content = if query.len() == 0 || bytes_eq(query, b"index") {
+				internal.get("index.html").unwrap().to_vec()
+			} else if bytes_eq(query, b"styles.css") {
+				internal.get("styles.css").unwrap().to_vec()
+			} else if bytes_eq(query, b"banner.png") {
+				internal.get("banner.png").unwrap().to_vec()
+			} else if bytes_eq(query, b"tableft.gif") {
+				internal.get("tableft.gif").unwrap().to_vec()
+			} else if bytes_eq(query, b"tabright.gif") {
+				internal.get("tabright.gif").unwrap().to_vec()
+			} else if bytes_eq(query, b"requests") {
+				internal.get("requests.html").unwrap().to_vec()
+			} else if bytes_eq(query, b"uptime") {
+				internal.get("uptime.html").unwrap().to_vec()
+			} else if bytes_eq(query, b"analytics") {
+				internal.get("analytics.html").unwrap().to_vec()
+			} else if bytes_eq(query, b"niohttpd") {
+				internal.get("niohttpd.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"jsbn") {
+				internal.get("jsbn.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"jsbn2") {
+				internal.get("jsbn2.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"ws") {
+				let (_ws, len) = Self::check_websocket(
+					conn_data,
+					Some(headers),
+					conn_info,
+					buf,
+					sha1,
+					ws_handler,
+					Some(&move |_conn_data, _msg| Ok(false)),
+					config,
+				)?;
+				conn_info.is_admin = true;
+				return Ok((true, true, len));
+			} else {
+				("unknown".as_bytes()).to_vec()
+			};
+
+			let response_prefix = format!(
+				"HTTP/1.1 200 Ok\r\nContent-Length: {}\r\n\r\n",
+				content.len(),
+			);
+			conn_data.write(response_prefix.as_bytes())?;
+			conn_data.write(&content)?;
+			if config.show_response_headers {
+				warn!("HTTP Response Headers:\n{}", response_prefix)?;
+			}
+
+			Ok((true, false, 0))
+		} else {
+			Ok((false, false, 0))
+		}
+	}
+
 	fn process_api(
 		now: SystemTime,
 		buf: &[u8],
-		was_proxy: bool,
 		headers: &HttpHeaders,
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
@@ -2144,9 +2397,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		stat_handler: &StatHandler,
 	) -> Result<bool, Error> {
 		let api_config = lockr!(api_config)?;
-		if was_proxy {
-			Ok(false)
-		} else if api_config.mappings.get(headers.get_uri()).is_some()
+		if api_config.mappings.get(headers.get_uri()).is_some()
 			|| api_config.extensions.get(headers.extension()).is_some()
 		{
 			match api_handler {
@@ -3414,6 +3665,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let handle = conn_data.get_handle();
 		debug!("on accept: {}, handle={}", id, handle)?;
 		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
+		thread_context.connects += 1;
 		insert_step_allocator(
 			conn_data.clone(),
 			&mut thread_context.active_connections,
@@ -3450,6 +3702,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					Some(conn_info) => {
 						match &conn_info.proxy_info {
 							Some(proxy_info) => {
+								// proxy connection
 								match thread_context
 									.idle_proxy_connections
 									.get_mut(&proxy_info.proxy_entry)
@@ -3498,7 +3751,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 									None => {}
 								}
 							}
-							None => {}
+							None => {
+								// regular connection
+								thread_context.disconnects += 1;
+							}
 						}
 
 						match &conn_info.api_context {
@@ -3676,20 +3932,21 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				i += 1;
 			}
 
-			if thread_context.dropped_log_items > 0 {
-				let le = LogEvent {
-					dropped_count: thread_context.dropped_log_items,
-					read_timeout_count: 0,
-					connect_timeout_count: 0,
-					connect_count: 0,
-					disconnect_count: 0,
-				};
-
-				queue.push_log_event(le)?;
-			}
+			let le = LogEvent {
+				dropped_count: thread_context.dropped_log_items,
+				read_timeout_count: thread_context.read_timeouts,
+				connect_timeout_count: thread_context.connect_timeouts,
+				connect_count: thread_context.connects,
+				disconnect_count: thread_context.disconnects,
+			};
+			queue.push_log_event(le)?;
 
 			thread_context.next_log_slab = 0;
 			thread_context.dropped_log_items = 0;
+			thread_context.read_timeouts = 0;
+			thread_context.connect_timeouts = 0;
+			thread_context.connects = 0;
+			thread_context.disconnects = 0;
 		}
 
 		Ok(())
@@ -3727,6 +3984,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				Some(connection) => {
 					if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
 						// read timeout
+						thread_context.read_timeouts += 1;
 						match &connection.conn_data {
 							Some(conn_data) => conn_data.close()?,
 							None => {
@@ -3738,6 +3996,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							>= config.connect_timeout * 1_000
 					{
 						// connect timeout
+						thread_context.connect_timeouts += 1;
 						match &connection.conn_data {
 							Some(conn_data) => conn_data.close()?,
 							None => {
@@ -3909,10 +4168,13 @@ fn populate_next<'a>(
 #[cfg(test)]
 mod test {
 	use crate::http::{clean, ConnectionData, HttpConfig, HttpServer};
+	use crate::send_websocket_message;
 	use crate::types::{
 		ApiContext, HealthCheck, HttpMethod, HttpVersion, ListenerType, ProxyConfig, ProxyEntry,
 		ProxyRotation, Upstream,
 	};
+	use crate::websocket::WebSocketMessage;
+	use crate::websocket::WebSocketMessageType;
 	use crate::HttpApiConfig;
 	use crate::HttpHeaders;
 	use nioruntime_deps::flate2::read::GzDecoder;
@@ -3931,6 +4193,7 @@ mod test {
 	use std::sync::{Arc, RwLock};
 	use std::thread::sleep;
 	use std::time::Duration;
+	use std::time::SystemTime;
 
 	debug!();
 
@@ -3986,6 +4249,7 @@ mod test {
 			assert_eq!(headers.get_method(), &HttpMethod::Get);
 			Ok(())
 		})?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		let mut mappings = HashSet::new();
 		mappings.insert(b"/api".to_vec());
 
@@ -4108,6 +4372,7 @@ mod test {
 
 			Ok(())
 		})?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		let mut mappings = HashSet::new();
 		mappings.insert(b"/api".to_vec());
 
@@ -4234,6 +4499,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			assert_eq!(headers.get_method(), &HttpMethod::Get);
 			Ok(())
 		})?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		let mut mappings = HashSet::new();
 		mappings.insert(b"/api".to_vec());
 
@@ -4327,6 +4593,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4449,6 +4716,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4578,6 +4846,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4684,6 +4953,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http1 = HttpServer::new(config1).unwrap();
 
 		http1.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http1.set_ws_handler(move |_, _, _| Ok(false))?;
 		http1.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4692,6 +4962,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http2 = HttpServer::new(config2).unwrap();
 
 		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http2.set_ws_handler(move |_, _, _| Ok(false))?;
 		http2.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4773,6 +5044,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut http = HttpServer::new(config).unwrap();
 
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_config(HttpApiConfig {
 			..Default::default()
 		})?;
@@ -4890,6 +5162,7 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 
 		let mut http = HttpServer::new(config).unwrap();
 
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |conn_data, _headers, ctx| {
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -4998,6 +5271,7 @@ Content-Length: 10\r\n\
 
 		let mut http = HttpServer::new(config).unwrap();
 
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |conn_data, _headers, ctx| {
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -5122,6 +5396,7 @@ Content-Length: 30\r\n\
 
 		let mut http = HttpServer::new(config).unwrap();
 
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |conn_data, headers, ctx| {
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -5293,6 +5568,7 @@ Content-Length: 30\r\n\
 
 		let mut http = HttpServer::new(config).unwrap();
 
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |conn_data, _headers, ctx| {
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -5486,6 +5762,7 @@ Content-Length: 30\r\n\
 
 		let mut http1 = HttpServer::new(config1).unwrap();
 
+		http1.set_ws_handler(move |_, _, _| Ok(false))?;
 		http1.set_api_handler(move |conn_data, headers, ctx| {
 			process_proxy_pipeline_request(conn_data, headers, ctx)?;
 			Ok(())
@@ -5500,6 +5777,7 @@ Content-Length: 30\r\n\
 		http1.start()?;
 
 		let mut http2 = HttpServer::new(config2).unwrap();
+		http2.set_ws_handler(move |_, _, _| Ok(false))?;
 
 		http2.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		http2.set_api_config(HttpApiConfig {
@@ -5631,6 +5909,7 @@ Content-Length: 30\r\n\
 
 		let mut http = HttpServer::new(config).unwrap();
 
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |conn_data, _headers, ctx| {
 			ctx.set_async()?;
 			let mut ctx = ctx.clone();
@@ -5799,7 +6078,9 @@ Content-Length: 30\r\n\
 		};
 
 		let mut http1 = HttpServer::new(config1).unwrap();
+		http1.set_ws_handler(move |_, _, _| Ok(false))?;
 		let mut http2 = HttpServer::new(config2).unwrap();
+		http2.set_ws_handler(move |_, _, _| Ok(false))?;
 
 		let mut mappings = HashSet::new();
 		mappings.insert("/api_proxy_post.html".as_bytes().to_vec());
@@ -5972,6 +6253,101 @@ Content-Length: 30\r\n\
 	}
 
 	#[test]
+	fn test_websocket() -> Result<(), Error> {
+		let root_dir = "./.test_websocket.nio";
+		setup_test_dir(root_dir)?;
+
+		let port = 8999;
+
+		let config = HttpConfig {
+			listeners: vec![(
+				ListenerType::Plain,
+				SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?,
+				None,
+			)],
+			webroot: format!("{}/www", root_dir).as_bytes().to_vec(),
+			mainlog: format!("{}/logs/mainlog.log", root_dir),
+			lmdb_dir: format!("{}/lmdb", root_dir),
+			request_log_config: LogConfig {
+				file_path: Some(format!("{}/logs/requestlog.log", root_dir)),
+				..Default::default()
+			},
+			temp_dir: format!("{}/tmp", root_dir),
+			debug: true,
+			show_request_headers: true,
+			..Default::default()
+		};
+
+		let mut http = HttpServer::new(config).unwrap();
+		let x = Arc::new(RwLock::new(false));
+		let x_clone = x.clone();
+		http.set_ws_handler(move |conn_data, uri, msg| {
+			info!("uri={}", std::str::from_utf8(uri)?)?;
+			assert_eq!(uri, &(b"/myws".to_vec()));
+			assert_eq!(msg.payload, &[1]);
+			send_websocket_message(
+				conn_data,
+				&WebSocketMessage {
+					payload: vec![1, 2, 3, 4, 5],
+					mtype: WebSocketMessageType::Text,
+					mask: false,
+				},
+			)?;
+			let mut x = lockw!(x)?;
+			*x = true;
+			Ok(true)
+		})?;
+		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
+		let mut mappings = HashSet::new();
+		mappings.insert(b"/api".to_vec());
+
+		http.set_api_config(HttpApiConfig {
+			mappings,
+			..Default::default()
+		})?;
+		http.start()?;
+
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
+		strm.write(
+			b"GET /myws HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: 123456\r\n\r\n",
+		)?;
+
+		const SIMPLE_WS_MESSAGE: &[u8] = &[130, 1, 1]; // binary data with a single byte of data, unmasked
+		strm.write(SIMPLE_WS_MESSAGE)?;
+		let start = SystemTime::now();
+		loop {
+			std::thread::sleep(std::time::Duration::from_millis(1));
+			if start.elapsed()?.as_secs() > 30 {
+				assert!(false);
+			}
+			if *lockr!(x_clone)? {
+				break;
+			}
+		}
+
+		let mut buf = [0u8; 10000];
+		let len = strm.read(&mut buf)?;
+
+		assert!(len >= 11);
+		assert_eq!(buf[len - 1], 5);
+		assert_eq!(buf[len - 2], 4);
+		assert_eq!(buf[len - 3], 3);
+		assert_eq!(buf[len - 4], 2);
+		assert_eq!(buf[len - 5], 1);
+		assert_eq!(buf[len - 6], 5);
+		assert_eq!(buf[len - 7], 129);
+		assert_eq!(buf[len - 8], 10);
+		assert_eq!(buf[len - 9], 13);
+		assert_eq!(buf[len - 10], 10);
+		assert_eq!(buf[len - 11], 13);
+
+		assert!(*lockr!(x_clone)?);
+
+		Ok(())
+	}
+
+	#[test]
 	fn test_gzip() -> Result<(), Error> {
 		let root_dir = "./.test_gzip.nio";
 		setup_test_dir(root_dir)?;
@@ -6001,7 +6377,7 @@ Content-Length: 30\r\n\
 		};
 
 		let mut http = HttpServer::new(config).unwrap();
-
+		http.set_ws_handler(move |_, _, _| Ok(false))?;
 		http.set_api_handler(move |_conn_data, _headers, _ctx| Ok(()))?;
 		let mut mappings = HashSet::new();
 		mappings.insert(b"/api".to_vec());

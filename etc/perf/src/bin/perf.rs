@@ -529,6 +529,8 @@ fn main() -> Result<(), Error> {
 				extensions,
 			})?;
 
+			http.set_ws_handler(move |_conn_data, _uri, _msg| Ok(true))?;
+
 			http.set_api_handler(move |conn_data, _, ctx| {
 				let conn_data = conn_data.clone();
 				let mut ctx = ctx.clone();

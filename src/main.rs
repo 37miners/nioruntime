@@ -670,6 +670,14 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let admin_uri = match args.is_present("admin_uri") {
+		true => args.value_of("admin_uri").unwrap().as_bytes().to_vec(),
+		false => match file_args.is_present("admin_uri") {
+			true => file_args.value_of("admin_uri").unwrap().as_bytes().to_vec(),
+			false => vec![],
+		},
+	};
+
 	let show_request_headers = match args.is_present("show_request_headers") {
 		true => true,
 		false => file_args.is_present("show_request_headers"),
@@ -842,6 +850,7 @@ fn real_main() -> Result<(), Error> {
 		debug_log_queue,
 		debug_show_stats,
 		proxy_config,
+		admin_uri,
 		request_log_config: LogConfig {
 			file_path: Some(requestlog),
 			show_log_level: false,
@@ -906,11 +915,11 @@ fn real_main() -> Result<(), Error> {
 	}
 
 	if debug_websocket {
-		http.set_ws_handler(move |conn_data, message| {
+		http.set_ws_handler(move |conn_data, _uri, message| {
 			debug!(
 				"conn[{}] received a websocket message: {:?}",
 				conn_data.get_connection_id(),
-				message
+				message,
 			)?;
 			send_websocket_message(conn_data, &message)?;
 			Ok(true)
