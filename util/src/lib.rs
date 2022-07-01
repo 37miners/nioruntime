@@ -19,9 +19,11 @@ mod macros;
 pub mod ser;
 pub mod slabs;
 mod static_hash;
+mod static_queue;
 mod step_allocator;
 pub mod threadpool;
 
+pub use crate::static_queue::StaticQueue;
 pub use nioruntime_deps;
 use nioruntime_deps::futures;
 use nioruntime_deps::lazy_static;

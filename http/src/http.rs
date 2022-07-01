@@ -77,6 +77,9 @@ info!();
 
 const WS_ADMIN_GET_STATS_REQUEST: u8 = 0u8;
 const WS_ADMIN_GET_STATS_RESPONSE: u8 = 0u8;
+const WS_ADMIN_PING: u8 = 1u8;
+const WS_ADMIN_PONG: u8 = 1u8;
+const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST: u8 = 2u8;
 
 const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
 const SEPARATOR: &str = "\
@@ -873,6 +876,7 @@ where
 						None,
 						&mut thread_context.dropped_log_items,
 						config,
+						&mut thread_context.dropped_lat_sum,
 					)?;
 				}
 				None => {}
@@ -937,6 +941,7 @@ where
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
+		dropped_lat_sum: &mut u64,
 	) -> Result<
 		(
 			bool,
@@ -1018,6 +1023,7 @@ where
 				stat_handler,
 				dropped_log_items,
 				internal,
+				dropped_lat_sum,
 			)?;
 		}
 
@@ -1120,6 +1126,7 @@ where
 			stat_handler,
 			&mut thread_context.dropped_log_items,
 			internal,
+			&mut thread_context.dropped_lat_sum,
 		)?;
 
 		if was_post_await {
@@ -1191,6 +1198,7 @@ where
 					stat_handler,
 					&mut thread_context.dropped_log_items,
 					internal,
+					&mut thread_context.dropped_lat_sum,
 				)?;
 
 				match nconn {
@@ -1252,6 +1260,7 @@ where
 				stat_handler,
 				&mut thread_context.dropped_log_items,
 				internal,
+				&mut thread_context.dropped_lat_sum,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1292,6 +1301,7 @@ where
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
+		dropped_lat_sum: &mut u64,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1334,6 +1344,7 @@ where
 				stat_handler,
 				dropped_log_items,
 				internal,
+				dropped_lat_sum,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1404,6 +1415,7 @@ where
 		next_log_slab: &mut u64,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
+		dropped_lat_sum: &mut u64,
 	) -> Result<
 		(
 			bool,
@@ -1495,6 +1507,7 @@ where
 							next_log_slab,
 							stat_handler,
 							dropped_log_items,
+							dropped_lat_sum,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1610,31 +1623,90 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		msg: WebSocketMessage,
 		http_stats: &HttpStats,
 	) -> Result<bool, Error> {
-		match msg.payload[0] {
-			WS_ADMIN_GET_STATS_REQUEST => {
-				let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
-				let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
-				let records = http_stats.get_stats_aggregation(start, end)?;
-				let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
-				payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
-				for record in records {
-					payload.append(&mut record.get_bytes());
-				}
+		if msg.mtype == WebSocketMessageType::Close {
+			Ok(false)
+		} else {
+			if msg.payload.len() == 0 {
+				return Ok(false);
+			}
 
-				send_websocket_message(
-					conn_data,
-					&WebSocketMessage {
-						payload,
-						mtype: WebSocketMessageType::Binary,
-						mask: false,
-					},
-				)?;
+			match msg.payload[0] {
+				WS_ADMIN_GET_STATS_REQUEST => {
+					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+					let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
+					let records = http_stats.get_stats_aggregation(start, end)?;
+					let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
+					payload.append(
+						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+							.to_be_bytes())
+						.to_vec(),
+					);
+					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
+					for record in records {
+						payload.append(&mut record.get_bytes());
+					}
+
+					send_websocket_message(
+						conn_data,
+						&WebSocketMessage {
+							payload,
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						},
+					)?;
+				}
+				WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST => {
+					let timestamp = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+					let quantity = u64::from_be_bytes(msg.payload[9..17].try_into()?);
+					let records = http_stats.get_stats_aggregation_after(timestamp, quantity)?;
+					let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
+					payload.append(
+						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+							.to_be_bytes())
+						.to_vec(),
+					);
+					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
+					for record in records {
+						payload.append(&mut record.get_bytes());
+					}
+
+					send_websocket_message(
+						conn_data,
+						&WebSocketMessage {
+							payload,
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						},
+					)?;
+				}
+				WS_ADMIN_PING => {
+					let mut payload = vec![WS_ADMIN_PONG];
+					let records = http_stats.get_stats_aggregation(0, 2)?;
+					payload.append(
+						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+							.to_be_bytes())
+						.to_vec(),
+					);
+					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
+					for record in records {
+						payload.append(&mut record.get_bytes());
+					}
+
+					send_websocket_message(
+						conn_data,
+						&WebSocketMessage {
+							payload,
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						},
+					)?;
+				}
+				_ => {
+					warn!("unknown ws admin command. msg = {:?}", msg)?;
+				}
 			}
-			_ => {
-				warn!("unknown ws admin command. msg = {:?}", msg)?;
-			}
+			Ok(true)
 		}
-		Ok(true)
 	}
 
 	fn process_buffer(
@@ -1667,6 +1739,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
+		dropped_lat_sum: &mut u64,
 	) -> Result<
 		(
 			usize,
@@ -1738,6 +1811,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							next_log_slab,
 							stat_handler,
 							dropped_log_items,
+							dropped_lat_sum,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1776,6 +1850,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							next_log_slab,
 							stat_handler,
 							dropped_log_items,
+							dropped_lat_sum,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1814,6 +1889,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							next_log_slab,
 							stat_handler,
 							dropped_log_items,
+							dropped_lat_sum,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1853,6 +1929,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							next_log_slab,
 							stat_handler,
 							dropped_log_items,
+							dropped_lat_sum,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1924,6 +2001,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						next_log_slab,
 						stat_handler,
 						dropped_log_items,
+						dropped_lat_sum,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -1952,6 +2030,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						dropped_log_items,
 						config,
 						stat_handler,
+						dropped_lat_sum,
 					)?
 				};
 
@@ -2018,6 +2097,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						next_log_slab,
 						stat_handler,
 						dropped_log_items,
+						dropped_lat_sum,
 					)?;
 
 					match api_context {
@@ -2113,6 +2193,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						next_log_slab,
 						stat_handler,
 						dropped_log_items,
+						dropped_lat_sum,
 					) {
 						Ok(k) => {
 							key = k;
@@ -2149,6 +2230,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										next_log_slab,
 										stat_handler,
 										dropped_log_items,
+										dropped_lat_sum,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2187,6 +2269,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										next_log_slab,
 										stat_handler,
 										dropped_log_items,
+										dropped_lat_sum,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2225,6 +2308,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										next_log_slab,
 										stat_handler,
 										dropped_log_items,
+										dropped_lat_sum,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2264,6 +2348,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										next_log_slab,
 										stat_handler,
 										dropped_log_items,
+										dropped_lat_sum,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2395,6 +2480,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		dropped_log_items: &mut u64,
 		config: &HttpConfig,
 		stat_handler: &StatHandler,
+		dropped_lat_sum: &mut u64,
 	) -> Result<bool, Error> {
 		let api_config = lockr!(api_config)?;
 		if api_config.mappings.get(headers.get_uri()).is_some()
@@ -2490,6 +2576,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							None,
 							dropped_log_items,
 							config,
+							dropped_lat_sum,
 						)?;
 					}
 
@@ -2573,6 +2660,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		next_log_slab: &mut u64,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
+		dropped_lat_sum: &mut u64,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -2652,6 +2740,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			log_slabs,
 			next_log_slab,
 			dropped_log_items,
+			dropped_lat_sum,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -2691,6 +2780,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				log_slabs,
 				next_log_slab,
 				dropped_log_items,
+				dropped_lat_sum,
 			)?;
 
 			if found && !need_update {
@@ -2823,6 +2913,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		log_slabs: &mut SlabAllocator,
 		next_log_slab: &mut u64,
 		dropped_log_items: &mut u64,
+		dropped_lat_sum: &mut u64,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -2897,6 +2988,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								next_log_slab,
 								None,
 								dropped_log_items,
+								dropped_lat_sum,
 							)?;
 						} else {
 							Self::send_headers(
@@ -2929,6 +3021,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								next_log_slab,
 								None,
 								dropped_log_items,
+								dropped_lat_sum,
 							)?;
 						}
 						headers_sent = true;
@@ -3108,6 +3201,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					&mut 0,
 					Some(stat_handler),
 					&mut 0,
+					&mut 0,
 				)?;
 			} else {
 				ctx.set_response_code_logging(response_code)?;
@@ -3136,6 +3230,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					None,
 					&mut 0,
 					Some(stat_handler),
+					&mut 0,
 					&mut 0,
 				)?;
 			}
@@ -3467,6 +3562,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		next_log_slab: &mut u64,
 		stat_handler: Option<StatHandler>,
 		dropped_log_items: &mut u64,
+		dropped_lat_sum: &mut u64,
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -3644,6 +3740,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			stat_handler,
 			dropped_log_items,
 			config,
+			dropped_lat_sum,
 		)?;
 
 		Ok(())
@@ -3743,6 +3840,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 													None,
 													&mut thread_context.dropped_log_items,
 													config,
+													&mut thread_context.dropped_lat_sum,
 												)?;
 											}
 											None => {}
@@ -3889,6 +3987,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		_stat_handler: Option<StatHandler>,
 		dropped_log_items: &mut u64,
 		config: &HttpConfig,
+		dropped_lat_sum: &mut u64,
 	) -> Result<(), Error> {
 		match log_slabs {
 			Some(log_slabs) => {
@@ -3901,6 +4000,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					*next_log_slab += 1;
 				} else {
 					*dropped_log_items += 1;
+					*dropped_lat_sum += (SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros()
+						as u64) - log_item.start_micros;
 				}
 			}
 			None => {}
@@ -3938,6 +4039,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				connect_timeout_count: thread_context.connect_timeouts,
 				connect_count: thread_context.connects,
 				disconnect_count: thread_context.disconnects,
+				dropped_lat_sum: thread_context.dropped_lat_sum,
 			};
 			queue.push_log_event(le)?;
 
@@ -3947,6 +4049,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			thread_context.connect_timeouts = 0;
 			thread_context.connects = 0;
 			thread_context.disconnects = 0;
+			thread_context.dropped_lat_sum = 0;
 		}
 
 		Ok(())

@@ -70,6 +70,10 @@ hr {
 	background-position:100% -42px;
 	}
 
+.centered_cell {
+	text-align: center;
+}
+
 .table_heading {
 	background-color: #4A148C;
 	color: #FFFFFF;
@@ -81,4 +85,8 @@ hr {
 
 .table_odd {
 	background-color: #E4D6CD
+}
+
+.load_more:hover {
+	cursor: pointer;
 }

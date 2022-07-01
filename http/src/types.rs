@@ -469,6 +469,7 @@ pub struct LogEvent {
 	pub connect_timeout_count: u64,
 	pub connect_count: u64,
 	pub disconnect_count: u64,
+	pub dropped_lat_sum: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -522,6 +523,7 @@ pub struct ThreadContext {
 	pub disconnects: u64,
 	pub connect_timeouts: u64,
 	pub read_timeouts: u64,
+	pub dropped_lat_sum: u64,
 }
 
 impl ThreadContext {
@@ -619,11 +621,12 @@ impl ThreadContext {
 			disconnects: 0,
 			connect_timeouts: 0,
 			read_timeouts: 0,
+			dropped_lat_sum: 0,
 		})
 	}
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub enum HttpMethod {
 	Get,
 	Post,
@@ -653,7 +656,7 @@ impl Display for HttpMethod {
 	}
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum HttpVersion {
 	V10,
 	V11,

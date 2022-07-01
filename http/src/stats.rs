@@ -39,7 +39,7 @@ info!();
 pub const MAX_LOG_STR_LEN: usize = 128;
 pub const LOG_ITEM_SIZE: usize = MAX_LOG_STR_LEN * 5 + 28;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct LogItem {
 	pub http_method: HttpMethod,
 	pub http_version: HttpVersion,
@@ -309,6 +309,7 @@ pub struct StatRecord {
 	pub timestamp: u128,
 	pub prev_timestamp: u128,
 	pub startup_time: u128,
+	pub lat_sum_micros: u64,
 }
 
 impl StatRecord {
@@ -324,6 +325,7 @@ impl StatRecord {
 			timestamp: 0,
 			prev_timestamp: 0,
 			startup_time,
+			lat_sum_micros: 0,
 		}
 	}
 
@@ -335,6 +337,7 @@ impl StatRecord {
 		self.connect_timeouts = 0;
 		self.read_timeouts = 0;
 		self.prev_timestamp = self.timestamp;
+		self.lat_sum_micros = 0;
 		Ok(())
 	}
 
@@ -350,6 +353,7 @@ impl StatRecord {
 		ret.append(&mut (self.timestamp as u64).to_be_bytes().to_vec());
 		ret.append(&mut (self.prev_timestamp as u64).to_be_bytes().to_vec());
 		ret.append(&mut (self.startup_time as u64).to_be_bytes().to_vec());
+		ret.append(&mut (self.lat_sum_micros as u64).to_be_bytes().to_vec());
 		ret
 	}
 }
@@ -601,6 +605,7 @@ impl HttpStats {
 		}
 
 		let mut requests: u64 = log_items.len().try_into()?;
+		let mut lat_sum_micros = 0;
 		for log_item in log_items {
 			let uri = Self::from_utf8(&log_item.uri);
 			let query = Self::from_utf8(&log_item.query);
@@ -608,6 +613,7 @@ impl HttpStats {
 			let referer = Self::from_utf8(&log_item.referer);
 			let uri_requested = Self::from_utf8(&log_item.uri_requested);
 			let micro_diff = log_item.end_micros.saturating_sub(log_item.start_micros);
+			lat_sum_micros += micro_diff;
 			let response_code = log_item.response_code;
 
 			logger.log(
@@ -638,6 +644,7 @@ impl HttpStats {
 			disconnects += log_event.disconnect_count;
 			read_timeouts += log_event.read_timeout_count;
 			connect_timeouts += log_event.connect_timeout_count;
+			lat_sum_micros += log_event.dropped_lat_sum;
 		}
 
 		if drop_count > 0 && self.config.debug_log_queue {
@@ -657,6 +664,7 @@ impl HttpStats {
 			(*stat_record_accumulator).conns += connects;
 			(*stat_record_accumulator).conns =
 				(*stat_record_accumulator).conns.saturating_sub(disconnects);
+			(*stat_record_accumulator).lat_sum_micros += lat_sum_micros;
 		}
 
 		Ok(())
@@ -684,6 +692,42 @@ impl HttpStats {
 
 	pub fn read_timeout(&mut self) -> Result<(), Error> {
 		Ok(())
+	}
+
+	pub fn get_stats_aggregation_after(
+		&self,
+		timestamp: u64,
+		quantity: u64,
+	) -> Result<Vec<StatRecord>, Error> {
+		let db = lockw!(self.db)?;
+		let batch = db.batch()?;
+
+		let mut itt = batch.iter_rev(&([1u8])[..], |_k, v| {
+			let mut cursor = Cursor::new(v.to_vec());
+			cursor.set_position(0);
+			let mut reader = BinReader::new(&mut cursor);
+			Ok(StatRecord::read(&mut reader)?)
+		})?;
+
+		let mut count = 0;
+		let mut ret = vec![];
+		loop {
+			match itt.next() {
+				Some(record) => {
+					if count >= quantity {
+						break;
+					}
+
+					if record.timestamp < timestamp.into() {
+						ret.push(record);
+						count += 1;
+					}
+				}
+				None => break,
+			}
+		}
+
+		Ok(ret)
 	}
 
 	pub fn get_stats_aggregation(

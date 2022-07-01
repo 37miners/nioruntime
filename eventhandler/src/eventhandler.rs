@@ -229,11 +229,8 @@ impl ConnectionData {
 		{
 			let mut write_status = lockw!(self.connection_info.write_status)?;
 			if (*write_status).is_closed() {
-				return Err(ErrorKind::ConnectionClosedError(format!(
-					"connection {} already closed",
-					self.get_connection_id()
-				))
-				.into());
+				// if we're already closed, just return silently
+				return Ok(());
 			}
 			(*write_status).set_close_oncomplete();
 		}
