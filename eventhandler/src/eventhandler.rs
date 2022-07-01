@@ -4060,7 +4060,6 @@ mod tests {
 
 				// test some functions with close.
 				std::thread::sleep(std::time::Duration::from_millis(50));
-				assert!(conn_data.close().is_err());
 				assert!(conn_data.async_complete().is_err());
 				assert!(conn_data.write(&[0]).is_err());
 				(*(lockw!(closing_success_clone)?)) = true;
