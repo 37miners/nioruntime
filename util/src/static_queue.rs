@@ -16,8 +16,9 @@ use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use std::fmt::Debug;
 
-debug!();
+info!();
 
+#[derive(Clone, Debug)]
 pub struct StaticQueue<T>
 where
 	T: Clone + Copy + Default + Debug,
@@ -26,6 +27,45 @@ where
 	first: usize,
 	last: usize,
 	size: usize,
+}
+
+impl<'a, T> IntoIterator for &'a StaticQueue<T>
+where
+	T: Debug + Default + Copy,
+{
+	type Item = T;
+	type IntoIter = StaticQueueIterator<'a, T>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		StaticQueueIterator {
+			static_queue: &self,
+			index: 0,
+		}
+	}
+}
+
+pub struct StaticQueueIterator<'a, T>
+where
+	T: Debug + Default + Copy,
+{
+	static_queue: &'a StaticQueue<T>,
+	index: usize,
+}
+
+impl<'a, T> Iterator for StaticQueueIterator<'a, T>
+where
+	T: Debug + Default + Copy,
+{
+	type Item = T;
+	fn next(&mut self) -> Option<Self::Item> {
+		match self.static_queue.peek(self.index) {
+			Ok(item) => {
+				self.index += 1;
+				item
+			}
+			Err(_) => None,
+		}
+	}
 }
 
 impl<T> StaticQueue<T>
@@ -97,6 +137,13 @@ where
 		debug!("ret offset={}, last={}", offset, self.last)?;
 		Ok(Some(self.data[offset]))
 	}
+
+	pub fn clear(&mut self) -> Result<(), Error> {
+		self.last = 0;
+		self.first = 0;
+		self.size = 0;
+		Ok(())
+	}
 }
 
 #[cfg(test)]
@@ -111,6 +158,32 @@ mod test {
 	struct MyItem {
 		f1: u8,
 		f2: u64,
+	}
+
+	#[test]
+	fn test_queue_iterator() -> Result<(), Error> {
+		let my_item1 = MyItem { f1: 1, f2: 1 };
+		let my_item2 = MyItem { f1: 2, f2: 2 };
+		let my_item3 = MyItem { f1: 3, f2: 3 };
+		let my_item4 = MyItem { f1: 4, f2: 4 };
+		let my_item5 = MyItem { f1: 5, f2: 5 };
+
+		let mut queue = StaticQueue::new(10);
+		assert_eq!(queue.capacity(), 10);
+		queue.enqueue(my_item1)?;
+		queue.enqueue(my_item2)?;
+		queue.enqueue(my_item3)?;
+		queue.enqueue(my_item4)?;
+		queue.enqueue(my_item5)?;
+
+		let mut v = vec![];
+		for item in &queue {
+			v.push(item);
+		}
+
+		assert_eq!(v, vec![my_item1, my_item2, my_item3, my_item4, my_item5]);
+
+		Ok(())
 	}
 
 	#[test]

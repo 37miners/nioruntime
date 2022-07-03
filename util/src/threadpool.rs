@@ -120,7 +120,7 @@ impl StaticThreadPool {
 	/// * `f` - The future to execute.
 	pub fn execute<F>(&self, f: F) -> Result<(), Error>
 	where
-		F: Future<Output = ()> + Send + Sync + 'static,
+		F: Future<Output = Result<(), Error>> + Send + Sync + 'static,
 	{
 		let stp = crate::lockr!(STATIC_THREAD_POOL)?;
 
@@ -137,7 +137,7 @@ impl StaticThreadPool {
 }
 
 pub(crate) struct FuturesHolder {
-	inner: Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>,
+	inner: Pin<Box<dyn Future<Output = Result<(), Error>> + Send + Sync + 'static>>,
 }
 
 /// This type is a callback which may be set when creating a ThreadPool. It is called
@@ -212,7 +212,12 @@ impl ThreadPoolImpl {
 						}
 					};
 
-					block_on(task.inner);
+					match block_on(task.inner) {
+						Ok(_) => {}
+						Err(e) => {
+							println!("inner task generated error: {}", e);
+						}
+					}
 				});
 
 				let _ = jh.join();
@@ -242,7 +247,7 @@ impl ThreadPoolImpl {
 			size
 		};
 		for _ in 0..*size {
-			let f = async {};
+			let f = async { Ok(()) };
 			let f = FuturesHolder { inner: Box::pin(f) };
 			let tx = self.tx.lock().map_err(|_e| {
 				let error: Error = ErrorKind::PoisonError("size lock".to_string()).into();
@@ -259,7 +264,7 @@ impl ThreadPoolImpl {
 
 	pub fn execute<F>(&self, f: F) -> Result<(), Error>
 	where
-		F: Future<Output = ()> + Send + Sync + 'static,
+		F: Future<Output = Result<(), Error>> + Send + Sync + 'static,
 	{
 		let f = FuturesHolder { inner: Box::pin(f) };
 		{
@@ -296,6 +301,7 @@ fn test_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x.lock().unwrap();
 			*x += 1;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -306,6 +312,7 @@ fn test_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x1.lock().unwrap();
 			*x += 2;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -316,6 +323,7 @@ fn test_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x2.lock().unwrap();
 			*x += 3;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -357,6 +365,7 @@ fn test_stop_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x.lock().unwrap();
 			*x += 1;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -367,6 +376,7 @@ fn test_stop_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x1.lock().unwrap();
 			*x += 2;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -382,6 +392,7 @@ fn test_stop_thread_pool() -> Result<(), Error> {
 		tp.execute(async move {
 			let mut x = x2.lock().unwrap();
 			*x += 313;
+			Ok(())
 		})
 		.unwrap();
 	});
@@ -409,7 +420,7 @@ fn test_bad_static() -> Result<(), Error> {
 	assert!(tp.set_on_panic(move || Ok(())).is_err());
 	assert!(tp.start(1).is_err());
 	assert!(tp.stop().is_err());
-	assert!(tp.execute(async move {}).is_err());
+	assert!(tp.execute(async move { Ok(()) }).is_err());
 	Ok(())
 }
 

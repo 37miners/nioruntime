@@ -27,6 +27,7 @@ use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
 use nioruntime_util::bytes_parse_number_header;
 use nioruntime_util::slabs::SlabAllocator;
+use nioruntime_util::StaticQueue;
 use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig, StepAllocator, StepAllocatorConfig};
 use nioruntime_util::{lockr, lockw};
 use std::collections::{HashMap, HashSet};
@@ -397,72 +398,22 @@ impl ProxyState {
 }
 
 #[derive(Debug)]
-pub struct StatQueue {
-	qbytes: Vec<u8>,
-	len: usize,
-	capacity: usize,
-	log_events: Vec<LogEvent>,
+pub struct StatQueues {
+	pub log_items: StaticQueue<LogItem>,
+	pub log_events: StaticQueue<LogEvent>,
 }
 
-impl StatQueue {
-	fn new(capacity: usize) -> Self {
-		let len = 0;
-		let mut qbytes = vec![];
-		for _ in 0..capacity * LOG_ITEM_SIZE {
-			qbytes.push(0);
-		}
+impl StatQueues {
+	fn new(capacity: usize, threads: usize) -> Self {
 		Self {
-			qbytes,
-			len,
-			capacity,
-			log_events: vec![],
+			log_items: StaticQueue::new(capacity),
+			// 1 per thread + buffer
+			log_events: StaticQueue::new(threads + 100),
 		}
-	}
-
-	pub fn push(&mut self, data: &[u8]) -> Result<(), Error> {
-		if self.len >= self.capacity {
-			Err(ErrorKind::CapacityExceeded(format!(
-				"queue capacity exceeded: {} >= {}.",
-				self.len, self.capacity
-			))
-			.into())
-		} else {
-			self.qbytes[self.len * LOG_ITEM_SIZE..(self.len + 1) * LOG_ITEM_SIZE]
-				.clone_from_slice(&data[0..LOG_ITEM_SIZE]);
-			self.len += 1;
-			Ok(())
-		}
-	}
-
-	pub fn push_log_event(&mut self, log_event: LogEvent) -> Result<(), Error> {
-		self.log_events.push(log_event);
-		Ok(())
-	}
-
-	pub fn clear(&mut self) -> Result<(), Error> {
-		self.len = 0;
-		self.log_events.clear();
-		Ok(())
-	}
-
-	pub fn capacity(&self) -> usize {
-		self.capacity
-	}
-
-	pub fn len(&self) -> usize {
-		self.len
-	}
-
-	pub fn qbytes(&self) -> &Vec<u8> {
-		&self.qbytes
-	}
-
-	pub fn log_events(&self) -> Vec<LogEvent> {
-		self.log_events.clone()
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Copy)]
 pub struct LogEvent {
 	pub dropped_count: u64,
 	pub read_timeout_count: u64,
@@ -474,13 +425,14 @@ pub struct LogEvent {
 
 #[derive(Clone, Debug)]
 pub struct StatHandler {
-	pub queue: Arc<RwLock<StatQueue>>,
+	pub queue: Arc<RwLock<StatQueues>>,
 	pub http_stats: HttpStats,
 }
 
 impl StatHandler {
 	pub fn new(
 		capacity: usize,
+		threads: usize,
 		debug_log_queue: bool,
 		request_log_config: LogConfig,
 		lmdb_dir: String,
@@ -488,7 +440,7 @@ impl StatHandler {
 		stats_frequency: u64,
 	) -> Result<Self, Error> {
 		Ok(Self {
-			queue: Arc::new(RwLock::new(StatQueue::new(capacity))),
+			queue: Arc::new(RwLock::new(StatQueues::new(capacity, threads))),
 			http_stats: HttpStats::new(HttpStatsConfig {
 				debug_log_queue,
 				debug_show_stats,
@@ -497,6 +449,17 @@ impl StatHandler {
 				stats_frequency,
 			})?,
 		})
+	}
+}
+
+pub struct ThreadPoolContext {
+	pub in_buf: Vec<u8>,
+}
+
+impl ThreadPoolContext {
+	pub fn new() -> Self {
+		let in_buf = vec![];
+		Self { in_buf }
 	}
 }
 
@@ -515,8 +478,6 @@ pub struct ThreadContext {
 	pub webroot: Vec<u8>,
 	pub temp_dir: String,
 	pub sha1: Sha1,
-	pub log_slabs: SlabAllocator,
-	pub next_log_slab: u64,
 	pub stat_handler: StatHandler,
 	pub dropped_log_items: u64,
 	pub connects: u64,
@@ -524,6 +485,8 @@ pub struct ThreadContext {
 	pub connect_timeouts: u64,
 	pub read_timeouts: u64,
 	pub dropped_lat_sum: u64,
+	pub log_queue: StaticQueue<LogItem>,
+	pub thread_pool_context: Arc<RwLock<ThreadPoolContext>>,
 }
 
 impl ThreadContext {
@@ -596,7 +559,8 @@ impl ThreadContext {
 		// preallocate a single step here
 		active_connections.step(&ConnectionInfo::new_empty());
 
-		let log_slabs = SlabAllocator::new(config.thread_log_queue_size, LOG_ITEM_SIZE.try_into()?);
+		let log_queue = StaticQueue::new(config.thread_log_queue_size);
+		let thread_pool_context = Arc::new(RwLock::new(ThreadPoolContext::new()));
 
 		Ok(Self {
 			header_map: StaticHash::new(header_map_conf)?,
@@ -613,8 +577,7 @@ impl ThreadContext {
 			webroot,
 			temp_dir,
 			sha1: Sha1::new(),
-			log_slabs,
-			next_log_slab: 0,
+			log_queue,
 			stat_handler: stat_handler.clone(),
 			dropped_log_items: 0,
 			connects: 0,
@@ -622,6 +585,7 @@ impl ThreadContext {
 			connect_timeouts: 0,
 			read_timeouts: 0,
 			dropped_lat_sum: 0,
+			thread_pool_context,
 		})
 	}
 }
@@ -1547,7 +1511,7 @@ pub struct HttpConfig {
 	pub gzip_extensions: HashSet<Vec<u8>>,
 	pub evh_config: EventHandlerConfig,
 	pub main_log_queue_size: usize,
-	pub thread_log_queue_size: u64,
+	pub thread_log_queue_size: usize,
 	pub request_log_config: LogConfig,
 	pub lmdb_dir: String,
 	pub debug_show_stats: bool,
@@ -1937,7 +1901,7 @@ impl ApiContext {
 					match self
 						.stat_handler
 						.http_stats
-						.store_log_items(vec![log_item], vec![])
+						.store_log_items(vec![log_item].into_iter(), vec![].into_iter())
 					{
 						Ok(_) => {}
 						Err(e) => {
@@ -1986,7 +1950,7 @@ impl ApiContext {
 					match self
 						.stat_handler
 						.http_stats
-						.store_log_items(vec![log_item], vec![])
+						.store_log_items(vec![log_item].into_iter(), vec![].into_iter())
 					{
 						Ok(_) => {}
 						Err(e) => {

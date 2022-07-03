@@ -725,7 +725,7 @@ fn real_main() -> Result<(), Error> {
 				.value_of("thread_log_queue_size")
 				.unwrap()
 				.parse()?,
-			false => 2_000,
+			false => 1_000,
 		},
 	};
 
@@ -733,7 +733,7 @@ fn real_main() -> Result<(), Error> {
 		true => args.value_of("main_log_queue_size").unwrap().parse()?,
 		false => match file_args.is_present("main_log_queue_size") {
 			true => file_args.value_of("main_log_queue_size").unwrap().parse()?,
-			false => 5_000,
+			false => 2_000,
 		},
 	};
 

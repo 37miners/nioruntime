@@ -582,16 +582,11 @@ impl HttpStats {
 		}
 	}
 
-	pub fn store_log_items(
-		&mut self,
-		log_items: Vec<LogItem>,
-		log_events: Vec<LogEvent>,
-	) -> Result<(), Error> {
-		let len = log_items.len();
-		if len > 0 && self.config.debug_log_queue {
-			warn!("Store {} items", len)?;
-		}
-
+	pub fn store_log_items<I, J>(&mut self, log_items: I, log_events: J) -> Result<(), Error>
+	where
+		I: Iterator<Item = LogItem>,
+		J: Iterator<Item = LogEvent>,
+	{
 		let mut logger = lockw!(self.request_log)?;
 		if logger.rotation_status()? == RotationStatus::Needed {
 			match logger.rotate()? {
@@ -604,9 +599,10 @@ impl HttpStats {
 			}
 		}
 
-		let mut requests: u64 = log_items.len().try_into()?;
+		let mut requests: u64 = 0;
 		let mut lat_sum_micros = 0;
 		for log_item in log_items {
+			requests += 1;
 			let uri = Self::from_utf8(&log_item.uri);
 			let query = Self::from_utf8(&log_item.query);
 			let user_agent = Self::from_utf8(&log_item.user_agent);

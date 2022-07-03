@@ -211,11 +211,8 @@ impl ConnectionData {
 		{
 			let mut write_status = lockw!(self.connection_info.write_status)?;
 			if (*write_status).is_closed() {
-				return Err(ErrorKind::ConnectionClosedError(format!(
-					"connection {} already closed",
-					self.get_connection_id()
-				))
-				.into());
+				// if we're already closed, just return silently
+				return Ok(());
 			}
 			(*write_status).set_async_complete();
 		}
@@ -298,6 +295,7 @@ impl ConnectionData {
 			// nothing to write
 			return Ok(());
 		}
+		let mut already_pending = false;
 		let res = {
 			// first try to write in our own thread, check if closed first.
 			let mut write_status = lockw!(self.connection_info.write_status)?;
@@ -314,11 +312,11 @@ impl ConnectionData {
 				// there are pending writes, we cannot write here.
 				// return that 0 bytes were written and pass on to
 				// main thread loop
+				already_pending = (*write_status).write_buffer.len() > 0;
 				(*write_status).write_buffer.append(&mut data.to_vec());
 				0
 			} else {
 				let wlen = write_bytes(self.connection_info.get_handle(), &data)?;
-
 				let start_data = if wlen > 0 { wlen as usize } else { 0 as usize };
 
 				if start_data > 0 && start_data < data.len() {
@@ -359,7 +357,10 @@ impl ConnectionData {
 			}
 		} else {
 			// otherwise, we have to pass to the other thread
-			self.notify_selector_thread()
+			if !already_pending {
+				self.notify_selector_thread()?;
+			}
+			Ok(())
 		}
 	}
 
@@ -831,8 +832,8 @@ where
 
 				let stop = match jh.join() {
 					Ok(_) => true,
-					Err(_e) => {
-						error!("thread panic!")?;
+					Err(e) => {
+						error!("thread panic: {:?}", e)?;
 						false
 					}
 				};
@@ -1232,7 +1233,9 @@ where
 										{
 											let mut write_status = lockw!(c.write_status)?;
 											(*write_status).set_is_closed();
-											(*write_status).write_buffer.truncate(0);
+											(*write_status).write_buffer.drain(..);
+											(*write_status).write_buffer.clear();
+											(*write_status).write_buffer.shrink_to_fit();
 										}
 										{
 											let mut cur_connections = lockw!(ctx.cur_connections)?;
@@ -1773,10 +1776,12 @@ where
 			if len > 0 {
 				let len: usize = len.try_into()?;
 				if len == wbuf.len() {
-					wbuf.clear();
+					wbuf.drain(..);
+					wbuf.shrink_to_fit();
 				} else {
 					let len: usize = len.try_into()?;
 					wbuf.drain(..len);
+					wbuf.shrink_to_fit();
 				}
 			}
 			Ok((WriteResult::Ok, len))
@@ -2407,7 +2412,8 @@ fn write_bytes(handle: Handle, buf: &[u8]) -> Result<isize, Error> {
 	let len = {
 		set_errno(Errno(0));
 		let cbuf: *const c_void = buf as *const _ as *const c_void;
-		unsafe { write(handle, cbuf, buf.len().into()) }
+		let ret = unsafe { write(handle, cbuf, buf.len().into()) };
+		ret
 	};
 	#[cfg(target_os = "windows")]
 	let len = {
@@ -3262,6 +3268,7 @@ mod tests {
 		evh.set_on_panic(move || Ok(()))?;
 
 		evh.set_on_read(move |conn_data, buf, _, _| {
+			info!("on read. buf = {:?}", buf)?;
 			assert_eq!(buf, [1, 2, 3, 4]);
 			{
 				let mut cid_read = cid_read.write().unwrap();
@@ -4060,7 +4067,6 @@ mod tests {
 
 				// test some functions with close.
 				std::thread::sleep(std::time::Duration::from_millis(50));
-				assert!(conn_data.async_complete().is_err());
 				assert!(conn_data.write(&[0]).is_err());
 				(*(lockw!(closing_success_clone)?)) = true;
 			}

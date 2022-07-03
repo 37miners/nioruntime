@@ -17,7 +17,7 @@ use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
 };
-use crate::stats::{HttpStats, LOG_ITEM_SIZE, MAX_LOG_STR_LEN};
+use crate::stats::{HttpStats, MAX_LOG_STR_LEN};
 use crate::types::*;
 use crate::websocket::{
 	process_websocket_data, send_websocket_message, WebSocketMessage, WebSocketMessageType,
@@ -34,6 +34,8 @@ use nioruntime_deps::flate2::write::GzEncoder;
 use nioruntime_deps::flate2::Compression;
 use nioruntime_deps::fsutils;
 use nioruntime_deps::hex;
+use nioruntime_deps::libc::fcntl;
+use nioruntime_deps::libc::read;
 use nioruntime_deps::libc::{
 	self, c_void, setsockopt, socklen_t, SOL_SOCKET, SO_REUSEADDR, SO_REUSEPORT,
 };
@@ -54,24 +56,32 @@ use nioruntime_log::*;
 use nioruntime_util::bytes_eq;
 use nioruntime_util::bytes_find;
 use nioruntime_util::slabs::SlabAllocator;
+use nioruntime_util::threadpool::StaticThreadPool;
 use nioruntime_util::StaticHash;
+use nioruntime_util::StaticQueue;
 use nioruntime_util::{lockr, lockw};
 use nioruntime_util::{DataHolder, StepAllocator};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs::{metadata, File, Metadata};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::mem;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
+use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::str::from_utf8;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+type Handle = RawFd;
+#[cfg(windows)]
+type Handle = u64;
 
 info!();
 
@@ -152,6 +162,7 @@ where
 
 		let stat_handler = StatHandler::new(
 			config.main_log_queue_size,
+			config.evh_config.threads,
 			config.debug_log_queue,
 			config.request_log_config.clone(),
 			config.lmdb_dir.clone(),
@@ -227,6 +238,10 @@ where
 			self.config.content_upload_slab_size,
 		)));
 
+		let thread_pool = StaticThreadPool::new()?;
+		thread_pool.start(self.config.evh_config.threads)?;
+		let thread_pool = Arc::new(RwLock::new(thread_pool));
+
 		let api_config = self.api_config.clone();
 		let api_handler = self.api_handler.clone();
 		let ws_handler = self.ws_handler.clone();
@@ -249,6 +264,7 @@ where
 				ws_handler.as_ref(),
 				&stat_handler,
 				&internal,
+				&thread_pool,
 			) {
 				Ok((nconns, nupdates)) => (nconns, nupdates),
 				Err(e) => {
@@ -861,7 +877,6 @@ where
 		ctx: &mut ConnectionContext,
 		thread_context: &mut ThreadContext,
 		conn_data: &ConnectionData,
-		config: &HttpConfig,
 	) -> Result<(), Error> {
 		if ctx.is_async_complete {
 			let mut async_connections = lockw!(thread_context.async_connections)?;
@@ -871,11 +886,9 @@ where
 					log_item.read(li_bytes.try_into()?)?;
 					Self::process_stats(
 						&mut log_item,
-						Some(&mut thread_context.log_slabs),
-						&mut thread_context.next_log_slab,
+						Some(&mut thread_context.log_queue),
 						None,
 						&mut thread_context.dropped_log_items,
-						config,
 						&mut thread_context.dropped_lat_sum,
 					)?;
 				}
@@ -936,12 +949,12 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<
 		(
 			bool,
@@ -1018,12 +1031,12 @@ where
 				mime_map,
 				async_connections,
 				local_peer,
-				log_slabs,
-				next_log_slab,
+				log_queue,
 				stat_handler,
 				dropped_log_items,
 				internal,
 				dropped_lat_sum,
+				thread_pool,
 			)?;
 		}
 
@@ -1044,9 +1057,10 @@ where
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
 		stat_handler: &StatHandler,
 		internal: &HashMap<String, Vec<u8>>,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let now = SystemTime::now();
-		Self::process_async(ctx, thread_context, conn_data, config)?;
+		Self::process_async(ctx, thread_context, conn_data)?;
 		Self::update_conn_info(thread_context, conn_data, now)?;
 
 		let remote_peer = &ctx.remote_peer.clone();
@@ -1121,12 +1135,12 @@ where
 			&mut thread_context.mime_map,
 			&mut thread_context.async_connections,
 			local_peer,
-			&mut thread_context.log_slabs,
-			&mut thread_context.next_log_slab,
+			&mut thread_context.log_queue,
 			stat_handler,
 			&mut thread_context.dropped_log_items,
 			internal,
 			&mut thread_context.dropped_lat_sum,
+			thread_pool,
 		)?;
 
 		if was_post_await {
@@ -1193,12 +1207,12 @@ where
 					&mut thread_context.mime_map,
 					&mut thread_context.async_connections,
 					local_peer,
-					&mut thread_context.log_slabs,
-					&mut thread_context.next_log_slab,
+					&mut thread_context.log_queue,
 					stat_handler,
 					&mut thread_context.dropped_log_items,
 					internal,
 					&mut thread_context.dropped_lat_sum,
+					thread_pool,
 				)?;
 
 				match nconn {
@@ -1255,12 +1269,12 @@ where
 				&mut thread_context.mime_map,
 				&mut thread_context.async_connections,
 				local_peer,
-				&mut thread_context.log_slabs,
-				&mut thread_context.next_log_slab,
+				&mut thread_context.log_queue,
 				stat_handler,
 				&mut thread_context.dropped_log_items,
 				internal,
 				&mut thread_context.dropped_lat_sum,
+				thread_pool,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1296,12 +1310,12 @@ where
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1339,12 +1353,12 @@ where
 				mime_map,
 				async_connections,
 				local_peer,
-				log_slabs,
-				next_log_slab,
+				log_queue,
 				stat_handler,
 				dropped_log_items,
 				internal,
 				dropped_lat_sum,
+				thread_pool,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1411,11 +1425,11 @@ where
 		webroot: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		local_peer: &Option<SocketAddr>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<
 		(
 			bool,
@@ -1503,11 +1517,11 @@ where
 							false,
 							headers.get_header_value(HOST_BYTES)?,
 							local_peer,
-							log_slabs,
-							next_log_slab,
+							log_queue,
 							stat_handler,
 							dropped_log_items,
 							dropped_lat_sum,
+							thread_pool,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1734,12 +1748,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		local_peer: &Option<SocketAddr>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<
 		(
 			usize,
@@ -1807,11 +1821,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
-							log_slabs,
-							next_log_slab,
+							log_queue,
 							stat_handler,
 							dropped_log_items,
 							dropped_lat_sum,
+							thread_pool,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1846,11 +1860,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
-							log_slabs,
-							next_log_slab,
+							log_queue,
 							stat_handler,
 							dropped_log_items,
 							dropped_lat_sum,
+							thread_pool,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1885,11 +1899,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
-							log_slabs,
-							next_log_slab,
+							log_queue,
 							stat_handler,
 							dropped_log_items,
 							dropped_lat_sum,
+							thread_pool,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1925,11 +1939,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							false,
 							None,
 							local_peer,
-							log_slabs,
-							next_log_slab,
+							log_queue,
 							stat_handler,
 							dropped_log_items,
 							dropped_lat_sum,
+							thread_pool,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1997,11 +2011,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						false,
 						headers.get_header_value(HOST_BYTES)?,
 						local_peer,
-						log_slabs,
-						next_log_slab,
+						log_queue,
 						stat_handler,
 						dropped_log_items,
 						dropped_lat_sum,
+						thread_pool,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -2025,10 +2039,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						conn_data,
 						temp_dir,
 						slabs,
-						log_slabs,
-						next_log_slab,
+						log_queue,
 						dropped_log_items,
-						config,
 						stat_handler,
 						dropped_lat_sum,
 					)?
@@ -2058,7 +2070,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 												let start_str =
 													&range[(start_index + 1)..dash_index];
 												let end_str = &range[(dash_index + 1)..end];
-												Some((start_str.parse()?, end_str.parse()?))
+												Some((
+													start_str.parse().unwrap_or(0),
+													end_str.parse().unwrap_or(u32::MAX as usize),
+												))
 											}
 											None => None,
 										}
@@ -2093,11 +2108,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						webroot,
 						mime_map,
 						local_peer,
-						log_slabs,
-						next_log_slab,
+						log_queue,
 						stat_handler,
 						dropped_log_items,
 						dropped_lat_sum,
+						thread_pool,
 					)?;
 
 					match api_context {
@@ -2189,11 +2204,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						gzip,
 						headers.get_header_value(HOST_BYTES)?,
 						local_peer,
-						log_slabs,
-						next_log_slab,
+						log_queue,
 						stat_handler,
 						dropped_log_items,
 						dropped_lat_sum,
+						thread_pool,
 					) {
 						Ok(k) => {
 							key = k;
@@ -2226,11 +2241,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
-										log_slabs,
-										next_log_slab,
+										log_queue,
 										stat_handler,
 										dropped_log_items,
 										dropped_lat_sum,
+										thread_pool,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2265,11 +2280,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
-										log_slabs,
-										next_log_slab,
+										log_queue,
 										stat_handler,
 										dropped_log_items,
 										dropped_lat_sum,
+										thread_pool,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2304,11 +2319,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
-										log_slabs,
-										next_log_slab,
+										log_queue,
 										stat_handler,
 										dropped_log_items,
 										dropped_lat_sum,
+										thread_pool,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2344,11 +2359,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										false,
 										headers.get_header_value(HOST_BYTES)?,
 										local_peer,
-										log_slabs,
-										next_log_slab,
+										log_queue,
 										stat_handler,
 										dropped_log_items,
 										dropped_lat_sum,
+										thread_pool,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2475,10 +2490,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		conn_data: &ConnectionData,
 		temp_dir: &String,
 		slabs: &Arc<RwLock<SlabAllocator>>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		dropped_log_items: &mut u64,
-		config: &HttpConfig,
 		stat_handler: &StatHandler,
 		dropped_lat_sum: &mut u64,
 	) -> Result<bool, Error> {
@@ -2571,11 +2584,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					if !ctx.is_async() {
 						Self::process_stats(
 							ctx.log_item(),
-							Some(log_slabs),
-							next_log_slab,
+							Some(log_queue),
 							None,
 							dropped_log_items,
-							config,
 							dropped_lat_sum,
 						)?;
 					}
@@ -2656,11 +2667,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		gzip: bool,
 		host: Option<Vec<Vec<u8>>>,
 		local_peer: &Option<SocketAddr>,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -2737,8 +2748,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			if_modified_since,
 			if_none_match,
 			gzip,
-			log_slabs,
-			next_log_slab,
+			log_queue,
 			dropped_log_items,
 			dropped_lat_sum,
 		)?;
@@ -2777,8 +2787,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if_modified_since,
 				if_none_match,
 				gzip,
-				log_slabs,
-				next_log_slab,
+				log_queue,
 				dropped_log_items,
 				dropped_lat_sum,
 			)?;
@@ -2847,6 +2856,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			if_none_match,
 			gzip,
 			stat_handler,
+			thread_pool,
 		)?;
 
 		Ok(None)
@@ -2910,8 +2920,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		if_modified_since: &Option<Vec<Vec<u8>>>,
 		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
-		log_slabs: &mut SlabAllocator,
-		next_log_slab: &mut u64,
+		log_queue: &mut StaticQueue<LogItem>,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
@@ -2984,8 +2993,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								headers_referer,
 								mime_map,
 								gzip,
-								Some(log_slabs),
-								next_log_slab,
+								Some(log_queue),
 								None,
 								dropped_log_items,
 								dropped_lat_sum,
@@ -3017,8 +3025,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								headers_referer,
 								mime_map,
 								gzip,
-								Some(log_slabs),
-								next_log_slab,
+								Some(log_queue),
 								None,
 								dropped_log_items,
 								dropped_lat_sum,
@@ -3083,6 +3090,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		if_none_match: &Option<Vec<Vec<u8>>>,
 		gzip: bool,
 		stat_handler: &StatHandler,
+		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -3155,11 +3163,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let if_none_match = if_none_match.clone();
 		let stat_handler = stat_handler.clone();
 
-		std::thread::spawn(move || -> Result<(), Error> {
+		let thread_pool = lockw!(thread_pool)?;
+
+		thread_pool.execute(async move {
 			let path_str = std::str::from_utf8(&path)?;
 			let md_len = md.len();
-			let mut in_buf = vec![];
-			in_buf.resize(config.cache_chunk_size.try_into()?, 0u8);
+
+			let chunk_size = config.cache_chunk_size;
 
 			let mut sha256 = Sha256::new();
 			let last_modified = md.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
@@ -3169,7 +3179,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			let etag: [u8; 8] = hash[0..8].try_into()?;
 			let now_u128 = now.duration_since(UNIX_EPOCH)?.as_millis();
 
-			let mut file = File::open(&path_str)?;
+			let file = File::open(&path_str)?;
 			let mut is_304 = false;
 
 			if Self::not_modified(&if_modified_since, &if_none_match, &etag, last_modified)? {
@@ -3198,7 +3208,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					&mime_map,
 					gzip,
 					None,
-					&mut 0,
 					Some(stat_handler),
 					&mut 0,
 					&mut 0,
@@ -3228,7 +3237,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					&mime_map,
 					gzip,
 					None,
-					&mut 0,
 					Some(stat_handler),
 					&mut 0,
 					&mut 0,
@@ -3238,12 +3246,33 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			let mut len_sum = 0;
 			let mut len_written = 0;
 			if http_method != HttpMethod::Head {
+				let handle;
+				#[cfg(unix)]
+				{
+					handle = file.as_raw_fd();
+				}
+				#[cfg(target_os = "windows")]
+				{
+					handle = file.as_raw_handle();
+				}
+
+				let mut in_buf = Vec::with_capacity(chunk_size.try_into()?);
+				in_buf.resize(chunk_size.try_into()?, 0u8);
+
+				let whandle = conn_data.get_handle();
+				#[cfg(unix)]
+				unsafe {
+					let flags = fcntl(whandle, libc::F_GETFL, 0);
+					let flags = flags & !libc::O_NONBLOCK;
+					fcntl(whandle, libc::F_SETFL, flags);
+				}
+
 				loop {
-					let len = file.read(&mut in_buf)?;
+					let len = do_read(handle, &mut in_buf)?;
 					if len <= 0 {
 						break;
 					}
-					let nslice = &in_buf[0..len];
+					let nslice = &in_buf[0..len as usize];
 					if len > 0
 						&& md_len
 							<= (config.max_cache_chunks * config.cache_chunk_size).try_into()?
@@ -3267,7 +3296,28 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					}
 
 					if !is_304 {
-						Self::write_range(&conn_data, nslice, range, len_written, gzip, &config)?;
+						match Self::write_range(
+							&conn_data,
+							nslice,
+							range,
+							len_written,
+							gzip,
+							&config,
+						) {
+							Ok(_) => {}
+							Err(_) => {
+								let whandle = conn_data.get_handle();
+								#[cfg(unix)]
+								unsafe {
+									let flags = fcntl(whandle, libc::F_GETFL, 0);
+									let flags = flags | libc::O_NONBLOCK;
+									fcntl(whandle, libc::F_SETFL, flags);
+								}
+
+								// normal occurance. Other side closed.
+								return Ok(());
+							}
+						}
 					}
 					len_written += nslice.len();
 				}
@@ -3275,6 +3325,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				if gzip {
 					conn_data.write("0\r\n\r\n".as_bytes())?;
 				}
+			}
+
+			let whandle = conn_data.get_handle();
+			#[cfg(unix)]
+			unsafe {
+				let flags = fcntl(whandle, libc::F_GETFL, 0);
+				let flags = flags | libc::O_NONBLOCK;
+				fcntl(whandle, libc::F_SETFL, flags);
 			}
 
 			match http_version {
@@ -3290,7 +3348,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			ctx.async_complete()?;
 
 			Ok(())
-		});
+		})?;
+
 		Ok(())
 	}
 
@@ -3302,7 +3361,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		gzip: bool,
 		config: &HttpConfig,
 	) -> Result<(), Error> {
-		let mut response = vec![];
+		let mut response;
 		let slice = match range {
 			Some(range) => {
 				let nslice_len = nslice.len();
@@ -3328,6 +3387,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		};
 		if slice.len() > 0 {
 			let slice = if gzip {
+				response = vec![];
 				let mut encoder =
 					GzEncoder::new(Vec::new(), Compression::new(config.gzip_compression_level));
 				encoder.write(slice)?;
@@ -3558,8 +3618,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		headers_referer: &Vec<u8>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
 		gzip: bool,
-		log_slabs: Option<&mut SlabAllocator>,
-		next_log_slab: &mut u64,
+		log_queue: Option<&mut StaticQueue<LogItem>>,
 		stat_handler: Option<StatHandler>,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
@@ -3735,11 +3794,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		Self::process_stats(
 			&mut log_item,
-			log_slabs,
-			next_log_slab,
+			log_queue,
 			stat_handler,
 			dropped_log_items,
-			config,
 			dropped_lat_sum,
 		)?;
 
@@ -3835,11 +3892,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 												log_item.read(li_bytes.try_into()?)?;
 												Self::process_stats(
 													&mut log_item,
-													Some(&mut thread_context.log_slabs),
-													&mut thread_context.next_log_slab,
+													Some(&mut thread_context.log_queue),
 													None,
 													&mut thread_context.dropped_log_items,
-													config,
 													&mut thread_context.dropped_lat_sum,
 												)?;
 											}
@@ -3919,30 +3974,19 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		Ok(())
 	}
 
-	fn process_stats_queue(
-		stat_handler: &mut StatHandler,
-		qbytes: &mut Vec<u8>,
-		log_item: &mut LogItem,
-	) -> Result<(), Error> {
-		let (len, log_events) = {
+	fn process_stats_queue(stat_handler: &mut StatHandler) -> Result<(), Error> {
+		let (log_items, log_events);
+		{
 			let mut queue = lockw!(stat_handler.queue)?;
-			let len = queue.len();
-			(&mut qbytes[0..len * LOG_ITEM_SIZE])
-				.clone_from_slice(&queue.qbytes()[0..len * LOG_ITEM_SIZE]);
-			let log_events = queue.log_events();
-			queue.clear()?;
-			(len, log_events)
-		};
-
-		let mut log_items = vec![];
-		for i in 0..len {
-			log_item.read(qbytes[i * LOG_ITEM_SIZE..(i + 1) * LOG_ITEM_SIZE].try_into()?)?;
-			log_items.push(log_item.clone());
+			log_events = (*queue).log_events.clone();
+			log_items = (*queue).log_items.clone();
+			(*queue).log_items.clear()?;
+			(*queue).log_events.clear()?;
 		}
 
 		match stat_handler
 			.http_stats
-			.store_log_items(log_items, log_events)
+			.store_log_items(log_items.into_iter(), log_events.into_iter())
 		{
 			Ok(_) => {}
 			Err(e) => {
@@ -3955,22 +3999,15 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn run_stats_processor(&self) -> Result<(), Error> {
 		let mut stat_handler = self.stat_handler.clone();
-		std::thread::spawn(move || -> Result<(), Error> {
-			let mut qbytes = vec![];
-			let cap = {
-				let queue = lockr!(stat_handler.queue)?;
-				queue.capacity()
-			};
-			qbytes.resize(LOG_ITEM_SIZE * cap, 0);
-			let mut log_item = LogItem::default();
 
+		std::thread::spawn(move || -> Result<(), Error> {
 			loop {
-				std::thread::sleep(std::time::Duration::from_millis(100));
+				std::thread::sleep(std::time::Duration::from_millis(300));
 				// to remove warning
 				if false {
 					break;
 				}
-				match Self::process_stats_queue(&mut stat_handler, &mut qbytes, &mut log_item) {
+				match Self::process_stats_queue(&mut stat_handler) {
 					Ok(_) => {}
 					Err(e) => error!("process_stats_queue generated: {}", e)?,
 				}
@@ -3982,26 +4019,24 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn process_stats(
 		log_item: &mut LogItem,
-		log_slabs: Option<&mut SlabAllocator>,
-		next_log_slab: &mut u64,
+		log_queue: Option<&mut StaticQueue<LogItem>>,
 		_stat_handler: Option<StatHandler>,
 		dropped_log_items: &mut u64,
-		config: &HttpConfig,
 		dropped_lat_sum: &mut u64,
 	) -> Result<(), Error> {
-		match log_slabs {
-			Some(log_slabs) => {
-				if *next_log_slab < config.thread_log_queue_size {
-					log_item.end_micros =
-						SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
-					let slab = log_slabs.get_mut(*next_log_slab)?;
-					log_item.write(slab.data.try_into()?)?;
-
-					*next_log_slab += 1;
-				} else {
-					*dropped_log_items += 1;
-					*dropped_lat_sum += (SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros()
-						as u64) - log_item.start_micros;
+		match log_queue {
+			Some(log_queue) => {
+				log_item.end_micros =
+					SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros() as u64;
+				match log_queue.enqueue(*log_item) {
+					Ok(_) => {}
+					Err(_) => {
+						// log queue is full
+						*dropped_log_items += 1;
+						*dropped_lat_sum += (SystemTime::now()
+							.duration_since(UNIX_EPOCH)?
+							.as_micros() as u64) - log_item.start_micros;
+					}
 				}
 			}
 			None => {}
@@ -4012,44 +4047,40 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 	fn process_housekeep_log_queue(thread_context: &mut ThreadContext) -> Result<(), Error> {
 		{
-			let mut i = 0;
-			let mut log_item = LogItem::default();
-			let mut queue = lockw!(thread_context.stat_handler.queue)?;
-
-			loop {
-				if i >= thread_context.next_log_slab {
-					break;
-				}
-
-				let slab = thread_context.log_slabs.get(i)?;
-				log_item.read(slab.data.try_into()?)?;
-				match (*queue).push(slab.data) {
-					Ok(_) => {}
-					Err(_e) => {
-						thread_context.dropped_log_items += thread_context.next_log_slab - i;
-						break;
+			{
+				let mut queue = lockw!(thread_context.stat_handler.queue)?;
+				let mut i: u64 = 0;
+				let size = thread_context.log_queue.size() as u64;
+				for item in &thread_context.log_queue {
+					match queue.log_items.enqueue(item) {
+						Ok(_) => {}
+						Err(_) => {
+							// queue full
+							thread_context.dropped_log_items += size.saturating_sub(i);
+							break;
+						}
 					}
+					i += 1;
 				}
-				i += 1;
+
+				let le = LogEvent {
+					dropped_count: thread_context.dropped_log_items,
+					read_timeout_count: thread_context.read_timeouts,
+					connect_timeout_count: thread_context.connect_timeouts,
+					connect_count: thread_context.connects,
+					disconnect_count: thread_context.disconnects,
+					dropped_lat_sum: thread_context.dropped_lat_sum,
+				};
+				queue.log_events.enqueue(le)?;
 			}
 
-			let le = LogEvent {
-				dropped_count: thread_context.dropped_log_items,
-				read_timeout_count: thread_context.read_timeouts,
-				connect_timeout_count: thread_context.connect_timeouts,
-				connect_count: thread_context.connects,
-				disconnect_count: thread_context.disconnects,
-				dropped_lat_sum: thread_context.dropped_lat_sum,
-			};
-			queue.push_log_event(le)?;
-
-			thread_context.next_log_slab = 0;
 			thread_context.dropped_log_items = 0;
 			thread_context.read_timeouts = 0;
 			thread_context.connect_timeouts = 0;
 			thread_context.connects = 0;
 			thread_context.disconnects = 0;
 			thread_context.dropped_lat_sum = 0;
+			thread_context.log_queue.clear()?;
 		}
 
 		Ok(())
@@ -4268,6 +4299,26 @@ fn populate_next<'a>(
 	Ok(())
 }
 
+fn do_read(handle: Handle, buf: &mut [u8]) -> Result<isize, Error> {
+	#[cfg(unix)]
+	{
+		let cbuf: *mut c_void = buf as *mut _ as *mut c_void;
+		Ok(unsafe { read(handle, cbuf, buf.len()) })
+	}
+	#[cfg(target_os = "windows")]
+	{
+		let cbuf: *mut i8 = buf as *mut _ as *mut i8;
+		set_errno(Errno(0));
+		let mut len = unsafe { ws2_32::recv(handle.try_into()?, cbuf, buf.len().try_into()?, 0) };
+		if errno().0 == 10035 {
+			// would
+			// block
+			len = -2;
+		}
+		Ok(len.try_into().unwrap_or(-1))
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use crate::http::{clean, ConnectionData, HttpConfig, HttpServer};
@@ -4431,7 +4482,7 @@ mod test {
 		let root_dir = "./.test_async.nio";
 		setup_test_dir(root_dir)?;
 
-		let port = 18899;
+		let port = 14899;
 		let config = HttpConfig {
 			listeners: vec![(
 				ListenerType::Plain,
