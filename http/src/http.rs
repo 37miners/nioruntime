@@ -17,6 +17,7 @@ use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
 };
+use crate::stats::LOG_ITEM_SIZE;
 use crate::stats::{HttpStats, MAX_LOG_STR_LEN};
 use crate::types::*;
 use crate::websocket::{
@@ -90,6 +91,8 @@ const WS_ADMIN_GET_STATS_RESPONSE: u8 = 0u8;
 const WS_ADMIN_PING: u8 = 1u8;
 const WS_ADMIN_PONG: u8 = 1u8;
 const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST: u8 = 2u8;
+const WS_ADMIN_GET_RECENT_REQUESTS: u8 = 3u8;
+const WS_ADMIN_RECENT_REQUESTS_RESPONSE: u8 = 3u8;
 
 const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
 const SEPARATOR: &str = "\
@@ -1693,6 +1696,41 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						},
 					)?;
 				}
+				WS_ADMIN_GET_RECENT_REQUESTS => {
+					let since_timestamp = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+					let records = http_stats.get_recent_requests()?;
+					let mut payload = vec![WS_ADMIN_RECENT_REQUESTS_RESPONSE];
+					payload.append(
+						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+							.to_be_bytes())
+						.to_vec(),
+					);
+
+					let mut count = 0;
+					for record in &records {
+						if record.end_micros > since_timestamp {
+							count += 1;
+						}
+					}
+
+					payload.append(&mut ((count as u64).to_be_bytes()).to_vec());
+					for record in records {
+						if record.end_micros > since_timestamp {
+							let mut ser = [0u8; LOG_ITEM_SIZE];
+							record.write(&mut ser)?;
+							payload.append(&mut ser.to_vec());
+						}
+					}
+
+					send_websocket_message(
+						conn_data,
+						&WebSocketMessage {
+							payload,
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						},
+					)?;
+				}
 				WS_ADMIN_PING => {
 					let mut payload = vec![WS_ADMIN_PONG];
 					let records = http_stats.get_stats_aggregation(0, 2)?;
@@ -2446,6 +2484,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				internal.get("jsbn.js").unwrap().to_vec()
 			} else if bytes_eq(query, b"jsbn2") {
 				internal.get("jsbn2.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"play") {
+				internal.get("play-button.png").unwrap().to_vec()
+			} else if bytes_eq(query, b"pause") {
+				internal.get("pause-button.png").unwrap().to_vec()
 			} else if bytes_eq(query, b"ws") {
 				let (_ws, len) = Self::check_websocket(
 					conn_data,

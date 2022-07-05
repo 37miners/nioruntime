@@ -24,6 +24,7 @@ use nioruntime_util::lmdb::Store;
 use nioruntime_util::ser::BinReader;
 use nioruntime_util::ser::Serializable;
 use nioruntime_util::ser::{Reader, Writer};
+use nioruntime_util::StaticQueue;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fmt::Formatter;
@@ -101,14 +102,14 @@ impl Serializable for LogItem {
 		let end_micros = reader.read_u64()?;
 		let response_code = reader.read_u16()?;
 
-		let mut query = [0u8; MAX_LOG_STR_LEN];
-		for i in 0..MAX_LOG_STR_LEN {
-			query[i] = reader.read_u8()?;
-		}
-
 		let mut uri = [0u8; MAX_LOG_STR_LEN];
 		for i in 0..MAX_LOG_STR_LEN {
 			uri[i] = reader.read_u8()?;
+		}
+
+		let mut query = [0u8; MAX_LOG_STR_LEN];
+		for i in 0..MAX_LOG_STR_LEN {
+			query[i] = reader.read_u8()?;
 		}
 
 		let mut user_agent = [0u8; MAX_LOG_STR_LEN];
@@ -365,6 +366,7 @@ pub struct HttpStats {
 	request_log: Arc<RwLock<Log>>,
 	_startup_time: u128,
 	stat_record_accumulator: Arc<RwLock<StatRecord>>,
+	recent_requests: Arc<RwLock<StaticQueue<LogItem>>>,
 }
 
 impl Debug for HttpStats {
@@ -482,12 +484,15 @@ impl HttpStats {
 
 		Self::start_stats_thread(&stat_record_accumulator, &db, &config)?;
 
+		let recent_requests = Arc::new(RwLock::new(StaticQueue::new(100)));
+
 		Ok(Self {
 			config,
 			db,
 			request_log,
 			_startup_time: startup_time,
 			stat_record_accumulator,
+			recent_requests,
 		})
 	}
 
@@ -601,7 +606,13 @@ impl HttpStats {
 
 		let mut requests: u64 = 0;
 		let mut lat_sum_micros = 0;
+
+		let mut recent_requests = lockw!(self.recent_requests)?;
 		for log_item in log_items {
+			if recent_requests.size() == recent_requests.capacity() {
+				recent_requests.dequeue()?;
+			}
+			recent_requests.enqueue(log_item)?;
 			requests += 1;
 			let uri = Self::from_utf8(&log_item.uri);
 			let query = Self::from_utf8(&log_item.query);
@@ -666,28 +677,13 @@ impl HttpStats {
 		Ok(())
 	}
 
-	pub fn get_log_items(
-		&self,
-		_offset_begin: u64,
-		_offset_end: u64,
-	) -> Result<Vec<LogItem>, Error> {
-		Ok(vec![])
-	}
-
-	pub fn add_conn(&mut self) -> Result<(), Error> {
-		Ok(())
-	}
-
-	pub fn rem_conn(&mut self) -> Result<(), Error> {
-		Ok(())
-	}
-
-	pub fn connect_timeout(&mut self) -> Result<(), Error> {
-		Ok(())
-	}
-
-	pub fn read_timeout(&mut self) -> Result<(), Error> {
-		Ok(())
+	pub fn get_recent_requests(&self) -> Result<Vec<LogItem>, Error> {
+		let mut ret = vec![];
+		let recent_requests = lockw!(self.recent_requests)?;
+		for request in &*recent_requests {
+			ret.push(request);
+		}
+		Ok(ret)
 	}
 
 	pub fn get_stats_aggregation_after(

@@ -1,33 +1,44 @@
-const WS_ADMIN_GET_STATS_RESPONSE = 0;
-const WS_ADMIN_PING               = 1;
-const WS_ADMIN_PONG               = 1;
+const WS_ADMIN_GET_STATS_RESPONSE                = 0;
+const WS_ADMIN_PING                              = 1;
+const WS_ADMIN_PONG                              = 1;
+const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST = 2;
+const WS_ADMIN_GET_MOST_RECENT_REQUESTS          = 3;
+const WS_ADMIN_GET_MOST_RECENT_RESPONSE          = 3;
+
+const METHOD_GET     = 0;
+const METHOD_POST    = 1;
+const METHOD_PUT     = 2;
+const METHOD_DELETE  = 3;
+const METHOD_HEAD    = 4;
+const METHOD_OPTIONS = 5;
+const METHOD_CONNECT = 6;
+const METHOD_PATCH   = 7;
+const METHOD_TRACE   = 8;
+
+const VERSION_10      = 1;
+const VERSION_11      = 2;
+const VERSION_20      = 3;
+const VERSION_UNKNOWN = 0;
+
+const MAX_LOG_STR_LEN = 128;
 
 var last_scroll = 0;
+var mr_micros = 0;
 var mr_timestamp = 0;
 var first_entry = 0;
 var color_alternate = 0;
-
-window.onscroll = function() {
-	if (window.innerHeight + window.pageYOffset >= document.body.offsetHeight &&
-	window.innerHeight + window.pageYOffset > last_scroll) {
-                var link = document.getElementById('load_more');
-		var last = link.last;
-
-		const buffer = new ArrayBuffer(17);
-		const view = new Uint8Array(buffer);
-		for(var i=0; i<16; i++) {
-			view[i] = 0;
-		}
-		view[0] = 2;
-		u64_tobin(last, view, 1);
-		view[16] = 30;
-		sock.send(buffer);
-	}
-	last_scroll = window.innerHeight + window.pageYOffset;
-}
-
 var sock_connected = true;
 var sock;
+var pause = false;
+
+function do_pause() {
+	if(pause) {
+		location.reload();
+	} else {
+		pause = true;
+		document.getElementById('playpause').src = "?play";
+	}
+}
 
 function to_u64(buffer, offset) {
 	var num = BigInteger.ZERO;
@@ -48,6 +59,29 @@ function to_u64(buffer, offset) {
 		);      
 		itt++;
 	}       
+
+	return num;
+}
+
+function to_u16(buffer, offset) {
+	var num = BigInteger.ZERO;
+	var itt = 0;
+	for(var i=1+offset; i>=offset; i--) {
+		num = num.add(
+			new BigInteger(
+				String(buffer[i]),
+				10
+			).shiftLeft(
+				new BigInteger(
+					String(itt),
+					10
+				).multiply(
+					new BigInteger("8", 10)
+				)
+			)
+		);
+		itt++;
+	}
 
 	return num;
 }
@@ -114,7 +148,9 @@ function update_td_time(td, now) {
 }
 
 function update_timestamps(now) {
+	console.log("update timestamps " + now);
 	var timestamps = document.getElementsByClassName("timestamp");
+	console.log("timestamps len = " + timestamps.length);
 	for(var i=0; i<timestamps.length; i++) {
 		var td = timestamps[i];
 		update_td_time(td, now);
@@ -230,6 +266,13 @@ function add_tr(
 }
 
 function process_pong(buffer) {
+	var table = document.getElementById('stats_table');
+
+	// not on stats page.
+	if(table == null) {
+		return;
+	}
+
 	var server_time = to_u64(buffer, 1);
 	update_timestamps(server_time);
         var count = to_u64(buffer, 9);
@@ -251,8 +294,6 @@ function process_pong(buffer) {
 		var lat_sum_micros = to_u64(buffer, offset); offset += 8;
 
 		if(timestamp > mr_timestamp) {
-			var table = document.getElementById('stats_table');
-
 			mr_timestamp = timestamp;
 			color_alternate += 1;
 
@@ -402,6 +443,7 @@ function process_ws_admin_get_stats_response(buffer) {
 		tr.appendChild(td);
 		table.appendChild(tr);
 
+		var statsdiv = document.getElementById('statsdiv');
         	statsdiv.innerHTML = '';
 		statsdiv.appendChild(table);
 	}
@@ -411,6 +453,42 @@ function process_ws_admin_get_stats_response(buffer) {
 		table.removeChild(last_tr);
 		table.appendChild(last_tr);
 	}
+}
+
+function load_recent_update(sock) {
+	setTimeout(
+		function() {
+			console.log("load_recent_update");
+			const buffer = new ArrayBuffer(9);
+			var view = new Uint8Array(buffer);
+			view[0] = WS_ADMIN_GET_MOST_RECENT_REQUESTS;
+			console.log("mr_micros="+mr_micros);
+
+			for(var i=1; i<9; i++) view[i] = 0;
+			var str16 = mr_micros.toString(16);
+			var len = str16.length;
+			if(len % 2 != 0) {
+				str16 = '0' + str16;
+				len++;
+			}
+
+			var itt = 8;
+			for(var i=len-2; i>=0; i-=2) {
+				var hex = str16.substring(i, i+2);
+				var num = parseInt(hex, 16);
+				view[itt] = num;
+				itt--;
+			}
+
+			sock.send(buffer);
+			if (sock_connected) {
+				load_recent_update(sock);
+			} else {
+				return;
+			}
+		},
+		3000
+	);
 }
 
 function ping(sock) {
@@ -431,7 +509,238 @@ function ping(sock) {
 	);
 }
 
-function load_stats() {
+function text_decode(buffer, offset, len) {
+	var actual_len = 0;
+	for(var i=0; i<len; i++) {
+		if(buffer[i+offset] == 0) {
+			break;
+		}
+		actual_len += 1;
+	}
+	const abuffer = new ArrayBuffer(actual_len);
+	const view = new Uint8Array(abuffer);
+
+	for(var i=0; i<actual_len; i++) {
+		view[i] = buffer[i+offset];
+	}
+
+	var text_decoder = new TextDecoder();
+	var text = text_decoder.decode(view);
+
+	return text;
+}
+
+function truncate_field(f) {
+	if(f.length < 35){
+		return f;
+	}
+	return f.substring(0, 35) + "...";
+}
+
+function append_span(div, name, value) {
+	var span = document.createElement('span');
+	span.title = value;
+	span.appendChild(document.createTextNode(truncate_field(value)));
+	div.appendChild(document.createTextNode(name));
+	div.appendChild(span);
+}
+
+function get_http_method(http_method) {
+	if(http_method == 0) {
+		return "GET";
+	} else if(http_method == 1) {
+		return "POST";
+	} else if(http_method == 2) {
+		return "PUT";
+	} else if(http_method == 3) {
+		return "DELETE";
+	} else if(http_method == 4) {
+		return "HEAD";
+	} else if(http_method == 5) {
+		return "OPTIONS";
+	} else if(http_method == 6) {
+		return "CONNECT";
+	} else if(http_method == 7) {
+		return "PATCH";
+	} else {
+		return "TRACE";
+	}
+}
+
+function get_http_version(http_version) {
+	if(http_version == 1) {
+		return "V1.0";
+	} else if(http_version == 2) {
+		return "V1.1";
+	} else if(http_version == 3) {
+		return "V2.0";
+	} else {
+		return "UNKNOWN";
+	}
+}
+
+function add_log_request_tr(server_time, http_method, http_version, content_len, end_micros, start_micros, response_code,
+	                        uri, query, user_agent, referer, uri_requested, table, color_alternate) {
+
+	if(pause) return;
+
+	if(end_micros > mr_micros) {
+		mr_micros = end_micros;
+	}
+	var tr = document.createElement('tr');
+
+	var fmt = new Intl.NumberFormat('en-US');
+
+	var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd timestamp'; } else { td.className = 'table_even timestamp'; }
+	var timestamp = end_micros / 1000;
+	td.timestamp = timestamp;
+	td.title = String(new Date(timestamp / 1));
+	update_td_time(td, server_time);
+	tr.appendChild(td);
+
+	var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	td.appendChild(document.createTextNode(get_http_method(http_method)));
+	tr.appendChild(td);
+
+        var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	td.appendChild(document.createTextNode(get_http_version(http_version)));
+	tr.appendChild(td);
+
+        var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	td.appendChild(document.createTextNode(content_len));
+	tr.appendChild(td);
+
+        var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	td.appendChild(document.createTextNode(String(fmt.format(end_micros - start_micros)) + ' (\u03BCs)'));
+	tr.appendChild(td);
+
+        var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	td.appendChild(document.createTextNode(response_code));
+	tr.appendChild(td);
+
+        var td = document.createElement('td');
+	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
+	var div = document.createElement('div');
+	append_span(div, "URI Returned: ", uri);
+	div.appendChild(document.createElement('br'));
+	append_span(div, "URI Requested: ", uri_requested);
+	div.appendChild(document.createElement('br'));
+	append_span(div, "User Agent: ", user_agent);
+	div.appendChild(document.createElement('br'));
+	append_span(div, "Query: ", query);
+	div.appendChild(document.createElement('br'));
+	append_span(div, "Referer: ", referer);
+	td.appendChild(div);
+	tr.appendChild(td);
+
+	if(first_entry == 0) {
+		table.appendChild(tr);
+	} else {
+		table.insertBefore(tr, first_entry);
+	}
+	first_entry = tr;
+}
+
+function process_get_most_recent_requests(buffer) {
+	var numOfElements = document.getElementsByTagName('tr').length;
+
+	console.log("process get most recent");
+        var server_time = to_u64(buffer, 1);
+	update_timestamps(server_time);
+	var count = to_u64(buffer, 9);
+	console.log('count='+count);
+	var offset = 17;
+
+        var server_time = to_u64(buffer, 1);
+
+	var table = document.getElementById('request_table');
+	var table_created = false;
+
+	if (table == null) {
+		table_created = true;
+		table = document.createElement('table');
+		table.className = 'request_table';
+		table.id = 'request_table';
+
+		var tr = document.createElement('tr');
+
+                var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Time'));
+		tr.appendChild(td);
+
+		var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Http Method'));
+		tr.appendChild(td);
+
+		var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Http Version'));
+		tr.appendChild(td);
+
+
+                var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Content-Length'));
+		tr.appendChild(td);
+
+                var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Latency'));
+		tr.appendChild(td);
+
+                var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('Response Code'));
+		tr.appendChild(td);
+
+                var td = document.createElement('td');
+		td.className = 'table_heading';
+		td.appendChild(document.createTextNode('URI, Query, Http Referer, User Agent'));
+		tr.appendChild(td);
+
+		table.appendChild(tr);
+
+		var requestsdiv = document.getElementById('requestsdiv');
+
+		requestsdiv.appendChild(table);
+	}
+
+
+
+	for (var i=0; i<count; i++) {
+		var http_method   = buffer[offset]; offset += 1;
+		var http_version  = buffer[offset]; offset += 1;
+		var content_len   = to_u64(buffer, offset); offset += 8;
+		var start_micros  = to_u64(buffer, offset); offset += 8;
+		var end_micros    = to_u64(buffer, offset); offset += 8;
+		var response_code = to_u16(buffer, offset); offset += 2;
+
+		var uri           = text_decode(buffer, offset, 128); offset += 128;
+		var query         = text_decode(buffer, offset, 128); offset += 128;
+		var user_agent    = text_decode(buffer, offset, 128); offset += 128;
+		var referer       = text_decode(buffer, offset, 128); offset += 128;
+		var uri_requested = text_decode(buffer, offset, 128); offset += 128;
+
+		add_log_request_tr(server_time, http_method, http_version, content_len, end_micros, start_micros, response_code,
+			uri, query, user_agent, referer, uri_requested, table, color_alternate);
+		if(numOfElements > 100 && !pause) {
+			table.removeChild(table.lastChild);
+		}
+		color_alternate += 1;
+		
+		console.log("Log item = " + http_method + " " + http_version + " " + content_len + " " + uri + " " + query);
+	}
+}
+
+function init_listener() {
 	var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
 		new_uri = "wss:";
@@ -440,7 +749,6 @@ function load_stats() {
 	}
 	new_uri += "//" + loc.host;
 	new_uri += loc.pathname + "?ws";
-	console.log('new_uri='+new_uri);
 	sock = new WebSocket(new_uri);
 	sock.binaryType = "arraybuffer";
 
@@ -453,27 +761,69 @@ function load_stats() {
 		} else if(buffer[0] == WS_ADMIN_PONG) {
 			process_pong(buffer);
 			console.log("pong received");
+		} else if(buffer[0] == WS_ADMIN_GET_MOST_RECENT_RESPONSE) {
+			process_get_most_recent_requests(buffer);
 		} else {
 			console.log("WARNING: Unknown command: " + buffer[0]);
 		}
 	}
-
-	sock.addEventListener('open', function (event) {
-		console.log('connected');
-		const buffer = new ArrayBuffer(17);
-		const view = new Uint8Array(buffer);
-		for(var i=0; i<16; i++) {
-			view[i] = 0;
-		}
-		view[16] = 29;
-		sock.send(buffer);
-	});
 
 	sock.addEventListener('close', function (event) {
 		console.log('disconnected');
 		sock_connected = false;
 	});
 
+	return sock;
+}
+
+function load_requests() {
+	let sock = init_listener();
+	load_recent_update(sock);
+
+	sock.addEventListener('open', function (event) {
+		console.log('connected');
+		const buffer = new ArrayBuffer(9);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_GET_MOST_RECENT_REQUESTS;
+		for(var i=1; i<9; i++) {
+			view[i] = 0;
+		}
+		sock.send(buffer);
+	});
+}
+
+function load_stats() {
+	let sock = init_listener();
 	ping(sock);
-	
+
+	sock.addEventListener('open', function (event) {
+		console.log('connected');
+		const buffer = new ArrayBuffer(17);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_GET_STATS_RESPONSE;
+		for(var i=1; i<16; i++) {
+			view[i] = 0;
+		}
+		view[16] = 29;
+		sock.send(buffer);
+	});
+
+	window.onscroll = function() {
+	        if (window.innerHeight + window.pageYOffset >= document.body.offsetHeight &&
+			        window.innerHeight + window.pageYOffset > last_scroll) {
+			                var link = document.getElementById('load_more');
+			                var last = link.last;
+
+			                const buffer = new ArrayBuffer(17);
+			                const view = new Uint8Array(buffer);
+			                for(var i=0; i<16; i++) {
+						                        view[i] = 0;
+						                }
+			                view[0] = 2;
+			                u64_tobin(last, view, 1);
+			                view[16] = 30;
+			                sock.send(buffer);
+			        }
+	        last_scroll = window.innerHeight + window.pageYOffset;
+}
 }

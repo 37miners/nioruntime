@@ -90,3 +90,14 @@ hr {
 .load_more:hover {
 	cursor: pointer;
 }
+
+.request_table {
+	width: 880px;
+}
+
+.pause {
+	height: 50px;
+	width: 50px;
+	margin-bottom: 5px;
+	cursor: pointer;
+}
