@@ -93,6 +93,8 @@ const WS_ADMIN_PONG: u8 = 1u8;
 const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST: u8 = 2u8;
 const WS_ADMIN_GET_RECENT_REQUESTS: u8 = 3u8;
 const WS_ADMIN_RECENT_REQUESTS_RESPONSE: u8 = 3u8;
+const WS_ADMIN_REQUEST_CHART_REQUEST: u8 = 4u8;
+const WS_ADMIN_REQUEST_CHART_RESPONSE: u8 = 4u8;
 
 const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
 const SEPARATOR: &str = "\
@@ -1753,6 +1755,48 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						},
 					)?;
 				}
+				WS_ADMIN_REQUEST_CHART_REQUEST => {
+					let mut payload = vec![WS_ADMIN_REQUEST_CHART_RESPONSE];
+					let records = http_stats.get_stats_aggregation(0, 8640)?;
+					let time_now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+					payload.append(&mut (time_now.to_be_bytes()).to_vec());
+
+					let mut count: u64 = 0;
+					for record in &records {
+						if time_now.saturating_sub(record.timestamp.try_into()?)
+							< 24 * 60 * 60 * 1000
+						{
+							count += 1;
+						} else {
+							break;
+						}
+					}
+
+					payload.append(&mut ((count).to_be_bytes()).to_vec());
+					for record in records {
+						if time_now.saturating_sub(record.timestamp.try_into()?)
+							< 24 * 60 * 60 * 1000
+						{
+							payload.append(&mut record.requests.to_be_bytes().to_vec());
+							payload.append(&mut record.lat_sum_micros.to_be_bytes().to_vec());
+							payload.append(&mut record.connects.to_be_bytes().to_vec());
+							payload.append(&mut (record.timestamp as u64).to_be_bytes().to_vec());
+							payload
+								.append(&mut (record.prev_timestamp as u64).to_be_bytes().to_vec());
+							payload
+								.append(&mut (record.memory_bytes as u64).to_be_bytes().to_vec());
+						}
+					}
+
+					send_websocket_message(
+						conn_data,
+						&WebSocketMessage {
+							payload,
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						},
+					)?;
+				}
 				_ => {
 					warn!("unknown ws admin command. msg = {:?}", msg)?;
 				}
@@ -2488,6 +2532,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				internal.get("play-button.png").unwrap().to_vec()
 			} else if bytes_eq(query, b"pause") {
 				internal.get("pause-button.png").unwrap().to_vec()
+			} else if bytes_eq(query, b"chartjs") {
+				internal.get("chart.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"loading") {
+				internal.get("Loading_icon.gif").unwrap().to_vec()
 			} else if bytes_eq(query, b"ws") {
 				let (_ws, len) = Self::check_websocket(
 					conn_data,

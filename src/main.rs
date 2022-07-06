@@ -34,6 +34,12 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
 
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 info!();
 
 const POST_BYTES: &[u8] = "/post".as_bytes();

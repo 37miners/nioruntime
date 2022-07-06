@@ -55,6 +55,7 @@ pub use hex;
 pub use hex_literal;
 pub use hkdf;
 pub use hmac;
+pub use jemalloc_ctl;
 pub use lazy_static;
 pub use libc;
 pub use lmdb_zero;

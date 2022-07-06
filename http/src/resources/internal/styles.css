@@ -95,9 +95,15 @@ hr {
 	width: 880px;
 }
 
+.chartdiv {
+	width: 880px;
+}
+
 .pause {
 	height: 50px;
 	width: 50px;
 	margin-bottom: 5px;
+	margin-top: -20px;
 	cursor: pointer;
 }
+

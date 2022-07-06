@@ -15,6 +15,7 @@
 use crate::types::LogEvent;
 use crate::types::{HttpMethod, HttpVersion};
 use nioruntime_deps::dirs;
+use nioruntime_deps::jemalloc_ctl::{epoch, stats};
 use nioruntime_deps::path_clean::clean as path_clean;
 use nioruntime_derive::Serializable;
 use nioruntime_err::Error;
@@ -311,6 +312,7 @@ pub struct StatRecord {
 	pub prev_timestamp: u128,
 	pub startup_time: u128,
 	pub lat_sum_micros: u64,
+	pub memory_bytes: u64,
 }
 
 impl StatRecord {
@@ -327,6 +329,7 @@ impl StatRecord {
 			prev_timestamp: 0,
 			startup_time,
 			lat_sum_micros: 0,
+			memory_bytes: 0,
 		}
 	}
 
@@ -339,6 +342,7 @@ impl StatRecord {
 		self.read_timeouts = 0;
 		self.prev_timestamp = self.timestamp;
 		self.lat_sum_micros = 0;
+		self.memory_bytes = 0;
 		Ok(())
 	}
 
@@ -355,6 +359,7 @@ impl StatRecord {
 		ret.append(&mut (self.prev_timestamp as u64).to_be_bytes().to_vec());
 		ret.append(&mut (self.startup_time as u64).to_be_bytes().to_vec());
 		ret.append(&mut (self.lat_sum_micros as u64).to_be_bytes().to_vec());
+		ret.append(&mut (self.memory_bytes as u64).to_be_bytes().to_vec());
 		ret
 	}
 }
@@ -535,6 +540,10 @@ impl HttpStats {
 		db: &Arc<RwLock<Store>>,
 		config: &HttpStatsConfig,
 	) -> Result<(), Error> {
+		let e = epoch::mib().unwrap();
+		e.advance().unwrap();
+		let allocated = stats::allocated::mib().unwrap();
+		let bytes = allocated.read().unwrap() as u64;
 		let stat_record_accumulator = {
 			let mut stat_record_accumulator = lockw!(stat_record_accumulator)?;
 			if (*stat_record_accumulator).timestamp == 0 {
@@ -542,7 +551,8 @@ impl HttpStats {
 			}
 			(*stat_record_accumulator).timestamp =
 				SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-			let ret = (*stat_record_accumulator).clone();
+			let mut ret = (*stat_record_accumulator).clone();
+			ret.memory_bytes = bytes;
 			(*stat_record_accumulator).reset()?;
 			ret
 		};

@@ -4,6 +4,8 @@ const WS_ADMIN_PONG                              = 1;
 const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST = 2;
 const WS_ADMIN_GET_MOST_RECENT_REQUESTS          = 3;
 const WS_ADMIN_GET_MOST_RECENT_RESPONSE          = 3;
+const WS_ADMIN_REQUEST_CHART_REQUEST             = 4;
+const WS_ADMIN_REQUEST_CHART_RESPONSE            = 4;
 
 const METHOD_GET     = 0;
 const METHOD_POST    = 1;
@@ -292,6 +294,7 @@ function process_pong(buffer) {
 		var prev_timestamp = to_u64(buffer, offset); offset += 8;
 		var startup_time = to_u64(buffer, offset); offset += 8;
 		var lat_sum_micros = to_u64(buffer, offset); offset += 8;
+		var memory_bytes = to_u64(buffer, offset); offset += 8;
 
 		if(timestamp > mr_timestamp) {
 			mr_timestamp = timestamp;
@@ -399,6 +402,7 @@ function process_ws_admin_get_stats_response(buffer) {
 		var prev_timestamp = to_u64(buffer, offset); offset += 8;
 		var startup_time = to_u64(buffer, offset); offset += 8;
 		var lat_sum_micros = to_u64(buffer, offset); offset += 8;
+		var memory_bytes = to_u64(buffer, offset); offset += 8;
 
 		last_timestamp = timestamp;
 		console.log('record { requests: ' + requests + ', timestamp: ' + timestamp);
@@ -740,6 +744,156 @@ function process_get_most_recent_requests(buffer) {
 	}
 }
 
+function format_date(date) {
+	var hours = date.getHours();
+	var minutes = date.getMinutes();
+	var seconds = date.getSeconds();
+	var am_pm = 'AM';
+
+	if(seconds < 10) {
+		seconds = '0' + seconds;
+	}
+	if(minutes < 10) {
+		minutes = '0' + minutes;
+	}
+
+	if(hours == 12) {
+		am_pm = 'PM';
+	} else if(hours > 12) {
+		hours -= 12;
+		am_pm = 'PM';
+	}
+
+	return hours + ':' + minutes + ':' + seconds + ' ' + am_pm;
+}
+
+function process_request_chart_response(buffer) {
+        var server_time = to_u64(buffer, 1);
+	update_timestamps(server_time);
+	var count = to_u64(buffer, 9);
+	var offset = 17;
+
+	var server_time = to_u64(buffer, 1);
+	var data = [];
+	var labels = [];
+	var latencies = [];
+	var connects_arr = [];
+	var memory_bytes_arr = [];
+	for (var i=0; i<count; i++) {
+		var requests = Number(to_u64(buffer, offset)); offset += 8;
+		var latency = Number(to_u64(buffer, offset)); offset += 8;
+		var connects = Number(to_u64(buffer, offset)); offset += 8;
+		var timestamp = Number(to_u64(buffer, offset)); offset += 8;
+		var prev_timestamp = Number(to_u64(buffer, offset)); offset += 8;
+		var memory_bytes = Number(to_u64(buffer, offset)); offset += 8;
+
+		var avg_latency = latency / requests;
+		var duration = timestamp - prev_timestamp;
+		var requests = requests / (duration / 1000);
+		var connects = connects / (duration / 1000);
+		var memory_bytes = memory_bytes / (1024 * 1024);
+		data.push(requests);
+		var date = new Date(timestamp);
+		labels.push(format_date(date));
+		latencies.push(avg_latency);
+		connects_arr.push(connects);
+		memory_bytes_arr.push(memory_bytes);
+	}
+
+	data.reverse();
+	labels.reverse();
+	latencies.reverse();
+	connects_arr.reverse();
+	memory_bytes_arr.reverse();
+
+	const requests_data = {
+		labels: labels,
+		datasets: [{
+			label: 'Requests per Second',
+			backgroundColor: 'rgb(74, 20, 140)',
+			borderColor: 'rgb(74, 20, 140)',
+			data,
+			}]
+		};
+
+	const requests_config = {
+		type: 'line',
+		data: requests_data,
+		options: {}
+	};
+
+	const requests_chart = new Chart(
+		document.getElementById('requestschart'),
+		requests_config
+	);
+
+        const memory_data = {
+		labels: labels,
+		datasets: [{
+			label: 'Memory Usage in MB',
+			backgroundColor: 'rgb(74, 20, 140)',
+			borderColor: 'rgb(74, 20, 140)',
+			data: memory_bytes_arr,
+		}]
+	};
+
+	const memory_config = {
+		type: 'line',
+		data: memory_data,
+		options: {}
+	};
+
+	const memory_chart = new Chart(
+		document.getElementById('memorychart'),
+		memory_config
+	);
+
+        const latency_data = {
+		labels: labels,
+		datasets: [{
+			label: 'Average Latency per request in \u03BCs',
+			backgroundColor: 'rgb(255, 99, 132)',
+			borderColor: 'rgb(255, 99, 132)',
+			data: latencies,
+		}]
+	};
+
+	const latency_config = {
+		type: 'line',
+		data: latency_data,
+		options: {}
+	};
+
+	const latency_chart = new Chart(
+		document.getElementById('latencychart'),
+		latency_config,
+	);
+
+	const connections_data = {
+		labels: labels,
+		datasets: [{ 
+			label: 'Connections per second',
+			backgroundColor: 'rgb(255, 99, 132)',
+			borderColor: 'rgb(255, 99, 132)',
+			data: connects_arr,
+		}]
+	};
+
+	const connections_config = {
+		type: 'line',
+		data: connections_data,
+		options: {}
+	};
+
+
+	const connections_chart = new Chart(
+		document.getElementById('connectionschart'),
+		connections_config
+	);
+
+	document.getElementById('loading').style.display = 'none';
+}
+
 function init_listener() {
 	var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
@@ -763,6 +917,8 @@ function init_listener() {
 			console.log("pong received");
 		} else if(buffer[0] == WS_ADMIN_GET_MOST_RECENT_RESPONSE) {
 			process_get_most_recent_requests(buffer);
+		} else if(buffer[0] == WS_ADMIN_REQUEST_CHART_RESPONSE) {
+			process_request_chart_response(buffer);
 		} else {
 			console.log("WARNING: Unknown command: " + buffer[0]);
 		}
@@ -810,20 +966,33 @@ function load_stats() {
 
 	window.onscroll = function() {
 	        if (window.innerHeight + window.pageYOffset >= document.body.offsetHeight &&
-			        window.innerHeight + window.pageYOffset > last_scroll) {
-			                var link = document.getElementById('load_more');
-			                var last = link.last;
+			window.innerHeight + window.pageYOffset > last_scroll) {
+			var link = document.getElementById('load_more');
+			var last = link.last;
 
-			                const buffer = new ArrayBuffer(17);
-			                const view = new Uint8Array(buffer);
-			                for(var i=0; i<16; i++) {
-						                        view[i] = 0;
-						                }
-			                view[0] = 2;
-			                u64_tobin(last, view, 1);
-			                view[16] = 30;
-			                sock.send(buffer);
-			        }
-	        last_scroll = window.innerHeight + window.pageYOffset;
+			const buffer = new ArrayBuffer(17);
+			const view = new Uint8Array(buffer);
+			for(var i=0; i<16; i++) {
+				view[i] = 0;
+			}
+			view[0] = 2;
+			u64_tobin(last, view, 1);
+			view[16] = 30;
+			sock.send(buffer);
+		}
+		last_scroll = window.innerHeight + window.pageYOffset;
+	}
 }
+
+function load_charts_niohttpd() {
+        let sock = init_listener();
+
+	sock.addEventListener('open', function (event) {
+		console.log('connected');
+		const buffer = new ArrayBuffer(1);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_REQUEST_CHART_REQUEST;
+		sock.send(buffer);
+	});
+
 }
