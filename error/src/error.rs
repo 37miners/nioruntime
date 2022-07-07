@@ -113,6 +113,9 @@ pub enum ErrorKind {
 	/// ProcessNotStarted
 	#[fail(display = "Process not started: {}", _0)]
 	ProcessNotStarted(String),
+	/// InvalidRegex
+	#[fail(display = "Invalid Regex: {}", _0)]
+	InvalidRegex(String),
 	/// InvalidBootstrapLine
 	#[fail(display = "InvalidBootstrapLine: {}", _0)]
 	InvalidBootstrapLine(String),
