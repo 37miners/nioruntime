@@ -575,6 +575,14 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let async_timeout = match args.is_present("async_timeout") {
+		true => args.value_of("async_timeout").unwrap().parse()?,
+		false => match file_args.is_present("async_timeout") {
+			true => file_args.value_of("async_timeout").unwrap().parse()?,
+			false => 3_600_000,
+		},
+	};
+
 	let read_buffer_size = match args.is_present("read_buffer_size") {
 		true => args.value_of("read_buffer_size").unwrap().parse()?,
 		false => match file_args.is_present("read_buffer_size") {
@@ -839,6 +847,7 @@ fn real_main() -> Result<(), Error> {
 		gzip_extensions,
 		connect_timeout,
 		idle_timeout,
+		async_timeout,
 		mainlog_max_age,
 		mainlog_max_size,
 		max_active_connections,

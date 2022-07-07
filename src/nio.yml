@@ -146,6 +146,11 @@ args:
         long: idle_timeout
         takes_value: true
         value_name: idle_timeout
+    - async_timeout:
+        help: The amount of time, in milliseconds, before an idle async connection is closed. The default is 3,600,000 ms, or 1 hour.
+        long: async_timeout
+        takes_value: true
+        value_name: async_timeout
     - connect_timeout:
         help: The amount of time, in milliseconds, before a connection that has not yet sent any data to the server is closed. The default is 30,000 ms.
         short: s

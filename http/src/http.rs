@@ -4206,13 +4206,29 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				.data_as_mut::<ConnectionInfo>()
 			{
 				Some(connection) => {
-					if now.saturating_sub(connection.last_data) >= config.idle_timeout * 1_000 {
+					let last_data = now.saturating_sub(connection.last_data);
+					if last_data >= config.idle_timeout * 1_000 {
 						// read timeout
-						thread_context.read_timeouts += 1;
-						match &connection.conn_data {
-							Some(conn_data) => conn_data.close()?,
-							None => {
-								warn!("expected conn_data for index {}", index)?;
+						// allow for async connections to continue.
+						// could be download of a large file
+
+						let is_async = {
+							let async_connections = lockr!(thread_context.async_connections)?;
+							match &connection.conn_data {
+								Some(conn_data) => async_connections
+									.get_raw(&conn_data.get_connection_id().to_be_bytes())
+									.is_some(),
+								None => false,
+							}
+						};
+
+						if !is_async || last_data >= config.async_timeout * 1_000 {
+							thread_context.read_timeouts += 1;
+							match &connection.conn_data {
+								Some(conn_data) => conn_data.close()?,
+								None => {
+									warn!("expected conn_data for index {}", index)?;
+								}
 							}
 						}
 					} else if connection.last_data == connection.connection

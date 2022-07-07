@@ -1487,6 +1487,7 @@ pub struct HttpConfig {
 	pub cache_recheck_fs_millis: u128,
 	pub connect_timeout: u128,
 	pub idle_timeout: u128,
+	pub async_timeout: u128,
 	pub mime_map: Vec<(String, String)>,
 	pub proxy_config: ProxyConfig,
 	pub temp_dir: String,
@@ -1572,6 +1573,7 @@ impl Default for HttpConfig {
 			cache_recheck_fs_millis: 3_000, // 3 seconds
 			connect_timeout: 30_000,        // 30 seconds
 			idle_timeout: 60_000,           // 1 minute
+			async_timeout: 3_600_000,       // 1 hour
 			show_request_headers: false,    // debug: show request headers
 			show_response_headers: false,   // debug: show response headers
 			debug_api: false, // debug: dummy post/get request handler (note: we just display the flag here,
