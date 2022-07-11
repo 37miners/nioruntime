@@ -812,6 +812,10 @@ where
 		self.debug_flag("--debug_proxy", self.config.debug_proxy)?;
 		self.debug_flag("--debug_log_queue", self.config.debug_log_queue)?;
 		self.debug_flag("--debug_show_stats", self.config.debug_show_stats)?;
+		self.debug_flag(
+			"--delete_request_log_rotation",
+			self.config.request_log_config.delete_rotation,
+		)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
 

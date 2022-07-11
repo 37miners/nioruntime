@@ -292,3 +292,7 @@ args:
         long: dictionary_capacity
         takes_value: true
         value_name: dictionary_capacity
+    - delete_request_log_rotation:
+        help: Delete the request log rotation file upon rotation. This is used in testing scenarios where too much logging would occur if it were not deleted. This setting must not be used in production environments.
+        long: delete_request_log_rotation
+        takes_value: false

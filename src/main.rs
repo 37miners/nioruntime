@@ -702,6 +702,11 @@ fn real_main() -> Result<(), Error> {
 		false => file_args.is_present("show_response_headers"),
 	};
 
+	let delete_request_log_rotation = match args.is_present("delete_request_log_rotation") {
+		true => true,
+		false => file_args.is_present("delete_request_log_rotation"),
+	};
+
 	let debug = match args.is_present("debug") {
 		true => true,
 		false => file_args.is_present("debug"),
@@ -892,6 +897,7 @@ fn real_main() -> Result<(), Error> {
 			colors: false,
 			show_stdout: false,
 			file_header,
+			delete_rotation: delete_request_log_rotation,
 			auto_rotate: false,
 			max_age_millis: requestlog_max_age,
 			max_size: requestlog_max_size,
