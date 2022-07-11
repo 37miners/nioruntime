@@ -56,6 +56,7 @@ use nioruntime_evh::{EventHandler, EvhParams};
 use nioruntime_log::*;
 use nioruntime_util::bytes_eq;
 use nioruntime_util::bytes_find;
+use nioruntime_util::multi_match::MultiMatch;
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::threadpool::StaticThreadPool;
 use nioruntime_util::StaticHash;
@@ -589,6 +590,24 @@ where
 			)[..],
 		)?;
 
+		self.startup_line(
+			"max_matches",
+			&format!(
+				"{}",
+				self.config.max_matches.to_formatted_string(&Locale::en)
+			),
+		)?;
+
+		self.startup_line(
+			"dictionary_capacity",
+			&format!(
+				"{}",
+				self.config
+					.dictionary_capacity
+					.to_formatted_string(&Locale::en)
+			),
+		)?;
+
 		let mut extensions = "[".to_string();
 		let mut first = true;
 		for extension in &self.config.gzip_extensions {
@@ -944,9 +963,6 @@ where
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
 		sha1: &mut Sha1,
 		ch: &mut StaticHash<(), ()>,
-		header_map: &mut StaticHash<(), ()>,
-		key_buf: &mut Vec<u8>,
-		value_buf: &mut Vec<u8>,
 		webroot: &Vec<u8>,
 		temp_dir: &String,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
@@ -960,6 +976,7 @@ where
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		matcher: &mut MultiMatch,
 	) -> Result<
 		(
 			bool,
@@ -1026,9 +1043,6 @@ where
 				ws_handler,
 				sha1,
 				ch,
-				header_map,
-				key_buf,
-				value_buf,
 				webroot,
 				temp_dir,
 				idle_proxy_connections,
@@ -1042,6 +1056,7 @@ where
 				internal,
 				dropped_lat_sum,
 				thread_pool,
+				matcher,
 			)?;
 		}
 
@@ -1130,9 +1145,6 @@ where
 			ws_handler,
 			&mut thread_context.sha1,
 			&mut thread_context.cache_hits,
-			&mut thread_context.header_map,
-			&mut thread_context.key_buf,
-			&mut thread_context.value_buf,
 			&mut thread_context.webroot,
 			&mut thread_context.temp_dir,
 			&mut thread_context.idle_proxy_connections,
@@ -1146,6 +1158,7 @@ where
 			internal,
 			&mut thread_context.dropped_lat_sum,
 			thread_pool,
+			&mut thread_context.matcher,
 		)?;
 
 		if was_post_await {
@@ -1202,9 +1215,6 @@ where
 					ws_handler,
 					&mut thread_context.sha1,
 					&mut thread_context.cache_hits,
-					&mut thread_context.header_map,
-					&mut thread_context.key_buf,
-					&mut thread_context.value_buf,
 					&mut thread_context.webroot,
 					&mut thread_context.temp_dir,
 					&mut thread_context.idle_proxy_connections,
@@ -1218,6 +1228,7 @@ where
 					internal,
 					&mut thread_context.dropped_lat_sum,
 					thread_pool,
+					&mut thread_context.matcher,
 				)?;
 
 				match nconn {
@@ -1264,9 +1275,6 @@ where
 				ws_handler,
 				&mut thread_context.sha1,
 				&mut thread_context.cache_hits,
-				&mut thread_context.header_map,
-				&mut thread_context.key_buf,
-				&mut thread_context.value_buf,
 				&mut thread_context.webroot,
 				&mut thread_context.temp_dir,
 				&mut thread_context.idle_proxy_connections,
@@ -1280,6 +1288,7 @@ where
 				internal,
 				&mut thread_context.dropped_lat_sum,
 				thread_pool,
+				&mut thread_context.matcher,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1305,9 +1314,6 @@ where
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
 		sha1: &mut Sha1,
 		ch: &mut StaticHash<(), ()>,
-		header_map: &mut StaticHash<(), ()>,
-		key_buf: &mut Vec<u8>,
-		value_buf: &mut Vec<u8>,
 		webroot: &Vec<u8>,
 		temp_dir: &String,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
@@ -1321,6 +1327,7 @@ where
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		matcher: &mut MultiMatch,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1348,9 +1355,6 @@ where
 				ws_handler,
 				sha1,
 				ch,
-				header_map,
-				key_buf,
-				value_buf,
 				webroot,
 				temp_dir,
 				idle_proxy_connections,
@@ -1364,6 +1368,7 @@ where
 				internal,
 				dropped_lat_sum,
 				thread_pool,
+				matcher,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1399,16 +1404,7 @@ where
 		conn_data: &ConnectionData,
 	) -> Result<(), Error> {
 		if headers.has_expect() {
-			match headers.get_header_value(EXPECT_BYTES)? {
-				Some(values) => {
-					for value in values {
-						if value == "100-continue".as_bytes() {
-							conn_data.write(HTTP_CONTINUE_100)?;
-						}
-					}
-				}
-				None => {}
-			}
+			conn_data.write(HTTP_CONTINUE_100)?;
 		}
 
 		Ok(())
@@ -1465,7 +1461,7 @@ where
 
 				let (api_context, nconn, update_info) = match process_proxy_outbound(
 					conn_data,
-					&headers,
+					headers,
 					config,
 					&proxy_entry,
 					buffer,
@@ -1520,7 +1516,7 @@ where
 							&None,
 							&None,
 							false,
-							headers.get_header_value(HOST_BYTES)?,
+							headers.get_host(),
 							local_peer,
 							log_queue,
 							stat_handler,
@@ -1610,23 +1606,18 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					if bytes_find(uri, &config.admin_uri) == Some(0) && internal_handler.is_none() {
 						(false, 0)
 					} else if headers.has_websocket_upgrade() {
-						let sec_key = headers.get_header_value(SEC_WEBSOCKET_KEY_BYTES)?;
-						match sec_key {
-							Some(sec_key) => {
-								if sec_key.len() > 0 {
-									conn_info.is_websocket = true;
-									Self::send_websocket_handshake_response(
-										conn_data,
-										&from_utf8(&sec_key[0])?.to_string(),
-										sha1,
-									)?;
-									conn_info.websocket_uri = Some(uri.to_vec());
-									(true, headers.len())
-								} else {
-									(false, 0)
-								}
-							}
-							None => (false, 0),
+						let sec_key = headers.websocket_sec_key();
+						if sec_key.len() > 0 {
+							conn_info.is_websocket = true;
+							Self::send_websocket_handshake_response(
+								conn_data,
+								&from_utf8(&sec_key)?.to_string(),
+								sha1,
+							)?;
+							conn_info.websocket_uri = Some(uri.to_vec());
+							(true, headers.len())
+						} else {
+							(false, 0)
 						}
 					} else {
 						(false, 0)
@@ -1820,9 +1811,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		ws_handler: Option<&Pin<Box<WsHandler>>>,
 		sha1: &mut Sha1,
 		ch: &mut StaticHash<(), ()>,
-		header_map: &mut StaticHash<(), ()>,
-		key_buf: &mut Vec<u8>,
-		value_buf: &mut Vec<u8>,
 		webroot: &Vec<u8>,
 		temp_dir: &String,
 		idle_proxy_connections: &mut HashMap<ProxyEntry, HashMap<SocketAddr, HashSet<ProxyInfo>>>,
@@ -1836,6 +1824,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		internal: &HashMap<String, Vec<u8>>,
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		matcher: &mut MultiMatch,
 	) -> Result<
 		(
 			usize,
@@ -1873,7 +1862,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			}
 		}
 
-		let headers = match HttpHeaders::new(buffer, config, header_map, key_buf, value_buf) {
+		let headers = match HttpHeaders::new(buffer, config, matcher) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -1901,7 +1890,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
-							None,
+							&[],
 							local_peer,
 							log_queue,
 							stat_handler,
@@ -1940,7 +1929,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
-							None,
+							&[],
 							local_peer,
 							log_queue,
 							stat_handler,
@@ -1979,7 +1968,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
-							None,
+							&[],
 							local_peer,
 							log_queue,
 							stat_handler,
@@ -2019,7 +2008,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							&None,
 							&None,
 							false,
-							None,
+							&[],
 							local_peer,
 							log_queue,
 							stat_handler,
@@ -2043,10 +2032,11 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let (len, key, nconn, update_info) = match headers {
 			Some(headers) => {
 				if config.show_request_headers {
+					let headers_display = format!("{}", headers);
 					warn!(
 						"HTTP Request ({}):\n{}",
 						conn_data.get_connection_id(),
-						headers
+						headers_display
 					)?;
 				}
 				match ws_handler {
@@ -2091,7 +2081,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						&None,
 						&None,
 						false,
-						headers.get_header_value(HOST_BYTES)?,
+						headers.get_host(),
 						local_peer,
 						log_queue,
 						stat_handler,
@@ -2134,34 +2124,24 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 				let range: Option<(usize, usize)> = if was_api {
 					None
-				} else if headers.has_range() {
-					let range = &headers.get_header_value(RANGE_BYTES)?;
-					match range {
-						Some(range) => {
-							if range.len() < 1 {
-								None
-							} else {
-								let range = from_utf8(&range[0])?;
-								let start_index = range.find("=");
-								match start_index {
-									Some(start_index) => {
-										let dash_index = range.find("-");
-										match dash_index {
-											Some(dash_index) => {
-												let end = range.len();
-												let start_str =
-													&range[(start_index + 1)..dash_index];
-												let end_str = &range[(dash_index + 1)..end];
-												Some((
-													start_str.parse().unwrap_or(0),
-													end_str.parse().unwrap_or(u32::MAX as usize),
-												))
-											}
-											None => None,
-										}
-									}
-									None => None,
+				} else if headers.range().len() > 0 {
+					let range = headers.range();
+					let range = from_utf8(&range)?;
+					let start_index = range.find("=");
+					match start_index {
+						Some(start_index) => {
+							let dash_index = range.find("-");
+							match dash_index {
+								Some(dash_index) => {
+									let end = range.len();
+									let start_str = &range[(start_index + 1)..dash_index];
+									let end_str = &range[(dash_index + 1)..end];
+									Some((
+										start_str.parse().unwrap_or(0),
+										end_str.parse().unwrap_or(u32::MAX as usize),
+									))
 								}
+								None => None,
 							}
 						}
 						None => None,
@@ -2231,14 +2211,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				};
 
 				if !was_api && !was_proxy && !was_admin {
-					let if_modified_since = if headers.has_if_modified_since() {
-						headers.get_header_value(IF_MODIFIED_SINCE)?
+					let if_modified_since = if headers.if_modified_since().len() > 0 {
+						Some(headers.if_modified_since().to_vec())
 					} else {
 						None
 					};
 
-					let if_none_match = if headers.has_if_none_match() {
-						headers.get_header_value(IF_NONE_MATCH)?
+					let if_none_match = if headers.if_none_match().len() > 0 {
+						Some(headers.if_none_match().to_vec())
 					} else {
 						None
 					};
@@ -2284,7 +2264,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						&if_modified_since,
 						&if_none_match,
 						gzip,
-						headers.get_header_value(HOST_BYTES)?,
+						headers.get_host(),
 						local_peer,
 						log_queue,
 						stat_handler,
@@ -2321,7 +2301,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
-										headers.get_header_value(HOST_BYTES)?,
+										headers.get_host(),
 										local_peer,
 										log_queue,
 										stat_handler,
@@ -2360,7 +2340,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
-										headers.get_header_value(HOST_BYTES)?,
+										headers.get_host(),
 										local_peer,
 										log_queue,
 										stat_handler,
@@ -2399,7 +2379,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
-										headers.get_header_value(HOST_BYTES)?,
+										headers.get_host(),
 										local_peer,
 										log_queue,
 										stat_handler,
@@ -2439,7 +2419,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										&None,
 										&None,
 										false,
-										headers.get_header_value(HOST_BYTES)?,
+										headers.get_host(),
 										local_peer,
 										log_queue,
 										stat_handler,
@@ -2709,8 +2689,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			thread_context.instant = Instant::now();
 		}
 
-		thread_context.header_map.clear()?;
-
 		Ok(())
 	}
 
@@ -2752,10 +2730,10 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		webroot: &Vec<u8>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
-		if_modified_since: &Option<Vec<Vec<u8>>>,
-		if_none_match: &Option<Vec<Vec<u8>>>,
+		if_modified_since: &Option<Vec<u8>>,
+		if_none_match: &Option<Vec<u8>>,
 		gzip: bool,
-		host: Option<Vec<Vec<u8>>>,
+		host: &[u8],
 		local_peer: &Option<SocketAddr>,
 		log_queue: &mut StaticQueue<LogItem>,
 		stat_handler: &StatHandler,
@@ -2769,26 +2747,21 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 		let mut webroot_applied = webroot;
 		let path = if config.virtual_hosts.len() > 0 {
-			match host {
-				Some(host) => {
-					if host.len() > 0 {
-						let host = match bytes_find(&host[0], &[':' as u8]) {
-							Some(index) => &host[0][0..index],
-							None => &host[0][..],
-						};
+			if host.len() > 0 {
+				let host = match bytes_find(host, &[':' as u8]) {
+					Some(index) => &host[0..index],
+					None => &host[..],
+				};
 
-						match config.virtual_hosts.get(host) {
-							Some(host) => {
-								webroot_applied = host;
-								Some(host.clone())
-							}
-							None => None,
-						}
-					} else {
-						None
+				match config.virtual_hosts.get(host) {
+					Some(host) => {
+						webroot_applied = host;
+						Some(host.clone())
 					}
+					None => None,
 				}
-				None => None,
+			} else {
+				None
 			}
 		} else {
 			None
@@ -2953,28 +2926,27 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn not_modified(
-		if_modified_since: &Option<Vec<Vec<u8>>>,
-		if_none_match: &Option<Vec<Vec<u8>>>,
+		if_modified_since: &Option<Vec<u8>>,
+		if_none_match: &Option<Vec<u8>>,
 		etag: &[u8],
 		last_modified: u128,
 	) -> Result<bool, Error> {
-		match &*if_modified_since {
+		match &if_modified_since {
 			Some(if_modified_since) => {
 				let mut date_fmt = vec![];
 				Self::extend_date(&mut date_fmt, last_modified)?;
 				let x = from_utf8(&date_fmt)?;
-				if x.as_bytes() == if_modified_since[0] {
+				if &x.as_bytes() == if_modified_since {
 					return Ok(true);
 				}
 			}
 			None => {}
 		}
 
-		match &*if_none_match {
+		match &if_none_match {
 			Some(if_none_match) => {
 				let if_none_match_len = if_none_match.len();
 				if if_none_match_len > 0 {
-					let if_none_match = &if_none_match[0];
 					if if_none_match.len() > 3 {
 						let if_none_match_len = if_none_match.len();
 						let if_none_match = &if_none_match[1..(if_none_match_len - 1)];
@@ -3007,8 +2979,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		http_method: &HttpMethod,
 		range: Option<(usize, usize)>,
 		mime_map: &HashMap<Vec<u8>, Vec<u8>>,
-		if_modified_since: &Option<Vec<Vec<u8>>>,
-		if_none_match: &Option<Vec<Vec<u8>>>,
+		if_modified_since: &Option<Vec<u8>>,
+		if_none_match: &Option<Vec<u8>>,
 		gzip: bool,
 		log_queue: &mut StaticQueue<LogItem>,
 		dropped_log_items: &mut u64,
@@ -3176,8 +3148,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
 		slabs: &Arc<RwLock<SlabAllocator>>,
 		close: bool,
-		if_modified_since: &Option<Vec<Vec<u8>>>,
-		if_none_match: &Option<Vec<Vec<u8>>>,
+		if_modified_since: &Option<Vec<u8>>,
+		if_none_match: &Option<Vec<u8>>,
 		gzip: bool,
 		stat_handler: &StatHandler,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
@@ -5313,77 +5285,77 @@ GET /api?def HTTP/1.1\r\nHost: localhost\r\n\r\n",
 		let mut strm =
 			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
 
-		strm.write(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-10\r\n\r\n")?;
+		strm.write(b"GET /index.html HTTP/1.1\r\nConnection: close\r\nHost: localhost\r\nRange: bytes=0-10\r\n\r\n")?;
 		let mut buf = vec![];
 		buf.resize(10000, 0u8);
 		let mut len_sum = 0;
 		loop {
 			let len = strm.read(&mut buf[len_sum..])?;
 			len_sum += len;
-
-			let mut do_break = false;
-			for i in 3..len_sum {
-				if buf[i - 3] == '\r' as u8
-					&& buf[i - 2] == '\n' as u8
-					&& buf[i - 1] == '\r' as u8
-					&& buf[i] == '\n' as u8
-				{
-					let str = std::str::from_utf8(&buf[0..len_sum])?;
-					let index = str.find("Content-Length: ");
-					let index = index.unwrap();
-					let str = &str[index + 16..];
-					let end = str.find("\r").unwrap();
-					let mut len: usize = str[0..end].parse()?;
-					len += i + 1;
-					if len_sum >= len {
-						do_break = true;
-						break;
-					}
-				}
-			}
-			assert!(len != 0);
-			if do_break {
+			if len == 0 {
 				break;
 			}
 		}
+
+		let mut found_end = false;
+		for i in 3..len_sum {
+			if buf[i - 3] == '\r' as u8
+				&& buf[i - 2] == '\n' as u8
+				&& buf[i - 1] == '\r' as u8
+				&& buf[i] == '\n' as u8
+			{
+				let str = std::str::from_utf8(&buf[0..len_sum])?;
+				let index = str.find("Content-Length: ");
+				let index = index.unwrap();
+				let str = &str[index + 16..];
+				let end = str.find("\r").unwrap();
+				let mut len: usize = str[0..end].parse()?;
+				len += i + 1;
+				assert!(len_sum >= len);
+				found_end = true;
+			}
+		}
+
+		assert!(found_end);
 
 		let s = bytes_find(&buf[0..len_sum], "\r\n\r\n".as_bytes()).unwrap();
 		let content = &buf[(4 + s)..len_sum];
 		assert_eq!(content.len(), 11);
+		let mut strm =
+			TcpStream::connect(SocketAddr::from_str(&format!("127.0.0.1:{}", port)[..])?)?;
 
-		strm.write(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nRange: bytes=4-17\r\n\r\n")?;
+		strm.write(b"GET /index.html HTTP/1.1\r\nConnection: close\r\nHost: localhost\r\nRange: bytes=4-17\r\n\r\n")?;
 		let mut buf = vec![];
 		buf.resize(10000, 0u8);
 		let mut len_sum = 0;
 		loop {
 			let len = strm.read(&mut buf[len_sum..])?;
 			len_sum += len;
-
-			let mut do_break = false;
-			for i in 3..len_sum {
-				if buf[i - 3] == '\r' as u8
-					&& buf[i - 2] == '\n' as u8
-					&& buf[i - 1] == '\r' as u8
-					&& buf[i] == '\n' as u8
-				{
-					let str = std::str::from_utf8(&buf[0..len_sum])?;
-					let index = str.find("Content-Length: ");
-					let index = index.unwrap();
-					let str = &str[index + 16..];
-					let end = str.find("\r").unwrap();
-					let mut len: usize = str[0..end].parse()?;
-					len += i + 1;
-					if len_sum >= len {
-						do_break = true;
-						break;
-					}
-				}
-			}
-			assert!(len != 0);
-			if do_break {
+			if len == 0 {
 				break;
 			}
 		}
+
+		let mut found_end = false;
+		for i in 3..len_sum {
+			if buf[i - 3] == '\r' as u8
+				&& buf[i - 2] == '\n' as u8
+				&& buf[i - 1] == '\r' as u8
+				&& buf[i] == '\n' as u8
+			{
+				let str = std::str::from_utf8(&buf[0..len_sum])?;
+				let index = str.find("Content-Length: ");
+				let index = index.unwrap();
+				let str = &str[index + 16..];
+				let end = str.find("\r").unwrap();
+				let mut len: usize = str[0..end].parse()?;
+				len += i + 1;
+				assert!(len_sum >= len);
+				found_end = true;
+			}
+		}
+
+		assert!(found_end);
 
 		let s = bytes_find(&buf[0..len_sum], "\r\n\r\n".as_bytes()).unwrap();
 		let content = &buf[(4 + s)..len_sum];

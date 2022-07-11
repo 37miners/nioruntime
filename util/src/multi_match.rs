@@ -14,8 +14,6 @@
 
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use std::marker::PhantomData;
-use std::pin::Pin;
 
 info!();
 
@@ -39,15 +37,17 @@ impl Default for Match {
 pub struct Pattern {
 	pub regex: String,
 	pub id: u64,
+	pub multi_line: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Node {
 	next: [u32; 257],
 	pattern_id: u64,
 	is_multi: bool,
 	is_term: bool,
 	is_start_only: bool,
+	is_multi_line: bool,
 }
 
 impl Default for Node {
@@ -58,22 +58,20 @@ impl Default for Node {
 			is_multi: false,
 			is_term: false,
 			is_start_only: false,
+			is_multi_line: true,
 		}
 	}
 }
 
-pub struct Dictionary<OnMatch> {
+#[derive(Clone, Debug)]
+pub struct Dictionary {
 	nodes: Vec<Node>,
 	next: u32,
 	case_sensitive: bool,
 	max_wildcard_len: usize,
-	on_match: Option<Pin<Box<OnMatch>>>,
 }
 
-impl<OnMatch> Dictionary<OnMatch>
-where
-	OnMatch: Fn(&Match) -> Result<(), Error>,
-{
+impl Dictionary {
 	pub fn new(capacity: usize, case_sensitive: bool, max_wildcard_len: usize) -> Self {
 		let mut nodes = vec![];
 		nodes.resize(capacity, Node::default());
@@ -82,13 +80,7 @@ where
 			next: 0,
 			case_sensitive,
 			max_wildcard_len,
-			on_match: None,
 		}
-	}
-
-	pub fn set_on_match(&mut self, on_match: OnMatch) -> Result<(), Error> {
-		self.on_match = Some(Box::pin(on_match));
-		Ok(())
 	}
 
 	pub fn add(&mut self, pattern: Pattern, is_term: bool) -> Result<(), Error> {
@@ -183,6 +175,7 @@ where
 					cur_node.pattern_id = pattern.id;
 					cur_node.is_term = is_term;
 					cur_node.is_start_only = is_start_only;
+					cur_node.is_multi_line = pattern.multi_line;
 					break;
 				}
 			};
@@ -192,29 +185,35 @@ where
 	}
 }
 
-pub struct MultiMatch<OnMatch> {
+#[derive(Debug)]
+pub struct MultiMatch {
 	matches: Vec<Match>,
 	match_count: usize,
-	dictionary: Dictionary<OnMatch>,
+	dictionary: Dictionary,
 	branch_stack: Vec<(usize, usize)>,
-	_on_match: PhantomData<OnMatch>,
+	termination_length: usize,
 }
 
-impl<OnMatch> MultiMatch<OnMatch>
-where
-	OnMatch: Fn(&Match) -> Result<(), Error>,
-{
-	pub fn new(max_matches: usize, dictionary: Dictionary<OnMatch>) -> Self {
+impl MultiMatch {
+	pub fn new(
+		max_matches: usize,
+		dictionary: Dictionary,
+		termination_length: Option<usize>,
+	) -> Self {
 		let mut matches = vec![];
 		let mut branch_stack = vec![];
 		matches.resize(max_matches, Match::default());
 		branch_stack.resize(dictionary.nodes.len(), (0, 0));
+		let termination_length = match termination_length {
+			Some(termination_length) => termination_length,
+			None => usize::MAX,
+		};
 		Self {
 			matches,
 			match_count: 0,
 			dictionary,
 			branch_stack,
-			_on_match: PhantomData,
+			termination_length,
 		}
 	}
 
@@ -227,14 +226,16 @@ where
 		let mut multi_counter = 0;
 		let mut branch_stack_counter = 0;
 		let mut is_branch = false;
+		let mut has_newline = false;
 
 		loop {
-			if start >= len {
+			if start >= len || start >= self.termination_length {
 				break;
 			}
 			if is_branch {
 				is_branch = false;
 			} else {
+				has_newline = false;
 				itt = start;
 			}
 			loop {
@@ -252,6 +253,10 @@ where
 					}
 				};
 
+				if byte == '\r' as u8 || byte == '\n' as u8 {
+					has_newline = true;
+				}
+
 				if !cur_node.is_multi {
 					multi_counter = 0;
 				}
@@ -261,11 +266,9 @@ where
 						if cur_node.is_multi {
 							multi_counter += 1;
 							if multi_counter >= self.dictionary.max_wildcard_len {
-								return Err(ErrorKind::InvalidRegex(format!(
-									"Wildcard max length exceeded: {}",
-									self.dictionary.max_wildcard_len
-								))
-								.into());
+								// wild card max length. break as no
+								// match and continue
+								break;
 							}
 							itt += 1;
 							continue;
@@ -296,29 +299,19 @@ where
 					_ => {
 						if !(cur_node.is_start_only && start != 0) {
 							if self.match_count >= self.matches.len() {
-								return Err(ErrorKind::CapacityExceeded(format!(
-									"Too many matches found. Maximum is {}.",
-									self.matches.len()
-								))
-								.into());
-							}
-							self.matches[self.match_count].id = cur_node.pattern_id;
-							self.matches[self.match_count].end = itt + 1;
-							self.matches[self.match_count].start = start;
-							match &self.dictionary.on_match {
-								Some(on_match) => {
-									match (on_match)(&self.matches[self.match_count]) {
-										Ok(_) => {}
-										Err(e) => {
-											error!("OnMatch callback generated error: {}", e)?
-										}
-									}
-								}
-								None => {}
-							}
-							self.match_count += 1;
-							if cur_node.is_term {
+								// too many matches return with the
+								// first set of matches
 								return Ok(());
+							}
+
+							if !has_newline || cur_node.is_multi_line {
+								self.matches[self.match_count].id = cur_node.pattern_id;
+								self.matches[self.match_count].end = itt + 1;
+								self.matches[self.match_count].start = start;
+								self.match_count += 1;
+								if cur_node.is_term {
+									return Ok(());
+								}
 							}
 						}
 					}
@@ -352,20 +345,16 @@ where
 #[cfg(test)]
 mod test {
 	use crate::multi_match::*;
-	use crate::{lockr, lockw};
-	use nioruntime_deps::rand;
 	use nioruntime_err::Error;
-	use std::sync::Arc;
-	use std::sync::RwLock;
 
 	#[test]
 	fn test_multi_match1() -> Result<(), Error> {
 		let mut d = Dictionary::new(10_000, true, 100);
-		d.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		d.add(
 			Pattern {
 				regex: "test".to_string(),
 				id: 1234,
+				multi_line: true,
 			},
 			false,
 		)?;
@@ -373,12 +362,14 @@ mod test {
 			Pattern {
 				regex: "ok123".to_string(),
 				id: 5678,
+				multi_line: true,
 			},
 			false,
 		)?;
 
 		d.add(
 			Pattern {
+				multi_line: true,
 				regex: "tesla".to_string(),
 				id: 9999,
 			},
@@ -387,6 +378,7 @@ mod test {
 
 		d.add(
 			Pattern {
+				multi_line: true,
 				regex: "teslaok".to_string(),
 				id: 1000,
 			},
@@ -395,13 +387,14 @@ mod test {
 
 		d.add(
 			Pattern {
+				multi_line: true,
 				regex: "eyxxx".to_string(),
 				id: 1111,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, d);
+		let mut mm = MultiMatch::new(100, d, None);
 		let bytes = b"abc123testxteslaokhitheretest";
 		mm.runmatch(bytes)?;
 
@@ -439,9 +432,9 @@ mod test {
 		}
 
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "a".to_string(),
 				id: 1,
 			},
@@ -449,6 +442,7 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "ab".to_string(),
 				id: 2,
 			},
@@ -456,13 +450,14 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abc".to_string(),
 				id: 3,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abcd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -491,9 +486,9 @@ mod test {
 		assert_eq!(&matches_found[0..3], &matches_expected[..]);
 
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "c".to_string(),
 				id: 1,
 			},
@@ -501,6 +496,7 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "bc".to_string(),
 				id: 2,
 			},
@@ -508,13 +504,14 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abc".to_string(),
 				id: 3,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abcd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -543,9 +540,9 @@ mod test {
 		assert_eq!(&matches_found[0..3], &matches_expected[..]);
 
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcd".to_string(),
 				id: 1,
 			},
@@ -553,13 +550,14 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "bc".to_string(),
 				id: 2,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abcd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -588,9 +586,9 @@ mod test {
 	#[test]
 	fn test_multi_match2_case_insensitive() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, false, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcd".to_string(),
 				id: 1,
 			},
@@ -598,13 +596,14 @@ mod test {
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "Bc".to_string(),
 				id: 2,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abCd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -632,16 +631,16 @@ mod test {
 	#[test]
 	fn test_multi_match3_wild_card() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "ab.d".to_string(),
 				id: 1,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abxd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -675,16 +674,16 @@ mod test {
 	#[test]
 	fn test_multi_match4_multi_wildcard() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "ab.*d".to_string(),
 				id: 1,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"abxd";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -734,16 +733,16 @@ mod test {
 	#[test]
 	fn test_multi_match5_escape_sequences() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "a\\.\\\\xyz".to_string(),
 				id: 1,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"a.\\xyz";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -771,9 +770,9 @@ mod test {
 	#[test]
 	fn test_multi_match6_termination() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 100);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "a\\.\\\\xyz".to_string(),
 				id: 1,
 			},
@@ -782,13 +781,14 @@ mod test {
 
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "111111".to_string(),
 				id: 2,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"a.\\xyzx111111";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -816,18 +816,19 @@ mod test {
 	#[test]
 	fn test_multi_match7_max_wildcard_len() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 10);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "a.*b".to_string(),
 				id: 1,
 			},
 			true,
 		)?;
 
-		let mut mm = MultiMatch::new(100, dictionary);
+		let mut mm = MultiMatch::new(100, dictionary, None);
 		let bytes = b"axxxxxxxxxxxb";
-		assert!(mm.runmatch(bytes).is_err());
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 0);
 		let bytes = b"axxxxxxxxxxb";
 		mm.runmatch(bytes)?;
 		for i in 0..mm.match_count() {
@@ -840,33 +841,28 @@ mod test {
 	#[test]
 	fn test_multi_match8_max_capacity() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, true, 10);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abc".to_string(),
 				id: 1,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(3, dictionary);
-		let bytes = b"abcabcabcabc";
-		assert!(mm.runmatch(bytes).is_err());
-		let bytes = b"abcxxxxxxxxxxb";
+		let mut mm = MultiMatch::new(3, dictionary, None);
+		let bytes = b"abcabcabcabc"; // 4 matches, cap = 3
 		mm.runmatch(bytes)?;
-		for i in 0..mm.match_count() {
-			info!("matches_found[{}]={:?}", i, mm.matches()[i])?;
-		}
-		assert_eq!(mm.match_count(), 1);
+		assert_eq!(mm.match_count(), 3); // 3 and not 4
 		Ok(())
 	}
 
 	#[test]
 	fn test_multi_match9_headers() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, false, 512);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "\r\n\r\n".to_string(),
 				id: 1,
 			},
@@ -875,6 +871,7 @@ mod test {
 
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "1234".to_string(),
 				id: 2,
 			},
@@ -883,6 +880,7 @@ mod test {
 
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "\r\n.*: ".to_string(),
 				id: 3,
 			},
@@ -891,13 +889,14 @@ mod test {
 
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "\r\nCONTENT-LENGTH: ".to_string(),
 				id: 4,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(300, dictionary);
+		let mut mm = MultiMatch::new(300, dictionary, None);
 
 		let bytes = b"POST /mypost HTTP/1.1\r\n\
 Host: localhost\r\n\
@@ -934,9 +933,9 @@ Random-Header: abc123\r\n\r\n
 	#[test]
 	fn test_multi_match10_lookback() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, false, 512);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstuvwxyz".to_string(),
 				id: 1,
 			},
@@ -944,6 +943,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstuvwxy".to_string(),
 				id: 2,
 			},
@@ -951,6 +951,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstuvwx".to_string(),
 				id: 3,
 			},
@@ -958,6 +959,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstuvw".to_string(),
 				id: 4,
 			},
@@ -965,6 +967,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstuv".to_string(),
 				id: 5,
 			},
@@ -972,6 +975,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrstu".to_string(),
 				id: 6,
 			},
@@ -979,6 +983,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrst".to_string(),
 				id: 7,
 			},
@@ -986,6 +991,7 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqrs".to_string(),
 				id: 8,
 			},
@@ -993,13 +999,14 @@ Random-Header: abc123\r\n\r\n
 		)?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "abcdefghijklmnopqr".to_string(),
 				id: 9,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(300, dictionary);
+		let mut mm = MultiMatch::new(300, dictionary, None);
 
 		let bytes = b"abcdefghijklmnopqrstuvwxyz";
 
@@ -1065,16 +1072,16 @@ Random-Header: abc123\r\n\r\n
 	#[test]
 	fn test_multi_match11_start_only() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, false, 512);
-		dictionary.set_on_match(move |_m| -> Result<(), Error> { Ok(()) })?;
 		dictionary.add(
 			Pattern {
+				multi_line: true,
 				regex: "^abc".to_string(),
 				id: 1,
 			},
 			false,
 		)?;
 
-		let mut mm = MultiMatch::new(300, dictionary);
+		let mut mm = MultiMatch::new(300, dictionary, None);
 		let bytes = b"abcdxxabcyy";
 		mm.runmatch(bytes)?;
 
@@ -1097,51 +1104,67 @@ Random-Header: abc123\r\n\r\n
 	}
 
 	#[test]
-	fn test_multi_match12_on_match() -> Result<(), Error> {
+	fn test_multi_match12_term_len() -> Result<(), Error> {
 		let mut dictionary = Dictionary::new(10_000, false, 512);
-		let x = Arc::new(RwLock::new(0));
-		let x_clone = x.clone();
-		dictionary.set_on_match(move |m| -> Result<(), Error> {
-			assert_eq!(
-				m,
-				&Match {
-					start: 0,
-					end: 3,
-					id: 1
-				}
-			);
-			let mut x_clone = lockw!(x_clone)?;
-			(*x_clone) += 1;
-			Ok(())
-		})?;
 		dictionary.add(
 			Pattern {
-				regex: "^abc".to_string(),
+				multi_line: true,
+				regex: "abc".to_string(),
 				id: 1,
 			},
-			false,
+			true,
 		)?;
 
-		let mut mm = MultiMatch::new(300, dictionary);
-		let bytes = b"abcdxxabcyy";
+		let mut mm = MultiMatch::new(300, dictionary.clone(), Some(4));
+		let bytes = b"axbcdxxabcyy";
 		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 0);
 
-		for i in 0..mm.match_count() {
-			let bmatch = &mm.matches()[i];
-			info!(
-				"matches_found[{}]='{:?}',id={}",
-				i,
-				std::str::from_utf8(&bytes[bmatch.start..bmatch.end])?,
-				bmatch.id
-			)?;
-		}
-
+		let mut mm = MultiMatch::new(300, dictionary.clone(), Some(40));
+		let bytes = b"axbcdxxabcyy";
+		mm.runmatch(bytes)?;
 		assert_eq!(mm.match_count(), 1);
-		assert_eq!(mm.matches()[0].start, 0);
-		assert_eq!(mm.matches()[0].end, 3);
-		assert_eq!(mm.matches()[0].id, 1);
 
-		assert_eq!(*(lockr!(x)?), 1);
+		let mut mm = MultiMatch::new(300, dictionary, None);
+		let bytes = b"axbcdxxabcyy";
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 1);
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_multi_match13_multi_line() -> Result<(), Error> {
+		let mut dictionary = Dictionary::new(10_000, false, 512);
+		dictionary.add(
+			Pattern {
+				multi_line: false,
+				regex: "abc.*xyz".to_string(),
+				id: 1,
+			},
+			true,
+		)?;
+
+		let mut mm = MultiMatch::new(300, dictionary.clone(), None);
+		let bytes = b"abc0000xyz";
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 1);
+
+		let mut mm = MultiMatch::new(300, dictionary.clone(), None);
+		let bytes = b"abc0000\r\nxyz";
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 0);
+
+		let mut mm = MultiMatch::new(300, dictionary.clone(), None);
+		let bytes = b"abcx\rxaxyz";
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 0);
+
+		let mut mm = MultiMatch::new(300, dictionary.clone(), None);
+		let bytes = b"abcx\nxaxyz";
+		mm.runmatch(bytes)?;
+		assert_eq!(mm.match_count(), 0);
+
 		Ok(())
 	}
 }

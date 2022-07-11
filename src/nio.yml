@@ -282,3 +282,13 @@ args:
         long: admin_uri
         takes_value: true
         value_name: admin_uri
+    - max_matches:
+        help: The maximum number of matches allowed for header processing. Each header for instance is considered a single match. The default value of 500 should be more than sufficient unless additional patterns are added through configuration.
+        long: max_matches
+        takes_value: true
+        value_name: max_matches
+    - dictionary_capacity:
+        help: The capacity of the dictionary in terms of number of nodes. Each character is a node, however due to the tree structure of the dictionary, different patterns may share a node for a single character. 500 is the default value and is sufficient for the default values. If additional patterns are added, this number may need to be increased.
+        long: dictionary_capacity
+        takes_value: true
+        value_name: dictionary_capacity

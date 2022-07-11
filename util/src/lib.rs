@@ -34,6 +34,7 @@ pub use nioruntime_deps::serde_derive;
 
 pub use crate::byte_utils::{
 	bytes_eq, bytes_find, bytes_parse_number, bytes_parse_number_header, bytes_parse_number_hex,
+	bytes_to_usize,
 };
 pub use crate::static_hash::{StaticHash, StaticHashConfig, StaticHashStats};
 

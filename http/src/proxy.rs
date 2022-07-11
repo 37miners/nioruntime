@@ -460,66 +460,62 @@ pub fn process_proxy_outbound(
 						}
 					},
 					ProxyRotation::StickyCookie(cookie_target) => {
-						match headers.get_header_value(COOKIE_BYTES)? {
-							Some(cookies) => {
-								let mut ret = None;
-								for cookie in cookies {
-									let cookie = &cookie;
-									let mut start = 0;
-									loop {
-										let mut end = cookie.len();
-										if start >= end {
-											break;
-										}
-										match bytes_find(&cookie[start..], b";") {
-											Some(semi) => end = semi + start,
-											None => {}
-										}
-										if start >= end {
-											break;
-										}
-
-										match bytes_find(&cookie[start..], b"=") {
-											Some(equal) => {
-												if equal < end {
-													if std::str::from_utf8(
-														&cookie[start..(start + equal)],
-													)? == cookie_target
-													{
-														ret = Some(
-															from_utf8(
-																&cookie[(start + equal + 1)..end],
-															)?
-															.to_string(),
-														);
-													}
+						let cookies = headers.get_cookies();
+						if cookies.len() > 0 {
+							let mut ret = None;
+							for cookie in cookies {
+								let cookie = &cookie;
+								let mut start = 0;
+								loop {
+									let mut end = cookie.len();
+									if start >= end {
+										break;
+									}
+									match bytes_find(&cookie[start..], b";") {
+										Some(semi) => end = semi + start,
+										None => {}
+									}
+									if start >= end {
+										break;
+									}
+									match bytes_find(&cookie[start..], b"=") {
+										Some(equal) => {
+											if equal < end {
+												if std::str::from_utf8(
+													&cookie[start..(start + equal)],
+												)? == cookie_target
+												{
+													ret = Some(
+														from_utf8(
+															&cookie[(start + equal + 1)..end],
+														)?
+														.to_string(),
+													);
 												}
 											}
-											None => {}
 										}
-
-										start = end + 2;
+										None => {}
 									}
-								}
-								match ret {
-									Some(ret) => {
-										let mut sha256 = Sha256::new();
-										sha256.write(&ret.as_bytes())?;
-										let hash = sha256.finalize();
-										state.healthy_sockets[u32::from_be_bytes(
-											hash.to_vec()[..4].try_into()?,
-										) as usize % len]
-									}
-									None => {
-										let rand: usize = rand::random();
-										state.healthy_sockets[rand % len]
-									}
+									start = end + 2;
 								}
 							}
-							None => {
-								let rand: usize = rand::random();
-								state.healthy_sockets[rand % len]
+							match ret {
+								Some(ret) => {
+									let mut sha256 = Sha256::new();
+									sha256.write(&ret.as_bytes())?;
+									let hash = sha256.finalize();
+									state.healthy_sockets[u32::from_be_bytes(
+										hash.to_vec()[..4].try_into()?,
+									) as usize % len]
+								}
+								None => {
+									let rand: usize = rand::random();
+									state.healthy_sockets[rand % len]
+								}
 							}
+						} else {
+							let rand: usize = rand::random();
+							state.healthy_sockets[rand % len]
 						}
 					}
 				}

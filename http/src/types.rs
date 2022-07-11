@@ -25,11 +25,13 @@ use nioruntime_err::{Error, ErrorKind};
 use nioruntime_evh::TLSServerConfig;
 use nioruntime_evh::{ConnectionData, EventHandlerConfig};
 use nioruntime_log::*;
-use nioruntime_util::bytes_parse_number_header;
+use nioruntime_util::bytes_find;
+use nioruntime_util::bytes_to_usize;
+use nioruntime_util::multi_match::{Dictionary, Match, MultiMatch, Pattern};
 use nioruntime_util::slabs::SlabAllocator;
 use nioruntime_util::StaticQueue;
-use nioruntime_util::{bytes_eq, StaticHash, StaticHashConfig, StepAllocator, StepAllocatorConfig};
 use nioruntime_util::{lockr, lockw};
+use nioruntime_util::{StaticHash, StaticHashConfig, StepAllocator, StepAllocatorConfig};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Display, Formatter};
@@ -79,6 +81,10 @@ Connection: close\r\n\r\n"
 const SIZEOF_USIZE: usize = std::mem::size_of::<usize>();
 const SIZEOF_U128: usize = std::mem::size_of::<u128>();
 
+pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
+pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
+pub const BACK_R: &[u8] = "\r".as_bytes();
+
 pub const HTTP_CODE_206: &[u8] = "206 Partial Content".as_bytes();
 pub const HTTP_CODE_200: &[u8] = "200 OK".as_bytes();
 pub const HTTP_CODE_304: &[u8] = "304 Not Modified".as_bytes();
@@ -99,36 +105,12 @@ pub const CONNECTION_CLOSE: &[u8] = "\r\nConnection: close\r\n".as_bytes();
 pub const TRANSFER_ENCODING_CHUNKED: &[u8] = "\r\nTransfer-Encoding: chunked".as_bytes();
 pub const GZIP_ENCODING: &[u8] = "\r\nContent-Encoding: gzip".as_bytes();
 
-pub const COOKIE_BYTES: &[u8] = "Cookie".as_bytes();
-pub const UPGRADE_BYTES: &[u8] = "Upgrade".as_bytes();
-pub const WEBSOCKET_BYTES: &[u8] = "websocket".as_bytes();
-pub const SEC_WEBSOCKET_KEY_BYTES: &[u8] = "Sec-WebSocket-Key".as_bytes();
-pub const RANGE_BYTES: &[u8] = "Range".as_bytes();
-pub const USER_AGENT_BYTES: &[u8] = "User-Agent".as_bytes();
-pub const HTTP_REFERER_BYTES: &[u8] = "Referer".as_bytes();
-pub const EXPECT_BYTES: &[u8] = "Expect".as_bytes();
-pub const CONTENT_LEN_BYTES: &[u8] = "Content-Length".as_bytes();
-pub const CONTENT_TYPE_BYTES: &[u8] = "\r\nContent-Type: ".as_bytes();
-pub const INDEX_HTML_BYTES: &[u8] = "/index.html".as_bytes();
-pub const BACK_R: &[u8] = "\r".as_bytes();
-pub const CONNECTION_BYTES: &[u8] = "Connection".as_bytes();
-pub const IF_NONE_MATCH: &[u8] = "If-None-Match".as_bytes();
-pub const IF_MODIFIED_SINCE: &[u8] = "If-Modified-Since".as_bytes();
-pub const ACCEPT_ENCODING: &[u8] = "Accept-Encoding".as_bytes();
-pub const HOST_BYTES: &[u8] = "Host".as_bytes();
-
 pub const HTML_EXTENSION: &[u8] = "html".as_bytes();
 pub const SLASH: &[u8] = "/".as_bytes();
-
-pub const GET_BYTES: &[u8] = "GET ".as_bytes();
-pub const POST_BYTES: &[u8] = "POST ".as_bytes();
-pub const HEAD_BYTES: &[u8] = "HEAD ".as_bytes();
-pub const DELETE_BYTES: &[u8] = "DELETE ".as_bytes();
-pub const PUT_BYTES: &[u8] = "PUT ".as_bytes();
-pub const OPTIONS_BYTES: &[u8] = "OPTIONS ".as_bytes();
-pub const CONNECT_BYTES: &[u8] = "CONNECT ".as_bytes();
-pub const PATCH_BYTES: &[u8] = "PATCH ".as_bytes();
-pub const TRACE_BYTES: &[u8] = "TRACE ".as_bytes();
+pub const EMPTY: &[u8] = "".as_bytes();
+pub const SPACE: &[u8] = " ".as_bytes();
+pub const QUESTION_MARK: &[u8] = "?".as_bytes();
+pub const DOT: &[u8] = ".".as_bytes();
 
 pub const MON_BYTES: &[u8] = "Mon, ".as_bytes();
 pub const TUE_BYTES: &[u8] = "Tue, ".as_bytes();
@@ -153,10 +135,6 @@ pub const DEC_BYTES: &[u8] = " Dec ".as_bytes();
 
 pub const HTTP10_BYTES_DISPLAY: &[u8] = "HTTP/1.0 ".as_bytes();
 pub const HTTP11_BYTES_DISPLAY: &[u8] = "HTTP/1.1 ".as_bytes();
-
-pub const HTTP10_BYTES_MATCH: &[u8] = "HTTP/1.0".as_bytes();
-pub const HTTP11_BYTES_MATCH: &[u8] = "HTTP/1.1".as_bytes();
-pub const HTTP20_BYTES_MATCH: &[u8] = "HTTP/2.0".as_bytes();
 
 pub const KEEP_ALIVE_BYTES: &[u8] = "keep-alive".as_bytes();
 pub const CLOSE_BYTES: &[u8] = "close".as_bytes();
@@ -234,6 +212,34 @@ Content-Length: 24\r\n\
 Connection: close\r\n\
 \r\n\
 Internal Server Error.\r\n";
+
+pub const MATCH_TERMINATE_HEADERS: u64 = 1;
+pub const MATCH_HEADER_NAME: u64 = 2;
+
+pub const MATCH_HEADER_REFERER: u64 = 3;
+pub const MATCH_HEADER_CONTENT_LENGTH: u64 = 4;
+pub const MATCH_HEADER_HOST: u64 = 5;
+pub const MATCH_HEADER_COOKIE: u64 = 6;
+pub const MATCH_HEADER_UPGRADE_WEBSOCKET: u64 = 7;
+pub const MATCH_HEADER_SEC_WEBSOCKET_KEY: u64 = 8;
+pub const MATCH_HEADER_RANGE: u64 = 9;
+pub const MATCH_HEADER_USER_AGENT: u64 = 10;
+pub const MATCH_HEADER_CONTENT_TYPE: u64 = 11;
+pub const MATCH_HEADER_CONNECTION_CLOSE: u64 = 12;
+pub const MATCH_HEADER_IF_NONE_MATCH: u64 = 13;
+pub const MATCH_HEADER_IF_MODIFIED_SINCE: u64 = 14;
+pub const MATCH_HEADER_ACCEPT_ENCODING: u64 = 15;
+pub const MATCH_HEADER_EXPECT: u64 = 16;
+
+pub const MATCH_GET: u64 = 1_001;
+pub const MATCH_POST: u64 = 1_002;
+pub const MATCH_DELETE: u64 = 1_003;
+pub const MATCH_HEAD: u64 = 1_004;
+pub const MATCH_PUT: u64 = 1_005;
+pub const MATCH_OPTIONS: u64 = 1_006;
+pub const MATCH_CONNECT: u64 = 1_007;
+pub const MATCH_PATCH: u64 = 1_008;
+pub const MATCH_TRACE: u64 = 1_009;
 
 #[cfg(unix)]
 pub type Handle = RawFd;
@@ -464,7 +470,6 @@ impl ThreadPoolContext {
 }
 
 pub struct ThreadContext {
-	pub header_map: StaticHash<(), ()>,
 	pub cache_hits: StaticHash<(), ()>,
 	pub key_buf: Vec<u8>,
 	pub value_buf: Vec<u8>,
@@ -487,18 +492,11 @@ pub struct ThreadContext {
 	pub dropped_lat_sum: u64,
 	pub log_queue: StaticQueue<LogItem>,
 	pub thread_pool_context: Arc<RwLock<ThreadPoolContext>>,
+	pub matcher: MultiMatch,
 }
 
 impl ThreadContext {
 	pub fn new(config: &HttpConfig, stat_handler: &StatHandler) -> Result<Self, Error> {
-		let header_map_conf = StaticHashConfig {
-			key_len: config.max_header_name_len,
-			entry_len: config.max_header_value_len,
-			max_entries: config.max_header_entries + 1,
-			max_load_factor: 1.0,
-			..Default::default()
-		};
-
 		let cache_hits_conf = StaticHashConfig {
 			key_len: 32,
 			entry_len: 16,
@@ -562,8 +560,14 @@ impl ThreadContext {
 		let log_queue = StaticQueue::new(config.thread_log_queue_size);
 		let thread_pool_context = Arc::new(RwLock::new(ThreadPoolContext::new()));
 
+		let matcher = Self::build_matcher(
+			config.max_matches,
+			config.max_header_size,
+			config.dictionary_capacity,
+			config.max_header_size,
+		)?;
+
 		Ok(Self {
-			header_map: StaticHash::new(header_map_conf)?,
 			cache_hits: StaticHash::new(cache_hits_conf)?,
 			key_buf,
 			value_buf,
@@ -586,7 +590,224 @@ impl ThreadContext {
 			read_timeouts: 0,
 			dropped_lat_sum: 0,
 			thread_pool_context,
+			matcher,
 		})
+	}
+
+	fn build_matcher(
+		max_matches: usize,
+		max_header_size: usize,
+		dictionary_capacity: usize,
+		max_wildcard: usize,
+	) -> Result<MultiMatch, Error> {
+		let mut dictionary = Dictionary::new(dictionary_capacity, false, max_wildcard);
+		dictionary.add(
+			Pattern {
+				regex: "\r\n\r\n".to_string(),
+				id: MATCH_TERMINATE_HEADERS,
+				multi_line: true,
+			},
+			true,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\n.*: ".to_string(),
+				id: MATCH_HEADER_NAME,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nREFERER: ".to_string(),
+				id: MATCH_HEADER_REFERER,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nCONTENT-LENGTH: ".to_string(),
+				id: MATCH_HEADER_CONTENT_LENGTH,
+				multi_line: true,
+			},
+			false,
+		)?;
+
+		dictionary.add(
+			Pattern {
+				regex: "\r\nHOST: ".to_string(),
+				id: MATCH_HEADER_HOST,
+				multi_line: true,
+			},
+			false,
+		)?;
+
+		dictionary.add(
+			Pattern {
+				regex: "\r\nCOOKIE: ".to_string(),
+				id: MATCH_HEADER_COOKIE,
+				multi_line: true,
+			},
+			false,
+		)?;
+
+		dictionary.add(
+			Pattern {
+				regex: "\r\nUPGRADE: WEBSOCKET".to_string(),
+				id: MATCH_HEADER_UPGRADE_WEBSOCKET,
+				multi_line: true,
+			},
+			false,
+		)?;
+
+		dictionary.add(
+			Pattern {
+				regex: "\r\nSEC-WEBSOCKET-KEY: ".to_string(),
+				id: MATCH_HEADER_SEC_WEBSOCKET_KEY,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nRange: ".to_string(),
+				id: MATCH_HEADER_RANGE,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nUSER-AGENT: ".to_string(),
+				id: MATCH_HEADER_USER_AGENT,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nCONTENT-TYPE: ".to_string(),
+				id: MATCH_HEADER_CONTENT_TYPE,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nCONNECTION: CLOSE\r\n".to_string(),
+				id: MATCH_HEADER_CONNECTION_CLOSE,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nIF-NONE-MATCH: ".to_string(),
+				id: MATCH_HEADER_IF_NONE_MATCH,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nIF-MODIFIED-SINCE: ".to_string(),
+				id: MATCH_HEADER_IF_MODIFIED_SINCE,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nACCEPT-ENCODING: ".to_string(),
+				id: MATCH_HEADER_ACCEPT_ENCODING,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "\r\nEXPECT: 100-continue".to_string(),
+				id: MATCH_HEADER_EXPECT,
+				multi_line: true,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^GET ".to_string(),
+				id: MATCH_GET,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^POST ".to_string(),
+				id: MATCH_POST,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^DELETE ".to_string(),
+				id: MATCH_DELETE,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^HEAD ".to_string(),
+				id: MATCH_HEAD,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^PUT ".to_string(),
+				id: MATCH_PUT,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^OPTIONS ".to_string(),
+				id: MATCH_OPTIONS,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^CONNECT ".to_string(),
+				id: MATCH_CONNECT,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^PATCH ".to_string(),
+				id: MATCH_PATCH,
+				multi_line: false,
+			},
+			false,
+		)?;
+		dictionary.add(
+			Pattern {
+				regex: "^TRACE ".to_string(),
+				id: MATCH_TRACE,
+				multi_line: false,
+			},
+			false,
+		)?;
+
+		let matcher = MultiMatch::new(max_matches, dictionary, Some(max_header_size));
+		Ok(matcher)
 	}
 }
 
@@ -628,63 +849,65 @@ pub enum HttpVersion {
 	Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HttpHeaders<'a> {
 	method: HttpMethod,
 	version: HttpVersion,
 	uri: &'a [u8],
 	query: &'a [u8],
 	user_agent: &'a [u8],
+	host: &'a [u8],
 	referer: &'a [u8],
 	extension: &'a [u8],
-	header_map: &'a StaticHash<(), ()>,
+	range: &'a [u8],
+	cookies: Vec<&'a [u8]>,
+	header_map: Option<HashMap<String, Vec<String>>>,
 	len: usize,
-	range: bool,
 	expect: bool,
-	if_modified_since: bool,
-	if_none_match: bool,
+	if_modified_since: &'a [u8],
+	if_none_match: &'a [u8],
 	websocket_upgrade: bool,
+	websocket_sec_key: &'a [u8],
 	connection_close: bool,
 	content_length: usize,
-	accept_encoding: bool,
+	accept_gzip_encoding: bool,
+	matcher: &'a MultiMatch,
+	buffer: &'a [u8],
 }
 
 impl<'a> Display for HttpHeaders<'a> {
 	fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-		write!(f, "method:  '{:?}'\n", self.get_method())?;
-		write!(f, "version: '{:?}'\n", self.get_version())?;
+		let mut header_clone = self.clone();
+		write!(f, "method:  '{:?}'\n", header_clone.get_method())?;
+		write!(f, "version: '{:?}'\n", header_clone.get_version())?;
 		write!(
 			f,
 			"uri:     '{}'\n",
-			std::str::from_utf8(self.get_uri()).unwrap_or("[non-utf8-string]")
+			std::str::from_utf8(header_clone.get_uri()).unwrap_or("[non-utf8-string]")
 		)?;
 		write!(
 			f,
 			"query:   '{}'\n",
-			std::str::from_utf8(self.get_query()).unwrap_or("[non-utf8-string]")
+			std::str::from_utf8(header_clone.get_query()).unwrap_or("[non-utf8-string]")
 		)?;
 		write!(f, "\nHTTP Headers:")?;
-		for name in self.get_header_names().map_err(|_e| std::fmt::Error)? {
-			let values = self
-				.get_header_value(&name.as_bytes())
+		let mut names = vec![];
+		for name in header_clone
+			.get_header_names()
+			.map_err(|_e| std::fmt::Error)?
+		{
+			names.push(name.clone());
+		}
+		for name in names {
+			let values = header_clone
+				.get_header_value(&name)
 				.map_err(|_e| std::fmt::Error)?;
-			match values {
-				Some(values) => {
-					for value in values {
-						let mut spacing = "".to_string();
-						for _ in name.len()..20 {
-							spacing = format!("{} ", spacing);
-						}
-						write!(
-							f,
-							"\n{}:{} '{}'",
-							name,
-							spacing,
-							std::str::from_utf8(&value).unwrap_or("non-utf8-value")
-						)?;
-					}
+			for value in values {
+				let mut spacing = "".to_string();
+				for _ in name.len()..20 {
+					spacing = format!("{} ", spacing);
 				}
-				None => {}
+				write!(f, "\n{}:{} '{}'", name, spacing, value,)?;
 			}
 		}
 		Ok(())
@@ -695,114 +918,198 @@ impl<'a> HttpHeaders<'a> {
 	pub fn new(
 		buffer: &'a [u8],
 		config: &HttpConfig,
-		header_map: &'a mut StaticHash<(), ()>,
-		key_buf: &'a mut Vec<u8>,
-		value_buf: &'a mut Vec<u8>,
+		matcher: &'a mut MultiMatch,
 	) -> Result<Option<Self>, Error> {
-		let (method, offset) = match Self::parse_method(buffer, config)? {
-			Some((method, offset)) => (method, offset),
-			None => return Ok(None),
-		};
+		matcher.runmatch(buffer)?;
 
-		trace!("method={:?},offset={}", method, offset)?;
-		let (uri, extension, offset) = match Self::parse_uri(&buffer[offset..], config)? {
-			Some((uri, extension, noffset)) => (uri, extension, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("uri={:?},offset={}", uri, offset)?;
-		let (query, offset) = match Self::parse_query(&buffer[offset..], config)? {
-			Some((query, noffset)) => (query, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("query={:?}", query)?;
-		let (version, offset) = match Self::parse_version(&buffer[offset..], config)? {
-			Some((version, noffset)) => (version, noffset + offset),
-			None => return Ok(None),
-		};
-		trace!("version={:?}", version)?;
+		let match_count = matcher.match_count();
+		let matches = matcher.matches();
 
-		if offset + 2 >= buffer.len() {
+		// check if we didn't terminate
+		if match_count <= 0 || matches[match_count - 1].id != MATCH_TERMINATE_HEADERS {
+			if buffer.len() > config.max_header_size {
+				return Err(
+					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
+				);
+			}
 			return Ok(None);
 		}
 
-		let (
-			len,
-			range,
-			content_length,
-			websocket_upgrade,
-			expect,
-			connection_close,
-			if_modified_since,
-			if_none_match,
-			accept_encoding,
-			user_agent_start,
-			user_agent_end,
-			referer_start,
-			referer_end,
-		) = match Self::parse_headers(
-			&buffer[(offset + 2)..],
-			config,
-			header_map,
-			key_buf,
-			value_buf,
-		)? {
-			Some((
-				noffset,
-				range,
-				content_length,
-				websocket_upgrade,
-				expect,
-				connection_close,
-				if_modified_since,
-				if_none_match,
-				accept_encoding,
-				user_agent_start,
-				user_agent_end,
-				referer_start,
-				referer_end,
-			)) => (
-				noffset + offset + 2,
-				range,
-				content_length,
-				websocket_upgrade,
-				expect,
-				connection_close,
-				if_modified_since,
-				if_none_match,
-				accept_encoding,
-				user_agent_start,
-				user_agent_end,
-				referer_start,
-				referer_end,
-			),
-			None => return Ok(None),
-		};
+		let len = matches[match_count - 1].end;
+		let mut start_headers = matches[match_count - 1].start;
 
 		if len > config.max_header_size {
 			return Err(ErrorKind::HttpError431("Request Header Fields Too Large".into()).into());
 		}
 
-		let referer = &buffer[(referer_start + offset + 2)..(referer_end + offset + 2)];
-		let user_agent = &buffer[(user_agent_start + offset + 2)..(user_agent_end + offset + 2)];
+		let mut method = HttpMethod::Get;
+		let mut found_method = false;
+		let mut host = EMPTY;
+		let mut range = EMPTY;
+		let mut cookies = vec![];
+		let mut expect = false;
+		let mut if_modified_since = EMPTY;
+		let mut if_none_match = EMPTY;
+		let mut websocket_upgrade = false;
+		let mut websocket_sec_key = EMPTY;
+		let mut connection_close = false;
+		let mut content_length = 0;
+		let mut accept_gzip_encoding = false;
+		let mut referer = EMPTY;
+		let mut user_agent = EMPTY;
+
+		for i in 0..match_count {
+			match matches[i].id {
+				MATCH_HEADER_REFERER => {
+					referer = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_USER_AGENT => {
+					user_agent = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_GET => {
+					found_method = true;
+					method = HttpMethod::Get;
+				}
+				MATCH_POST => {
+					found_method = true;
+					method = HttpMethod::Post;
+				}
+				MATCH_DELETE => {
+					found_method = true;
+					method = HttpMethod::Delete;
+				}
+				MATCH_HEAD => {
+					found_method = true;
+					method = HttpMethod::Head;
+				}
+				MATCH_PUT => {
+					found_method = true;
+					method = HttpMethod::Put;
+				}
+				MATCH_OPTIONS => {
+					found_method = true;
+					method = HttpMethod::Options;
+				}
+				MATCH_CONNECT => {
+					found_method = true;
+					method = HttpMethod::Connect;
+				}
+				MATCH_PATCH => {
+					found_method = true;
+					method = HttpMethod::Patch;
+				}
+				MATCH_TRACE => {
+					found_method = true;
+					method = HttpMethod::Trace;
+				}
+				MATCH_HEADER_RANGE => {
+					range = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_EXPECT => {
+					expect = true;
+				}
+				MATCH_HEADER_IF_MODIFIED_SINCE => {
+					println!("found an if mod since");
+					if_modified_since = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_IF_NONE_MATCH => {
+					if_none_match = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_ACCEPT_ENCODING => {
+					let header = Self::find_header(&matches[i], buffer);
+					accept_gzip_encoding = bytes_find(&header, b"gzip").is_some();
+				}
+				MATCH_HEADER_CONNECTION_CLOSE => {
+					connection_close = true;
+				}
+				MATCH_HEADER_UPGRADE_WEBSOCKET => {
+					websocket_upgrade = true;
+				}
+				MATCH_HEADER_SEC_WEBSOCKET_KEY => {
+					websocket_sec_key = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_COOKIE => {
+					let cookie = Self::find_header(&matches[i], buffer);
+					cookies.push(cookie);
+				}
+				MATCH_HEADER_HOST => {
+					host = Self::find_header(&matches[i], buffer);
+				}
+				MATCH_HEADER_CONTENT_LENGTH => {
+					let mut itt = matches[i].end;
+
+					// we know there is a newline because
+					// MATCH_TERMINATE_HEADERS was found
+					loop {
+						if buffer[itt] == '\r' as u8 || buffer[itt] == '\n' as u8 {
+							break;
+						}
+						itt += 1;
+					}
+					content_length = bytes_to_usize(&buffer[matches[i].end..itt])?;
+				}
+				MATCH_HEADER_NAME => {
+					if matches[i].end.saturating_sub(matches[i].start)
+						> config.max_header_name_len + 4
+					{
+						return Err(ErrorKind::HttpError431(
+							"Request Header Field Name Too Large".into(),
+						)
+						.into());
+					}
+
+					if Self::find_header(&matches[i], buffer).len() > config.max_header_value_len {
+						return Err(ErrorKind::HttpError431(
+							"Request Header Field Value Too Large".into(),
+						)
+						.into());
+					}
+					if matches[i].start < start_headers {
+						start_headers = matches[i].start;
+					}
+				}
+				_ => {}
+			}
+		}
+
+		let (uri, query, extension, version) = Self::parse_uri_parts(start_headers, buffer)?;
+
+		if !found_method {
+			return Err(ErrorKind::HttpError405("Method not supported".into()).into());
+		}
+
 		Ok(Some(Self {
 			method,
 			version,
 			uri,
 			query,
+			host,
 			user_agent,
 			referer,
 			extension,
-			header_map,
+			header_map: None,
 			len,
 			range,
 			expect,
 			connection_close,
 			websocket_upgrade,
+			websocket_sec_key,
 			if_modified_since,
 			if_none_match,
 			content_length,
-			accept_encoding,
+			accept_gzip_encoding,
+			cookies,
+			matcher,
+			buffer,
 		}))
+	}
+
+	pub fn get_cookies(&self) -> &Vec<&[u8]> {
+		&self.cookies
+	}
+
+	pub fn websocket_sec_key(&self) -> &[u8] {
+		&self.websocket_sec_key
 	}
 
 	pub fn content_len(&self) -> Result<usize, Error> {
@@ -824,44 +1131,20 @@ impl<'a> HttpHeaders<'a> {
 		self.expect
 	}
 
-	pub fn has_accept_encoding(&self) -> bool {
-		self.accept_encoding
-	}
-
 	pub fn accept_gzip(&self) -> bool {
-		if !self.accept_encoding {
-			false
-		} else {
-			match self.get_header_value(ACCEPT_ENCODING) {
-				Ok(accept_encoding) => match accept_encoding {
-					Some(accept_encoding) => {
-						if accept_encoding.len() > 0 {
-							std::str::from_utf8(&accept_encoding[0])
-								.unwrap_or("")
-								.to_string()
-								.find("gzip")
-								.is_some()
-						} else {
-							false
-						}
-					}
-					None => false,
-				},
-				Err(_) => false,
-			}
-		}
+		self.accept_gzip_encoding
 	}
 
-	pub fn has_range(&self) -> bool {
-		self.range
+	pub fn range(&self) -> &[u8] {
+		&self.range
 	}
 
-	pub fn has_if_modified_since(&self) -> bool {
-		self.if_modified_since
+	pub fn if_modified_since(&self) -> &[u8] {
+		&self.if_modified_since
 	}
 
-	pub fn has_if_none_match(&self) -> bool {
-		self.if_none_match
+	pub fn if_none_match(&self) -> &[u8] {
+		&self.if_none_match
 	}
 
 	pub fn is_close(&self) -> bool {
@@ -896,456 +1179,149 @@ impl<'a> HttpHeaders<'a> {
 		&self.referer
 	}
 
-	pub fn get_header_value(&self, name: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Error> {
-		let mut name_bytes = name.to_vec();
-		let key_len = self.header_map.config().key_len;
-		for _ in name.len()..key_len {
-			name_bytes.push(0);
-		}
-		match self.header_map.get_raw(&name_bytes) {
-			Some(value) => {
-				let mut ret = vec![];
-				let mut offset = 0;
-				loop {
-					if offset + 4 >= value.len() {
-						break;
-					}
-					let len = u32::from_be_bytes(value[offset..offset + 4].try_into()?) as usize;
-					if len == 0 {
-						break;
-					}
-					ret.push(value[offset + 4..offset + 4 + len].to_vec());
-					offset += 4 + len;
-				}
+	pub fn get_host(&self) -> &[u8] {
+		&self.host
+	}
 
-				Ok(Some(ret))
-			}
-			None => Ok(None),
+	pub fn get_header_value(&mut self, name: &String) -> Result<Vec<String>, Error> {
+		if !self.header_map.is_some() {
+			self.build_header_map()?;
+		}
+		let header_map = self.header_map.as_ref().unwrap();
+		match header_map.get(&name.to_lowercase()) {
+			Some(value) => Ok(value.to_vec()),
+			None => Ok(vec![]),
 		}
 	}
 
-	pub fn get_header_names(&self) -> Result<Vec<String>, Error> {
+	pub fn get_header_names(&mut self) -> Result<Vec<&String>, Error> {
+		if !self.header_map.is_some() {
+			self.build_header_map()?;
+		}
+		let header_map = self.header_map.as_ref().unwrap();
 		let mut ret = vec![];
-		for (header, _) in self.header_map.iter_raw() {
-			let len = header.len();
-			let mut header_ret = vec![];
-			for i in 0..len {
-				if header[i] == 0 {
-					break;
-				}
-				header_ret.push(header[i]);
-			}
-			ret.push(std::str::from_utf8(&header_ret)?.to_string());
+		for (name, _) in header_map {
+			ret.push(name);
 		}
 		Ok(ret)
 	}
 
-	fn parse_method(
-		buffer: &[u8],
-		_config: &HttpConfig,
-	) -> Result<Option<(HttpMethod, usize)>, Error> {
-		if buffer.len() < POST_BYTES.len() {
-			Ok(None)
-		} else if bytes_eq(&buffer[0..4], GET_BYTES) {
-			Ok(Some((HttpMethod::Get, 4)))
-		} else if bytes_eq(&buffer[0..5], POST_BYTES) {
-			Ok(Some((HttpMethod::Post, 5)))
-		} else if bytes_eq(&buffer[0..5], HEAD_BYTES) {
-			Ok(Some((HttpMethod::Head, 5)))
-		} else if bytes_eq(&buffer[0..4], PUT_BYTES) {
-			Ok(Some((HttpMethod::Put, 4)))
-		} else {
-			if buffer.len() < OPTIONS_BYTES.len() {
-				Ok(None)
-			} else if bytes_eq(&buffer[0..8], OPTIONS_BYTES) {
-				Ok(Some((HttpMethod::Options, 8)))
-			} else if bytes_eq(&buffer[0..8], CONNECT_BYTES) {
-				Ok(Some((HttpMethod::Connect, 8)))
-			} else if bytes_eq(&buffer[0..7], DELETE_BYTES) {
-				Ok(Some((HttpMethod::Delete, 7)))
-			} else if bytes_eq(&buffer[0..6], PATCH_BYTES) {
-				Ok(Some((HttpMethod::Patch, 6)))
-			} else if bytes_eq(&buffer[0..6], TRACE_BYTES) {
-				Ok(Some((HttpMethod::Trace, 6)))
-			} else {
-				Err(ErrorKind::HttpError405("Method not supported".into()).into())
+	pub fn build_header_map(&mut self) -> Result<(), Error> {
+		let mut header_map = HashMap::new();
+		let match_count = self.matcher.match_count();
+		let matches = self.matcher.matches();
+		for i in 0..match_count {
+			let next = &matches[i];
+			if next.id == MATCH_HEADER_NAME {
+				let name =
+					std::str::from_utf8(&self.buffer[next.start + 2..next.end - 2])?.to_lowercase();
+				let value = std::str::from_utf8(Self::find_header(&next, self.buffer))?;
+				self.insert_value(&mut header_map, name.to_string(), value.to_string())?;
 			}
 		}
+		self.header_map = Some(header_map);
+
+		Ok(())
 	}
 
-	fn parse_version(
-		buffer: &[u8],
-		config: &HttpConfig,
-	) -> Result<Option<(HttpVersion, usize)>, Error> {
-		let buffer_len = buffer.len();
-		let http_bytes_len = HTTP10_BYTES_MATCH.len();
-		if buffer_len < http_bytes_len {
-			Ok(None)
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP10_BYTES_MATCH) {
-			Ok(Some((HttpVersion::V10, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP11_BYTES_MATCH) {
-			Ok(Some((HttpVersion::V11, http_bytes_len)))
-		} else if bytes_eq(&buffer[0..http_bytes_len], HTTP20_BYTES_MATCH) {
-			Ok(Some((HttpVersion::V20, http_bytes_len)))
-		} else {
-			let mut offset = 0;
-			for i in 0..buffer_len {
-				if i > config.max_header_size {
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-				if buffer[i] == '\r' as u8 {
-					offset = i;
-					break;
-				}
+	fn insert_value(
+		&self,
+		header_map: &mut HashMap<String, Vec<String>>,
+		name: String,
+		value: String,
+	) -> Result<(), Error> {
+		let inserted = match header_map.get_mut(&name) {
+			Some(value_vec) => {
+				value_vec.push(value.clone());
+				true
 			}
-			Ok(Some((HttpVersion::Unknown, offset)))
+			None => false,
+		};
+
+		if !inserted {
+			header_map.insert(name, vec![value]);
 		}
+
+		Ok(())
 	}
 
-	fn parse_uri(
-		buffer: &'a [u8],
-		config: &HttpConfig,
-	) -> Result<Option<(&'a [u8], &'a [u8], usize)>, Error> {
+	fn find_header(m: &Match, buffer: &'a [u8]) -> &'a [u8] {
+		let mut back_r = m.end;
 		let buffer_len = buffer.len();
-		let mut i = 0;
-		let mut x = 0;
-		let mut qpresent = false;
 		loop {
-			if i > config.max_header_size {
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
-			}
-			if i >= buffer_len {
-				return Ok(None);
-			}
-			if buffer[i] == '.' as u8 {
-				x = i;
-			}
-			if buffer[i] == '?' as u8
-				|| buffer[i] == ' ' as u8
-				|| buffer[i] == '\r' as u8
-				|| buffer[i] == '\n' as u8
+			if back_r >= buffer_len || buffer[back_r] == '\r' as u8 || buffer[back_r] == '\n' as u8
 			{
-				if buffer[i] == '?' as u8 {
-					qpresent = true;
-				}
 				break;
 			}
-			i += 1;
+			back_r += 1;
 		}
-
-		if i == 0 || i + 1 >= buffer_len {
-			Ok(None)
-		} else {
-			if x != 0 {
-				x += 1;
-			}
-			Ok(Some((
-				&buffer[0..i],
-				&buffer[x..i],
-				if qpresent { i + 1 } else { i },
-			)))
-		}
+		&buffer[m.end..back_r]
 	}
 
-	fn parse_query(
+	fn parse_uri_parts(
+		end: usize,
 		buffer: &'a [u8],
-		config: &HttpConfig,
-	) -> Result<Option<(&'a [u8], usize)>, Error> {
-		let buffer_len = buffer.len();
-		let mut i = 0;
-		loop {
-			if i > config.max_header_size {
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
+	) -> Result<(&'a [u8], &'a [u8], &'a [u8], HttpVersion), Error> {
+		let start_uri = match bytes_find(buffer, SPACE) {
+			Some(index) => index + 1,
+			None => {
+				return Err(ErrorKind::HttpError400("Bad request: no space in URI".into()).into())
 			}
-			if i >= buffer_len {
-				return Ok(None);
+		};
+		let uri = &buffer[start_uri..end];
+		let mut space_count = 0;
+		for i in start_uri..end {
+			if buffer[i] == ' ' as u8 {
+				space_count += 1;
 			}
-			if buffer[i] == ' ' as u8 || buffer[i] == '\r' as u8 || buffer[i] == '\n' as u8 {
-				break;
-			}
-			i += 1;
 		}
 
-		if i + 1 >= buffer_len {
-			Ok(None)
-		} else {
-			Ok(Some((
-				&buffer[0..i],
-				match buffer[i] {
-					13 => i,
-					_ => i + 1,
-				},
-			)))
+		if space_count != 1 {
+			return Err(ErrorKind::HttpError400("Bad request: invalid format".into()).into());
 		}
-	}
 
-	fn parse_headers(
-		buffer: &[u8],
-		config: &HttpConfig,
-		header_map: &mut StaticHash<(), ()>,
-		key_buf: &mut Vec<u8>,
-		value_buf: &mut Vec<u8>,
-	) -> Result<
-		Option<(
-			usize,
-			bool,
-			usize,
-			bool,
-			bool,
-			bool,
-			bool,
-			bool,
-			bool,
-			usize,
-			usize,
-			usize,
-			usize,
-		)>,
-		Error,
-	> {
-		let mut i = 0;
-		let buffer_len = buffer.len();
-		let mut proc_key = true;
-		let mut key_offset = 0;
-		let mut value_offset = 4;
-		let mut range = false;
-		let mut websocket_upgrade = false;
-		let mut expect = false;
-		let mut connection_close = false;
-		let mut content_length = 0;
-		let mut if_none_match = false;
-		let mut if_modified_since = false;
-		let mut accept_encoding = false;
-		let mut user_agent_start = 0;
-		let mut user_agent_end = 0;
-		let mut referer_start = 0;
-		let mut referer_end = 0;
-
-		loop {
-			if i > config.max_header_size {
-				for j in 0..key_offset {
-					key_buf[j] = 0;
-				}
-				for j in 0..value_offset {
-					value_buf[j] = 0;
-				}
-				return Err(
-					ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-				);
-			}
-			if i >= buffer_len {
-				break;
-			}
-
-			if proc_key && buffer[i] != ':' as u8 {
-				if buffer[i] == '\r' as u8 || buffer[i] == '\n' as u8 {
-					if i == 0 {
-						// there is a valid no header case
-						if buffer_len < 2 {
-							for j in 0..key_offset {
-								key_buf[j] = 0;
-							}
-							for j in 0..value_offset {
-								value_buf[j] = 0;
-							}
-
-							return Ok(None);
-						}
-
-						if buffer[0] == '\r' as u8 && buffer[1] == '\n' as u8 {
-							for j in 0..key_offset {
-								key_buf[j] = 0;
-							}
-							for j in 0..value_offset {
-								value_buf[j] = 0;
-							}
-							// no headers
-							return Ok(Some((
-								i + 2,
-								range,
-								content_length,
-								websocket_upgrade,
-								expect,
-								connection_close,
-								if_modified_since,
-								if_none_match,
-								accept_encoding,
-								0,
-								0,
-								0,
-								0,
-							)));
-						}
-					}
-					for j in 0..key_offset {
-						key_buf[j] = 0;
-					}
-					for j in 0..value_offset {
-						value_buf[j] = 0;
-					}
-					return Err(ErrorKind::HttpError400("Bad request: 1".into()).into());
-				}
-
-				if key_offset >= key_buf.len() {
-					for j in 0..key_offset {
-						key_buf[j] = 0;
-					}
-					for j in 0..value_offset {
-						value_buf[j] = 0;
-					}
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-
-				key_buf[key_offset] = buffer[i];
-				key_offset += 1;
-			} else if proc_key {
-				i += 1; // skip over the empty space
-				proc_key = false;
-			} else if buffer[i] != '\r' as u8 && buffer[i] != '\n' as u8 {
-				if value_offset >= value_buf.len() {
-					for j in 0..key_offset {
-						key_buf[j] = 0;
-					}
-					for j in 0..value_offset {
-						value_buf[j] = 0;
-					}
-					return Err(
-						ErrorKind::HttpError431("Request Header Fields Too Large".into()).into(),
-					);
-				}
-				value_buf[value_offset] = buffer[i];
-				value_offset += 1;
-			} else {
-				value_buf[0..4]
-					.clone_from_slice(&((value_offset.saturating_sub(4)) as u32).to_be_bytes());
-
-				if bytes_eq(&key_buf[0..key_offset], RANGE_BYTES) {
-					range = true;
-				} else if bytes_eq(&key_buf[0..key_offset], CONTENT_LEN_BYTES) {
-					content_length = match bytes_parse_number_header(
-						buffer,
-						i.saturating_sub(key_offset).saturating_sub(value_offset),
-					) {
-						Some(content_length) => content_length,
+		let version = match bytes_find(uri, b" HTTP/1.1") {
+			Some(_) => HttpVersion::V11,
+			None => match bytes_find(uri, b" HTTP/2.0") {
+				Some(_) => HttpVersion::V20,
+				None => match bytes_find(uri, b" HTTP/1.0") {
+					Some(_) => HttpVersion::V10,
+					None => match bytes_find(uri, b" HTTP/") {
+						Some(_) => HttpVersion::Unknown,
 						None => {
-							warn!("could not parse Content-Length header")?;
-							0
+							return Err(ErrorKind::HttpError400(
+								"Bad request: version not found".into(),
+							)
+							.into());
 						}
-					};
-				} else if bytes_eq(&key_buf[0..key_offset], USER_AGENT_BYTES) {
-					user_agent_end = i;
-					user_agent_start = i - (value_offset - 4);
-				} else if bytes_eq(&key_buf[0..key_offset], HTTP_REFERER_BYTES) {
-					referer_end = i;
-					referer_start = i - (value_offset - 4);
-				} else if value_offset > 4
-					&& bytes_eq(&key_buf[0..key_offset], UPGRADE_BYTES)
-					&& bytes_eq(&value_buf[4..value_offset], WEBSOCKET_BYTES)
-				{
-					websocket_upgrade = true;
-				} else if bytes_eq(&key_buf[0..key_offset], EXPECT_BYTES) {
-					expect = true;
-				} else if bytes_eq(&key_buf[0..key_offset], CONNECTION_BYTES)
-					&& bytes_eq(&value_buf[4..value_offset], CLOSE_BYTES)
-				{
-					connection_close = true;
-				} else if bytes_eq(&key_buf[0..key_offset], IF_NONE_MATCH) {
-					if_none_match = true;
-				} else if bytes_eq(&key_buf[0..key_offset], IF_MODIFIED_SINCE) {
-					if_modified_since = true;
-				} else if bytes_eq(&key_buf[0..key_offset], ACCEPT_ENCODING) {
-					accept_encoding = true;
-				}
+					},
+				},
+			},
+		};
 
-				match header_map.get_raw(&key_buf) {
-					Some(value) => {
-						let mut offset = 0;
-						loop {
-							let value_len =
-								u32::from_be_bytes(value[offset..(offset + 4)].try_into()?)
-									as usize;
-							if value_len == 0 {
-								break;
-							}
-							if offset + value_len + 4 + value_offset > config.max_header_value_len {
-								for j in 0..key_offset {
-									key_buf[j] = 0;
-								}
-								for j in 0..value_offset {
-									value_buf[j] = 0;
-								}
-								return Err(ErrorKind::HttpError431(
-									"Request Header Fields Too Large".into(),
-								)
-								.into());
-							}
-							(&mut value_buf[value_offset..(value_offset + 4)])
-								.clone_from_slice(&(value_len as u32).to_be_bytes());
-							(&mut value_buf[(value_offset + 4)..(value_offset + 4 + value_len)])
-								.clone_from_slice(&value[(offset + 4)..(offset + 4 + value_len)]);
-							value_offset += value_len + 4;
-							offset += value_len + 4;
-						}
-
-						header_map
-							.insert_raw(&key_buf, &value_buf[0..config.max_header_value_len])?;
-					}
-					None => {
-						header_map.insert_raw(&key_buf, &value_buf)?;
-					}
-				}
-
-				for j in 0..key_offset {
-					key_buf[j] = 0;
-				}
-				for j in 0..value_offset {
-					value_buf[j] = 0;
-				}
-
-				i += 1;
-				proc_key = true;
-				key_offset = 0;
-				value_offset = 4;
-
-				if i + 2 < buffer_len && buffer[i + 1] == '\r' as u8 && buffer[i + 2] == '\n' as u8
-				{
-					// end of headers
-					return Ok(Some((
-						(i + 3),
-						range,
-						content_length,
-						websocket_upgrade,
-						expect,
-						connection_close,
-						if_modified_since,
-						if_none_match,
-						accept_encoding,
-						user_agent_start,
-						user_agent_end,
-						referer_start,
-						referer_end,
-					)));
-				}
+		let end = bytes_find(uri, SPACE).unwrap_or(0);
+		let (uri, query) = if end == 0 {
+			return Err(ErrorKind::HttpError400("Bad request: version not found".into()).into());
+		} else {
+			match bytes_find(uri, QUESTION_MARK) {
+				Some(index) => (&uri[0..index], &uri[(index + 1)..end]),
+				None => (&uri[0..end], EMPTY),
 			}
-			i += 1;
-		}
-
-		for j in 0..key_offset {
-			key_buf[j] = 0;
-		}
-		for j in 0..value_offset {
-			value_buf[j] = 0;
-		}
-
-		Ok(None)
+		};
+		let extension = match bytes_find(uri, DOT) {
+			Some(_) => {
+				let mut i = uri.len().saturating_sub(1);
+				loop {
+					if i == 0 || uri[i] == '.' as u8 {
+						break;
+					}
+					i = i.saturating_sub(1);
+				}
+				&uri[(i + 1)..]
+			}
+			None => b"html",
+		};
+		Ok((uri, query, extension, version))
 	}
 }
 
@@ -1476,6 +1452,8 @@ pub struct HttpConfig {
 	pub max_header_entries: usize,
 	pub max_header_name_len: usize,
 	pub max_header_value_len: usize,
+	pub max_matches: usize,
+	pub dictionary_capacity: usize,
 	pub webroot: Vec<u8>,
 	pub max_cache_files: usize,
 	pub max_cache_chunks: u64,
@@ -1548,6 +1526,8 @@ impl Default for HttpConfig {
 			max_header_name_len: 128,
 			max_header_value_len: 1024,
 			max_header_entries: 1_000,
+			max_matches: 500,
+			dictionary_capacity: 500,
 			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
 			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
 			temp_dir: "~/.niohttpd/tmp".to_string(),
@@ -2300,5 +2280,732 @@ impl ApiContext {
 		})?;
 
 		Ok((self.rem, pushed))
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use crate::types::*;
+	use nioruntime_err::{Error, ErrorKind};
+
+	#[test]
+	fn test_headers() -> Result<(), Error> {
+		let buffer = b"GET / HTTP/1.1\r\n\
+Host: localhost\r\n\
+X: 1\r\n\
+Y012345678: 01234567890123456789\r\n\r\n";
+		let mut matcher = ThreadContext::build_matcher(500, 200, 1000, 200)?;
+		let mut config = HttpConfig::default();
+		config.max_header_size = 200;
+		config.max_header_name_len = 10;
+		config.max_header_value_len = 20;
+		let mut headers = HttpHeaders::new(buffer, &config, &mut matcher)?.unwrap();
+
+		assert_eq!(headers.get_uri(), b"/");
+		assert_eq!(headers.get_query(), b"");
+		assert_eq!(headers.extension(), b"html");
+		assert_eq!(
+			headers.get_header_names().unwrap().sort(),
+			vec!["Host", "Y", "X"].sort()
+		);
+
+		// test incomplete header
+		assert!(HttpHeaders::new(
+			b"GET / HTTP/1.1\r\nHost: localhost\r\nX01234567: 1\r\nY: 2\r\n\r",
+			&config,
+			&mut matcher
+		)?
+		.is_none());
+
+		// test too long headers
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\nA0123456789: 0\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError431("Request Header Field Name Too Large".into())
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\nA: 012345678901234567890\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError431("Request Header Field Value Too Large".into())
+		);
+
+		assert_eq!(HttpHeaders::new(b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
+A: \
+0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\
+0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\r\n\r\n",
+		        &config,
+		        &mut matcher
+		).unwrap_err().kind(), ErrorKind::HttpError431("Request Header Fields Too Large".into()));
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GETT / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
+                        A: ok\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError405("Method not supported".into())
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
+A: ok\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError400("Bad request: version not found".into())
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"POST /abc /def HTTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
+                                                                                A: ok\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError400("Bad request: invalid format".into())
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"PUT / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.range(),
+			b"bytes=10..20"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Get
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"HEAD / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Head
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"TRACE / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Trace
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"OPTIONS / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Options
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"PATCH / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Patch
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"CONNECT / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Connect
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"POST / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Post
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"DELETE / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_method(),
+			&HttpMethod::Delete
+		);
+
+		config.max_header_name_len = 20;
+		config.max_header_value_len = 40;
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"POST / HTTP/1.1\r\nContent-Length: 24\r\n\r\n01234567890123456789\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.content_len()
+			.unwrap(),
+			24
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"POST / HTTP/1.1\r\nContent-Length: 24\r\nHost: example.com\r\n\r\n01234567890123456789\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_host(),
+			b"example.com"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.extension(),
+			b"def"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_uri(),
+			b"/abc.def"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_query(),
+			b"abc=123"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_query(),
+			b"abc=123"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_uri(),
+			b"/"
+		);
+
+		assert_eq!(
+			std::str::from_utf8(
+				HttpHeaders::new(
+					b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+					&config,
+					&mut matcher
+				)
+				.unwrap()
+				.unwrap()
+				.extension()
+			)?,
+			"html"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /. HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.extension(),
+			b""
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /. HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_uri(),
+			b"/."
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_uri(),
+			b"/."
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_query(),
+			b""
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.?  HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap_err()
+			.kind(),
+			ErrorKind::HttpError400("Bad request: invalid format".into())
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_version(),
+			&HttpVersion::V11
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/1.0\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_version(),
+			&HttpVersion::V10
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/2.0\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_version(),
+			&HttpVersion::V20
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET /.? HTTP/2.1\r\nHost: example.com\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_version(),
+			&HttpVersion::Unknown,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nCookie: abc=123;\r\nCookie: def=123;\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_cookies()[0],
+			b"abc=123;"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nCookie: abc=123;\r\nCookie: def=456;\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_cookies()[1],
+			b"def=456;"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.websocket_sec_key(),
+			b"1234"
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nUpgrade: Websocket\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.has_websocket_upgrade(),
+			true
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nUpgrade2: Websocket\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.has_websocket_upgrade(),
+			false
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nExpect: 100-continue\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.has_expect(),
+			true
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nExpect: 200-continue\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.has_expect(),
+			false
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nReferer: http://www.example.com/abc\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_referer(),
+			b"http://www.example.com/abc",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nUser-Agent: myagent1.0\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.get_user_agent(),
+			b"myagent1.0",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nAccept-Encoding: deflate, gzip\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.accept_gzip(),
+			true,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.accept_gzip(),
+			true,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.accept_gzip(),
+			false,
+		);
+
+		//is_close
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.is_close(),
+			true,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.is_close(),
+			false,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.is_close(),
+			false,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nif-modified-since: 1234\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.if_modified_since(),
+			b"1234",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nabc: 1234\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.if_modified_since(),
+			b"",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nif-none-match: 5678\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.if_none_match(),
+			b"5678",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nHost: localhost\r\nabc: 1234\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.if_none_match(),
+			b"",
+		);
+
+		assert_eq!(
+			HttpHeaders::new(b"GET / HTTP/1.0\r\n\r\n", &config, &mut matcher)
+				.unwrap()
+				.unwrap()
+				.len(),
+			18,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n012345\r\n\r\n",
+				&config,
+				&mut matcher
+			)
+			.unwrap()
+			.unwrap()
+			.len(),
+			39,
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
+				&config,
+				&mut matcher,
+			)
+			.unwrap()
+			.unwrap()
+			.get_header_value(&"A".to_string())
+			.unwrap(),
+			vec!["1".to_string()]
+		);
+
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
+				&config,
+				&mut matcher,
+			)
+			.unwrap()
+			.unwrap()
+			.get_header_value(&"a".to_string())
+			.unwrap(),
+			vec!["1".to_string()]
+		);
+
+		let mut left = HttpHeaders::new(
+			b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
+			&config,
+			&mut matcher,
+		)
+		.unwrap()
+		.unwrap()
+		.get_header_value(&"B".to_string())
+		.unwrap();
+		left.sort();
+		let mut right = vec!["2".to_string(), "3".to_string()];
+		right.sort();
+
+		assert_eq!(left, right);
+
+		let c: Vec<String> = vec![];
+		assert_eq!(
+			HttpHeaders::new(
+				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
+				&config,
+				&mut matcher,
+			)
+			.unwrap()
+			.unwrap()
+			.get_header_value(&"D".to_string())
+			.unwrap(),
+			c,
+		);
+
+		Ok(())
 	}
 }

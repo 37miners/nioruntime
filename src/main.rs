@@ -751,6 +751,22 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let max_matches = match args.is_present("max_matches") {
+		true => args.value_of("max_matches").unwrap().parse()?,
+		false => match file_args.is_present("max_matches") {
+			true => file_args.value_of("max_matches").unwrap().parse()?,
+			false => 500,
+		},
+	};
+
+	let dictionary_capacity = match args.is_present("dictionary_capacity") {
+		true => args.value_of("dictionary_capacity").unwrap().parse()?,
+		false => match file_args.is_present("dictionary_capacity") {
+			true => file_args.value_of("dictionary_capacity").unwrap().parse()?,
+			false => 500,
+		},
+	};
+
 	let proxy_config = if debug_proxy {
 		let port1 = 80;
 		let port2 = 90;
@@ -836,6 +852,8 @@ fn real_main() -> Result<(), Error> {
 		max_header_entries,
 		max_header_name_len,
 		max_header_value_len,
+		max_matches,
+		dictionary_capacity,
 		max_cache_files,
 		max_cache_chunks,
 		cache_chunk_size,
