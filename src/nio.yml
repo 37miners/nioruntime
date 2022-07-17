@@ -296,3 +296,8 @@ args:
         help: Delete the request log rotation file upon rotation. This is used in testing scenarios where too much logging would occur if it were not deleted. This setting must not be used in production environments.
         long: delete_request_log_rotation
         takes_value: false
+    - lmdb_dir:
+        help: Location to store the lmdb data.
+        long: lmdb_dir
+        takes_value: true
+        value_name: lmdb_dir

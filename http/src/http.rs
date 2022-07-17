@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::admin::FunctionalRule;
+use crate::admin::HttpAdmin;
 use crate::cache::HttpCache;
 use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
 };
-use crate::stats::LOG_ITEM_SIZE;
-use crate::stats::{HttpStats, MAX_LOG_STR_LEN};
+use crate::send_websocket_message;
+use crate::stats::MAX_LOG_STR_LEN;
 use crate::types::*;
-use crate::websocket::{
-	process_websocket_data, send_websocket_message, WebSocketMessage, WebSocketMessageType,
-};
+use crate::websocket::{process_websocket_data, WebSocketMessage};
 use crate::LogItem;
 use include_dir::include_dir;
 use nioruntime_deps::base58::ToBase58;
@@ -87,16 +87,6 @@ type Handle = u64;
 
 info!();
 
-const WS_ADMIN_GET_STATS_REQUEST: u8 = 0u8;
-const WS_ADMIN_GET_STATS_RESPONSE: u8 = 0u8;
-const WS_ADMIN_PING: u8 = 1u8;
-const WS_ADMIN_PONG: u8 = 1u8;
-const WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST: u8 = 2u8;
-const WS_ADMIN_GET_RECENT_REQUESTS: u8 = 3u8;
-const WS_ADMIN_RECENT_REQUESTS_RESPONSE: u8 = 3u8;
-const WS_ADMIN_REQUEST_CHART_REQUEST: u8 = 4u8;
-const WS_ADMIN_REQUEST_CHART_RESPONSE: u8 = 4u8;
-
 const MIN_LENGTH_STARTUP_LINE_NAME: usize = 30;
 const SEPARATOR: &str = "\
 ----------\
@@ -116,13 +106,15 @@ pub struct HttpServer<ApiHandler, WsHandler> {
 	api_handler: Option<Pin<Box<ApiHandler>>>,
 	ws_handler: Option<Pin<Box<WsHandler>>>,
 	stat_handler: StatHandler,
+	admin: HttpAdmin,
 	evh_params: Option<EvhParams>,
 	internal_files: HashMap<String, Vec<u8>>,
+	rule_update: Arc<RwLock<RuleUpdate>>,
 }
 
 impl<ApiHandler, WsHandler> HttpServer<ApiHandler, WsHandler>
 where
-	ApiHandler: Fn(&ConnectionData, &HttpHeaders, &mut ApiContext) -> Result<(), Error>
+	ApiHandler: Fn(&ConnectionData, &mut HttpHeaders, &mut ApiContext) -> Result<(), Error>
 		+ Send
 		+ 'static
 		+ Clone
@@ -195,6 +187,13 @@ where
 			config.admin_uri = admin_uri;
 		}
 
+		let admin = HttpAdmin::new(config.lmdb_dir.clone())?;
+
+		let rule_update = Arc::new(RwLock::new(RuleUpdate {
+			version: 0,
+			rules: None,
+		}));
+
 		Ok(Self {
 			config,
 			_listeners: vec![],
@@ -203,7 +202,9 @@ where
 			ws_handler: None,
 			evh_params: None,
 			stat_handler,
+			admin,
 			internal_files: HashMap::new(),
+			rule_update,
 		})
 	}
 
@@ -253,9 +254,12 @@ where
 		let ws_handler = self.ws_handler.clone();
 		let stat_handler = self.stat_handler.clone();
 		let internal = self.internal_files.clone();
+		let admin = self.admin.clone();
+		let rule_update = self.rule_update.clone();
 
 		evh.set_on_read(move |conn_data, buf, ctx, user_data| {
-			let thread_context = Self::init_user_data(user_data, &config1, &stat_handler)?;
+			let thread_context =
+				Self::init_user_data(user_data, &config1, &stat_handler, &admin, &rule_update)?;
 			let (nconns, nupdates) = match Self::process_on_read(
 				thread_context,
 				&conn_data,
@@ -271,6 +275,7 @@ where
 				&stat_handler,
 				&internal,
 				&thread_pool,
+				&admin,
 			) {
 				Ok((nconns, nupdates)) => (nconns, nupdates),
 				Err(e) => {
@@ -347,15 +352,37 @@ where
 		})?;
 
 		let stat_handler = self.stat_handler.clone();
+		let admin = self.admin.clone();
+		let rule_update = self.rule_update.clone();
 		evh.set_on_accept(move |conn_data, ctx, user_data| {
-			Self::process_on_accept(conn_data, ctx, &config2, user_data, &stat_handler)
+			Self::process_on_accept(
+				conn_data,
+				ctx,
+				&config2,
+				user_data,
+				&stat_handler,
+				&admin,
+				&rule_update,
+			)
 		})?;
 		let stat_handler = self.stat_handler.clone();
+		let admin = self.admin.clone();
+		let rule_update = self.rule_update.clone();
 		evh.set_on_close(move |conn_data, ctx, user_data| {
-			Self::process_on_close(conn_data, ctx, &config3, user_data, &stat_handler)
+			Self::process_on_close(
+				conn_data,
+				ctx,
+				&config3,
+				user_data,
+				&stat_handler,
+				&admin,
+				&rule_update,
+			)
 		})?;
 		evh.set_on_panic(move || Ok(()))?;
 		let stat_handler = self.stat_handler.clone();
+		let admin = self.admin.clone();
+		let rule_update = self.rule_update.clone();
 		evh.set_on_housekeep(move |user_data, tid| {
 			match Self::process_on_housekeeper(
 				&config4,
@@ -363,6 +390,8 @@ where
 				&evh_params_clone,
 				tid,
 				&stat_handler,
+				&admin,
+				&rule_update,
 			) {
 				Ok(_) => {}
 				Err(e) => debug!("housekeeping generated error: {}", e)?,
@@ -636,6 +665,8 @@ where
 			&format!("{}", from_utf8(&self.config.webroot)?)[..],
 		)?;
 
+		self.startup_line("lmdb_dir", &format!("{}", self.config.lmdb_dir))?;
+
 		self.startup_line("temp_dir", &format!("{}", self.config.temp_dir))?;
 
 		self.startup_line(
@@ -884,11 +915,13 @@ where
 		user_data: &'a mut Box<dyn Any + Send + Sync>,
 		config: &HttpConfig,
 		stat_handler: &StatHandler,
+		admin: &HttpAdmin,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<&'a mut ThreadContext, Error> {
 		match user_data.downcast_ref::<ThreadContext>() {
 			Some(_) => {}
 			None => {
-				let mut value = ThreadContext::new(config, stat_handler)?;
+				let mut value = ThreadContext::new(config, stat_handler, admin, rule_update)?;
 				for (k, v) in &config.mime_map {
 					value
 						.mime_map
@@ -897,7 +930,6 @@ where
 				*user_data = Box::new(value);
 			}
 		}
-
 		Ok(user_data.downcast_mut::<ThreadContext>().unwrap())
 	}
 
@@ -981,6 +1013,9 @@ where
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 		matcher: &mut MultiMatch,
+		admin: &HttpAdmin,
+		rules: &Vec<FunctionalRule>,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<
 		(
 			bool,
@@ -1061,6 +1096,9 @@ where
 				dropped_lat_sum,
 				thread_pool,
 				matcher,
+				admin,
+				rules,
+				rule_update,
 			)?;
 		}
 
@@ -1082,6 +1120,7 @@ where
 		stat_handler: &StatHandler,
 		internal: &HashMap<String, Vec<u8>>,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		admin: &HttpAdmin,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let now = SystemTime::now();
 		Self::process_async(ctx, thread_context, conn_data)?;
@@ -1163,6 +1202,9 @@ where
 			&mut thread_context.dropped_lat_sum,
 			thread_pool,
 			&mut thread_context.matcher,
+			admin,
+			&mut thread_context.rules,
+			&thread_context.rule_update,
 		)?;
 
 		if was_post_await {
@@ -1233,6 +1275,9 @@ where
 					&mut thread_context.dropped_lat_sum,
 					thread_pool,
 					&mut thread_context.matcher,
+					admin,
+					&mut thread_context.rules,
+					&thread_context.rule_update,
 				)?;
 
 				match nconn {
@@ -1293,6 +1338,9 @@ where
 				&mut thread_context.dropped_lat_sum,
 				thread_pool,
 				&mut thread_context.matcher,
+				admin,
+				&mut thread_context.rules,
+				&mut thread_context.rule_update,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1332,6 +1380,9 @@ where
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 		matcher: &mut MultiMatch,
+		admin: &HttpAdmin,
+		rules: &Vec<FunctionalRule>,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1373,6 +1424,9 @@ where
 				dropped_lat_sum,
 				thread_pool,
 				matcher,
+				admin,
+				rules,
+				rule_update,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1632,174 +1686,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		})
 	}
 
-	fn process_admin_ws(
-		conn_data: &ConnectionData,
-		msg: WebSocketMessage,
-		http_stats: &HttpStats,
-	) -> Result<bool, Error> {
-		if msg.mtype == WebSocketMessageType::Close {
-			Ok(false)
-		} else {
-			if msg.payload.len() == 0 {
-				return Ok(false);
-			}
-
-			match msg.payload[0] {
-				WS_ADMIN_GET_STATS_REQUEST => {
-					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
-					let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
-					let records = http_stats.get_stats_aggregation(start, end)?;
-					let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
-					payload.append(
-						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-							.to_be_bytes())
-						.to_vec(),
-					);
-					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
-					for record in records {
-						payload.append(&mut record.get_bytes());
-					}
-
-					send_websocket_message(
-						conn_data,
-						&WebSocketMessage {
-							payload,
-							mtype: WebSocketMessageType::Binary,
-							mask: false,
-						},
-					)?;
-				}
-				WS_ADMIN_GET_STATS_AFTER_TIMESTAMP_REQUEST => {
-					let timestamp = u64::from_be_bytes(msg.payload[1..9].try_into()?);
-					let quantity = u64::from_be_bytes(msg.payload[9..17].try_into()?);
-					let records = http_stats.get_stats_aggregation_after(timestamp, quantity)?;
-					let mut payload = vec![WS_ADMIN_GET_STATS_RESPONSE];
-					payload.append(
-						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-							.to_be_bytes())
-						.to_vec(),
-					);
-					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
-					for record in records {
-						payload.append(&mut record.get_bytes());
-					}
-
-					send_websocket_message(
-						conn_data,
-						&WebSocketMessage {
-							payload,
-							mtype: WebSocketMessageType::Binary,
-							mask: false,
-						},
-					)?;
-				}
-				WS_ADMIN_GET_RECENT_REQUESTS => {
-					let since_timestamp = u64::from_be_bytes(msg.payload[1..9].try_into()?);
-					let records = http_stats.get_recent_requests()?;
-					let mut payload = vec![WS_ADMIN_RECENT_REQUESTS_RESPONSE];
-					payload.append(
-						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-							.to_be_bytes())
-						.to_vec(),
-					);
-
-					let mut count = 0;
-					for record in &records {
-						if record.end_micros > since_timestamp {
-							count += 1;
-						}
-					}
-
-					payload.append(&mut ((count as u64).to_be_bytes()).to_vec());
-					for record in records {
-						if record.end_micros > since_timestamp {
-							let mut ser = [0u8; LOG_ITEM_SIZE];
-							record.write(&mut ser)?;
-							payload.append(&mut ser.to_vec());
-						}
-					}
-
-					send_websocket_message(
-						conn_data,
-						&WebSocketMessage {
-							payload,
-							mtype: WebSocketMessageType::Binary,
-							mask: false,
-						},
-					)?;
-				}
-				WS_ADMIN_PING => {
-					let mut payload = vec![WS_ADMIN_PONG];
-					let records = http_stats.get_stats_aggregation(0, 2)?;
-					payload.append(
-						&mut ((SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
-							.to_be_bytes())
-						.to_vec(),
-					);
-					payload.append(&mut ((records.len() as u64).to_be_bytes()).to_vec());
-					for record in records {
-						payload.append(&mut record.get_bytes());
-					}
-
-					send_websocket_message(
-						conn_data,
-						&WebSocketMessage {
-							payload,
-							mtype: WebSocketMessageType::Binary,
-							mask: false,
-						},
-					)?;
-				}
-				WS_ADMIN_REQUEST_CHART_REQUEST => {
-					let mut payload = vec![WS_ADMIN_REQUEST_CHART_RESPONSE];
-					let records = http_stats.get_stats_aggregation(0, 8640)?;
-					let time_now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-					payload.append(&mut (time_now.to_be_bytes()).to_vec());
-
-					let mut count: u64 = 0;
-					for record in &records {
-						if time_now.saturating_sub(record.timestamp.try_into()?)
-							< 24 * 60 * 60 * 1000
-						{
-							count += 1;
-						} else {
-							break;
-						}
-					}
-
-					payload.append(&mut ((count).to_be_bytes()).to_vec());
-					for record in records {
-						if time_now.saturating_sub(record.timestamp.try_into()?)
-							< 24 * 60 * 60 * 1000
-						{
-							payload.append(&mut record.requests.to_be_bytes().to_vec());
-							payload.append(&mut record.lat_sum_micros.to_be_bytes().to_vec());
-							payload.append(&mut record.connects.to_be_bytes().to_vec());
-							payload.append(&mut (record.timestamp as u64).to_be_bytes().to_vec());
-							payload
-								.append(&mut (record.prev_timestamp as u64).to_be_bytes().to_vec());
-							payload
-								.append(&mut (record.memory_bytes as u64).to_be_bytes().to_vec());
-						}
-					}
-
-					send_websocket_message(
-						conn_data,
-						&WebSocketMessage {
-							payload,
-							mtype: WebSocketMessageType::Binary,
-							mask: false,
-						},
-					)?;
-				}
-				_ => {
-					warn!("unknown ws admin command. msg = {:?}", msg)?;
-				}
-			}
-			Ok(true)
-		}
-	}
-
 	fn process_buffer(
 		conn_info: &mut ConnectionInfo,
 		conn_data: &ConnectionData,
@@ -1829,6 +1715,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 		matcher: &mut MultiMatch,
+		admin: &HttpAdmin,
+		rules: &Vec<FunctionalRule>,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<
 		(
 			usize,
@@ -1846,7 +1735,28 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				sha1,
 				ws_handler,
 				Some(&move |conn_data, msg| {
-					Self::process_admin_ws(conn_data, msg, &stat_handler.http_stats)
+					let (close, response, active_rules) =
+						admin.process_admin_ws(msg, &stat_handler.http_stats)?;
+
+					match active_rules {
+						Some(active_rules) => {
+							// updated rules
+							let mut rule_update = lockw!(rule_update)?;
+							(*rule_update).version += 1;
+							(*rule_update).rules = Some(active_rules);
+							warn!("rules updated. Version = {}", (*rule_update).version);
+						}
+						None => {}
+					}
+
+					match response {
+						Some(response) => {
+							send_websocket_message(conn_data, &response)?;
+						}
+						None => {}
+					}
+
+					Ok(close)
 				}),
 				config,
 			)?;
@@ -1866,7 +1776,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			}
 		}
 
-		let headers = match HttpHeaders::new(buffer, config, matcher) {
+		let headers = match HttpHeaders::new(buffer, config, matcher, rules) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -2034,7 +1944,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		};
 
 		let (len, key, nconn, update_info) = match headers {
-			Some(headers) => {
+			Some(mut headers) => {
 				if config.show_request_headers {
 					let headers_display = format!("{}", headers);
 					warn!(
@@ -2107,7 +2017,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					Self::process_api(
 						now,
 						buffer,
-						&headers,
+						&mut headers,
 						api_config,
 						api_handler,
 						async_connections,
@@ -2485,9 +2395,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	) -> Result<(bool, bool, usize), Error> {
 		let request_uri = headers.get_uri();
 		if bytes_eq(request_uri, &config.admin_uri) {
-			// get_stats_aggregation
-			//let stat_record = stats.http_stats.get_stats_aggregation(0, 10)?;
-			//let mut content = format!("{:?}", stat_record);
 			let query = headers.get_query();
 
 			let content = if query.len() == 0 || bytes_eq(query, b"index") {
@@ -2520,6 +2427,16 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				internal.get("chart.js").unwrap().to_vec()
 			} else if bytes_eq(query, b"loading") {
 				internal.get("Loading_icon.gif").unwrap().to_vec()
+			} else if bytes_eq(query, b"rules") {
+				internal.get("rules.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"example_app.css") {
+				internal.get("example_app.css").unwrap().to_vec()
+			} else if bytes_eq(query, b"bootstrap.min.css") {
+				internal.get("bootstrap.min.css").unwrap().to_vec()
+			} else if bytes_eq(query, b"bootstrap.min.js") {
+				internal.get("bootstrap.min.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"jquery.min.js") {
+				internal.get("jquery.min.js").unwrap().to_vec()
 			} else if bytes_eq(query, b"ws") {
 				let (_ws, len) = Self::check_websocket(
 					conn_data,
@@ -2556,7 +2473,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	fn process_api(
 		now: SystemTime,
 		buf: &[u8],
-		headers: &HttpHeaders,
+		headers: &mut HttpHeaders,
 		api_config: &Arc<RwLock<HttpApiConfig>>,
 		api_handler: &Option<Pin<Box<ApiHandler>>>,
 		async_connections: &Arc<RwLock<StaticHash<(), ()>>>,
@@ -2653,7 +2570,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							conn_info.api_context = Some(ctx.clone());
 						}
 					}
-					(api_handler)(conn_data, &headers, &mut ctx)?;
+					(api_handler)(conn_data, headers, &mut ctx)?;
 
 					if !ctx.is_async() {
 						Self::process_stats(
@@ -3880,11 +3797,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		stat_handler: &StatHandler,
+		admin: &HttpAdmin,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<(), Error> {
 		let id = conn_data.get_connection_id();
 		let handle = conn_data.get_handle();
 		debug!("on accept: {}, handle={}", id, handle)?;
-		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
+		let thread_context =
+			Self::init_user_data(user_data, config, stat_handler, admin, rule_update)?;
 		thread_context.connects += 1;
 		insert_step_allocator(
 			conn_data.clone(),
@@ -3901,10 +3821,13 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		stat_handler: &StatHandler,
+		admin: &HttpAdmin,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<(), Error> {
 		debug!("on close: {}", conn_data.get_connection_id())?;
 
-		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
+		let thread_context =
+			Self::init_user_data(user_data, config, stat_handler, admin, rule_update)?;
 
 		let connection_id = conn_data.get_connection_id();
 
@@ -4152,16 +4075,46 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		Ok(())
 	}
 
+	fn check_rules(thread_context: &mut ThreadContext, config: &HttpConfig) -> Result<(), Error> {
+		let rule_update = lockr!(thread_context.rule_update)?;
+		if rule_update.version > thread_context.rule_version {
+			thread_context.rule_version = rule_update.version;
+			thread_context.rules = match &rule_update.rules {
+				Some(rules) => rules.clone(),
+				None => {
+					return Err(ErrorKind::InternalError(
+						"expected rules in rule update, but found none".to_string(),
+					)
+					.into());
+				}
+			};
+			thread_context.matcher = ThreadContext::build_matcher(
+				config.max_matches,
+				config.max_header_size,
+				config.dictionary_capacity,
+				config.max_header_size,
+				thread_context.rules.clone(),
+			)?;
+		}
+
+		Ok(())
+	}
+
 	fn process_on_housekeeper(
 		config: &HttpConfig,
 		user_data: &mut Box<dyn Any + Send + Sync>,
 		evh_params: &EvhParams,
 		tid: usize,
 		stat_handler: &StatHandler,
+		admin: &HttpAdmin,
+		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<(), Error> {
 		Self::check_log_rotation(tid)?;
 		let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
-		let thread_context = Self::init_user_data(user_data, config, stat_handler)?;
+		let thread_context =
+			Self::init_user_data(user_data, config, stat_handler, admin, rule_update)?;
+
+		Self::check_rules(thread_context, config)?;
 
 		let res = Self::process_housekeep_log_queue(thread_context);
 		if res.is_err() {
@@ -6579,6 +6532,8 @@ Content-Length: 30\r\n\
 		assert_eq!(buf[len - 11], 13);
 
 		assert!(*lockr!(x_clone)?);
+
+		tear_down_test_dir(root_dir)?;
 
 		Ok(())
 	}

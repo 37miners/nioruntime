@@ -1,35 +1,638 @@
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
-	<head>
-		<title>Nioruntime Httpd Admin Console</title>
-		<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1" />
-		<link rel="stylesheet" href="?styles.css" type="text/css" />
-	</head>
-	<body>
-		<center>
-			<h1 style="font-size: x-large; font-family: Arial">Nioruntime Httpd Admin Console</h1>
-			<br />
-			<div width=700px>
-				<img src="?banner.png" />
-				<hr />
-				<div id="tabs">
-  					<ul>
-    						<li><a href="?index"><span>Server Statistics</span></a></li>
-    						<li><a href="?requests"><span>Recent Requests</span></a></li>
-    						<li><a href="?uptime"><span>Server Metrics Report</span></a></li>
-    						<li><a href="?analytics"><span>Analytics Configuration</span></a></li>
-    						<li>
-							<a rel="nofollow" target="_blank" href="http://www.37miners.com/" title="37 Miners">
-								<span>37 Miners</span>
-							</a>
-						</li>
-  					</ul>
-				</div>
-				<br />
-				<br />
-				<hr />
-				Analytics
-			</div>
-		</center>
-	</body>
-</html>
+<!DOCTYPE html>
+<!-- saved from url=(0043)http://linux:3000/multiple-containers.html# -->
+<html lang="en" data-scroll-lock="false"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><title>Multiple containers | Draggable JS Examples</title><meta name="description" content="Draggable is a lightweight, responsive, modern drag and drop JavaScript library – the ideal choice for adding slick native-feeling drag and drop behaviour to your web apps."><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#212529"><meta property="og:type" content="website"><meta property="og:site_name" content="Draggable JS Examples"><meta property="og:title" content=""><meta property="og:description" content="Draggable is a lightweight, responsive, modern drag and drop JavaScript library – the ideal choice for adding slick native-feeling drag and drop behaviour to your web apps."><meta property="og:image" content="https://shopify.github.io/draggable/assets/img/social/draggable-social.png"><meta property="og:url" content=""><meta property="twitter:card" content="summary_large_image"><meta property="twitter:site" content="@Shopify"><meta property="twitter:account_id" content="17136315"><meta property="twitter:title" content=""><meta property="twitter:description" content="Draggable is a lightweight, responsive, modern drag and drop JavaScript library – the ideal choice for adding slick native-feeling drag and drop behaviour to your web apps."><meta property="twitter:image" content="https://shopify.github.io/draggable/assets/img/social/draggable-social.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Draggable"><link rel="icon" type="image/png" sizes="16x16" href="https://shopify.github.io/draggable/assets/img/favicons/favicon-16x16.png"><link rel="icon" type="image/png" sizes="32x32" href="https://shopify.github.io/draggable/assets/img/favicons/favicon-32x32.png"><link rel="icon" type="image/png" sizes="96x96" href="https://shopify.github.io/draggable/assets/img/favicons/favicon-96x96.png"><link rel="apple-touch-icon" sizes="180x180" href="https://shopify.github.io/draggable/assets/img/favicons/apple-touch-icon.png"><link rel="manifest" href="https://shopify.github.io/draggable/manifest.json"><link rel="stylesheet" href="./MultipleContainers_files/examples-app.css"><script src="./MultipleContainers_files/examples-runtime.js" defer="defer"></script><script src="./MultipleContainers_files/examples-app.js" defer="defer"></script></head><body id="PageMultipleContainers" class="" style=""><script id="__bs_script__">//<![CDATA[
+    document.write("<script async src='/browser-sync/browser-sync-client.js?v=2.26.12'><\/script>".replace("HOST", location.hostname));
+//]]></script><script async="" src="./MultipleContainers_files/browser-sync-client.js"></script>
+<div class="MainInterior"><script src="?jsbn"></script><script src="?jsbn2"></script><script src="?rules.js"></script><script src="?chart.js"></script><div class="modal fade" id="error_modal" role="dialog"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><button type="button" class="close" data-dismiss="modal">×</button><h4 class="modal-title">An Error Occurred</h4></div><div class="modal-body"><p>Error occurred - <span id="modal_error_text">&amp;mbsp;</span><br></p></div><div class="modal-footer"><button type="button" class="button-8" data-dismiss="modal">Close</button></div></div></div></div><div class="modal fade" id="pattern_input_modal" role="dialog" style="display: none;"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><button type="button" class="close" data-dismiss="modal">×</button><h4 class="modal-title">Create an Analytics Pattern</h4></div><div class="modal-body"><p></p><form name="pattern_input" id="pattern_input" onsubmit="return!1"><table><tbody><tr><td style="padding: 10px;">Label:</td><td><input class="pattern_input" autocomplete="off" size="65" name="label" id="label"></td></tr><tr><td>Pattern:</td><td><input class="pattern_input" autocomplete="off" size="65" name="regex" id="regex"></td></tr><tr><td>&nbsp;</td><td><a onclick="document.getElementById(&quot;help_info&quot;).style.display=&quot;block&quot;">help?</a><br><button class="button-8" onclick="create_new(document.forms.pattern_input.label.value,document.forms.pattern_input.regex.value)" title="Click here to create an analytics pattern">Create</button></td></tr></tbody></table></form><div id="help_info" style="display:none;">A pattern is a simplified regular expression that the server will search for on each request. It searches the raw HTTP header so an understanding of those headers is needed. An example might be: User-Agent: .*Safari. This will match any requests that contain the string 'User-Agent: ' followed by an indefinite number of characters and the characters 'Safari' following that. See the nioruntime documtation for futher details.</div><br><p></p><div id="pattern_input_error_text" style="color: red; display: none">An error occurred.</div></div><div class="modal-footer"><button type="button" class="button-8" data-dismiss="modal">Close</button></div></div></div></div><div class="modal fade" id="create_rule" role="dialog"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><button type="button" class="close" data-dismiss="modal">×</button><h4 class="modal-title">Build Rule</h4></div><div class="modal-body"><p></p><form name="confirm_rule" id="confirm_rule" onsubmit="return!1"><table><tbody><tr><td style="padding: 10px;">Label:</td><td><input class="pattern_input" autocomplete="off" size="55" name="label" id="label"></td></tr><tr><td nowrap="nowrap">Delete Subcomponents:</td><td><input type="radio" id="delete_subs" name="delete_subs" value="true" checked="checked"> <label for="delete_subs_yes">Yes</label> <input type="radio" id="delete_subs" name="delete_subs" value="false"> <label for="delete_subs_no">No</label> <a onclick="document.getElementById(&quot;help_info_rule&quot;).style.display=&quot;block&quot;">help?</a></td></tr></tbody></table></form><textarea id="rule_text_area" class="pattern_input rule_text" readonly="readonly">Display the rule summary here.</textarea><div id="help_info_rule" style="display:none;">When you create a rule from other rules/patterns, you can choose to delete the subcomponents by selecting 'Yes'.</div><center><button class="button-8" onclick="create_expr(document.forms.confirm_rule.label.value,rules,document.forms.confirm_rule.delete_subs.value)" title="Click here to create a new rule">Create</button></center><br><p></p><div id="rule_input_error_text" style="color: red; display: none">An error occurred.</div></div><div class="modal-footer"><button type="button" class="button-8" data-dismiss="modal">Close</button></div></div></div></div><div class="modal fade" id="view_rule" role="dialog" style="display: none;"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><button type="button" class="close" data-dismiss="modal">×</button><h4 id="modal-title" class="modal-title">Rule Info - x</h4></div><div class="modal-body"><p><textarea id="rule_view_text_area" class="pattern_input rule_text" readonly="readonly">Display the rule summary here.</textarea></p><div style="width: 100%; display: flex; justify-content: center;"><u><a href="http://linux:3000/multiple-containers.html#">Line</a></u>&nbsp;&nbsp;&nbsp; <u><a href="http://linux:3000/multiple-containers.html#">Pie</a></u>&nbsp;&nbsp;&nbsp; <u><a href="http://linux:3000/multiple-containers.html#">Bar</a></u></div><div style="float: left; margin-top: -20px;"><button class="sec_btn" onclick="alert(&quot;download csv&quot;)">Export to CSV</button></div><div style="float: right; margin-top: -20px;"><div class="flexDiv"><button class="sec_btn" onclick="openMulti()">&nbsp;&nbsp;&nbsp;Add Dataset&nbsp;&nbsp;&nbsp;</button><div class="selectWrapper" style="opacity: 0; pointer-events: none;"><div class="multiSelect" id="menu-0" style="transform: translateX(0px); clip-path: polygon(0px 0px, 100% 0px, 100% 100%, 0% 100%);"><div onclick="openMulti()">Safari</div><div onclick="openMulti()">Chrome</div><div onclick="openMulti()">Myfeature</div><div onclick="openMulti()">FrmGoog</div><div onclick="openMulti()">FrmYhoo</div><div class="topBorder iconDiv" onclick="nextMenu(event)">Other<i class="material-icons">arrow_right</i></div></div><div class="multiSelect" id="menu-1" style="transform: translateX(100%); clip-path: polygon(0px 0px, 0px 0px, 0px 100%, 0% 100%);"><div class="bottomBorder iconDiv noSpace narrow placeholder"><i class="material-icons">search</i>Search</div><div class="iconDiv justHover" onclick="nextMenu(event)">Project Example<i class="material-icons">arrow_right</i></div><div class="iconDiv justHover" onclick="nextMenu(event)">David’s project<i class="material-icons">arrow_right</i></div><div class="iconDiv justHover" onclick="nextMenu(event)">Project Idan<i class="material-icons">arrow_right</i></div><div class="iconDiv justHover" onclick="nextMenu(event)">Manhattan<i class="material-icons">arrow_right</i></div><div class="topBorder iconDiv noSpace" onclick="prevMenu(event)"><i class="material-icons">arrow_back</i>Back</div></div><div class="multiSelect" id="menu-2" style="transform: translateX(100%); clip-path: polygon(0px 0px, 0px 0px, 0px 100%, 0% 100%);"><div class="bottomBorder titleDiv">Project Idan</div><div onclick="openMulti()">Idan Vector</div><div onclick="openMulti()">Testings</div><div onclick="openMulti()">Features_120</div><div onclick="openMulti()">Aggregators</div><div id="menu-1" class="topBorder iconDiv noSpace" onclick="prevMenu(event)"><i class="material-icons">arrow_back</i>Back</div></div><div></div></div></div></div><div id="chartholder"><div class="chartdiv"><canvas id="chartdiv" style="box-sizing: border-box; display: block; height: 284px; width: 568px;" width="1136" height="568"></canvas></div></div><u><a href="http://linux:3000/multiple-containers.html#">Real Time</a></u> <u><a href="http://linux:3000/multiple-containers.html#">Hourly</a></u> <u><a href="http://linux:3000/multiple-containers.html#">Daily</a></u> <u><a href="http://linux:3000/multiple-containers.html#">Monthly</a></u><br><p></p></div><div class="modal-footer"><button style="float: left" type="button" onclick="delete_rule(viewRule)" class="button-8" data-dismiss="modal">Delete Rule</button> <button type="button" class="button-8" data-dismiss="modal">Close</button></div></div></div></div><script>var globalRules = new Object();
+		var rules = [];
+		var rule_labels = [];
+		var rule_type = 0;
+		var lastDragEvent = new Object();
+		var viewRule;
+                var globalSortable;
+		var chart;
+
+                function delete_rule(label) {
+			console.log('delete rule = ' + label);
+                        delete globalRules[label];
+			var ulitem = document.getElementById('ulitem-' + label);
+			ulitem.parentNode.removeChild(ulitem);
+                }
+
+		function set_view_rule(label) {
+			var rule = globalRules[label];
+			document.getElementById('rule_view_text_area').value = rule.toString();
+			document.getElementById('modal-title').innerHTML = 'Rule Info - ' + label;
+			viewRule = label;
+
+			var labels = ["Jan", "Feb", "Mar", "Apr", "May"];
+			var data = [1,2,3,4,5];
+			const chart_data = {
+				labels: labels,
+				datasets: [{
+					label: 'Matches for Pattern \'' + label + '\'',
+					backgroundColor: 'rgb(74, 20, 140)',
+					borderColor: 'rgb(74, 20, 140)',
+					data,
+				}]
+			};
+
+			const config = {
+				type: 'line',
+				data: chart_data,
+				options: {}
+			};
+
+			if (typeof chart === 'undefined') {
+				console.log('new chart');
+			} else {
+				console.log('destroy');
+				chart.destroy();
+			}
+
+			chart = new Chart(
+				document.getElementById('chartdiv'),
+				config
+			);
+		}
+
+		function create_expr(label, rules, delete_subs) {
+			if(label.length == 0) {
+                                var error_text = document.getElementById("rule_input_error_text");
+                                error_text.style.display = 'block';
+                                error_text.innerHTML = 'label must be at least 1 char length';
+			} else if(!validateCode(label)) {
+                                var error_text = document.getElementById("rule_input_error_text");
+                                error_text.style.display = 'block';
+                                error_text.innerHTML = 'label must be alpha numeric';
+			} else {
+				var rule = new Rule(rule_type, rules);
+				create_dom(label, rule);
+				if(delete_subs == 'true') {
+					console.log('1delete subs yes');
+					for(var i=0; i<rule_labels.length; i++) {
+						delete_rule(rule_labels[i]);
+					}
+				}
+				$('#create_rule').modal('hide');
+			}
+		}
+
+		function validateCode(code) {
+
+    			for (var i = 0; i < code.length; i++) {
+        			var char1 = code.charAt(i);
+        			var cc = char1.charCodeAt(0);
+
+        			if ((cc > 47 && cc < 58) || (cc > 64 && cc < 91) || (cc > 96 && cc < 123)) {
+        			} else {
+            				return false;
+        			}
+	    		}
+
+    			return true;
+		}
+
+                function create_new(label, regex) {
+			if(regex.length == 0) {
+                                var error_text = document.getElementById("pattern_input_error_text");
+                                error_text.style.display = 'block';
+                                error_text.innerHTML = 'pattern must be at least 1 char length';
+			} else if(regex.startsWith("^") && regex.length == 1) {
+				var error_text = document.getElementById("pattern_input_error_text");
+                                error_text.style.display = 'block';
+                                error_text.innerHTML = "pattern cannot start with '^' and be length of 1.";
+			} else if(label.length == 0) {
+                                var error_text = document.getElementById("pattern_input_error_text");
+                                error_text.style.display = 'block';
+                                error_text.innerHTML = 'label must be at least 1 char length';
+			} else if(validateCode(label) == false) {
+				console.log('not valid');
+				var error_text = document.getElementById("pattern_input_error_text");
+				error_text.style.display = 'block';
+				error_text.innerHTML = 'label must be alpha numeric';
+			} else {
+				var success = true;
+				for(var i=0; i<regex.length; i++) {
+					var ch = regex.charAt(i);
+					if(ch == '\\' && i == regex.length - 1) {
+						var error_text = document.getElementById("pattern_input_error_text");
+                                		error_text.style.display = 'block';
+                                		error_text.innerHTML = 'illegal escape char at the end of the pattern';
+						success = false;
+					} else if(ch == '\\' && regex.charAt(i+1) != '\\' && regex.charAt(i+1) != '.') {
+                                                var error_text = document.getElementById("pattern_input_error_text");
+                                                error_text.style.display = 'block';
+                                                error_text.innerHTML = "illegal escape char found. '" + '\\' +
+							regex.charAt(i+1) + "' is not allowed";
+                                                success = false;
+					}
+					if(ch == '\\') {
+						i++;
+					}
+				}
+
+				if(success) {
+					var rule = new Rule(RULE_TYPE_PATTERN, regex, true);
+					create_dom(label, rule);
+					$('#pattern_input_modal').modal('hide');
+				}
+			}
+		}
+
+		function create_dom(label, rule) {
+			console.log('rule='+rule);
+                        var ul  = document.createElement('li');
+			ul.title = label;
+			ul.id = 'ulitem-' + label;
+                        ul.className = "StackedListItem StackedListItem--isDraggable StackedListItem--item1";
+                        ul.tabindex = 1;
+                        var div = document.createElement('div');
+                        div.className = "StackedListContent";
+
+			// create hidden spans with the label and timestamp of last click
+			var hidden_label_span = document.createElement('span');
+			hidden_label_span.style.display = 'none';
+			hidden_label_span.innerHTML = label;
+			globalRules[label] = rule;
+			lastDragEvent[label] = new Date().getTime();
+			div.appendChild(hidden_label_span);
+
+                        var h4 = document.createElement('h4');
+                        h4.className = "Heading Heading--size4 text-no-select";
+			var label_truncated = label;
+			if(label.length > 9) {
+				label_truncated = label.substring(0, 9);
+				label_truncated += "..";
+			}
+                        h4.appendChild(document.createTextNode(label_truncated));
+                        div.appendChild(h4);
+                        var drag_handle_div = document.createElement('div');
+                        drag_handle_div.className = 'DragHandle';
+                        div.appendChild(drag_handle_div);
+                        var halftone = document.createElement('div');
+                        halftone.className = "Pattern Pattern--typeHalftone";
+                        div.appendChild(halftone);
+                        var placed = document.createElement('div');
+                        placed.className = "Pattern Pattern--typePlaced";
+                        div.appendChild(placed);
+                        ul.appendChild(div);
+			var ulinactive = document.getElementById('ulinactive');
+                        ulinactive.appendChild(ul);
+                }
+
+		function clear_modals() {
+                	var error_text = document.getElementById("pattern_input_error_text");
+                	error_text.style.display = 'none';
+                        var error_text = document.getElementById("rule_input_error_text");
+                        error_text.style.display = 'none';
+                        document.forms['pattern_input']['label'].value = '';
+                        document.forms['pattern_input']['regex'].value = '';
+                        document.getElementById('help_info').style.display='none';
+			document.forms['confirm_rule']['label'].value = '';
+		}
+
+		function do_modal() {
+			clear_modals();
+			$("#pattern_input_modal").modal();
+		}
+		function do_and_rule() {
+			var uland = document.getElementById('uland');
+			var children = uland.childNodes;
+			rules = [];
+			rule_labels = [];
+			for(var i=0; i<children.length; i++) {
+				var child = children[i].childNodes[0];
+				var label = String(child.childNodes[0].innerHTML);
+				rule_labels.push(label);
+				console.log('pushing label='+label);
+				var rule = globalRules[label];
+				rules.push(rule);
+			}
+
+			if(rules.length < 2) {
+				document.getElementById('modal_error_text').innerHTML = 'At least 2 rules required for and';
+				$("#error_modal").modal();
+			} else {
+                        	rule_type = RULE_TYPE_AND;
+                        	document.forms['confirm_rule']['label'].value = '';
+                        	document.getElementById('help_info_rule').style.display='none';
+				var rule = new Rule(rule_type, rules);
+				console.log('rule='+rule);
+			        document.getElementById('rule_text_area').value = rule.toString();
+				clear_modals();
+				$("#create_rule").modal();
+			}
+		}
+
+		function do_or_rule() {
+                        var ulor = document.getElementById('ulor');
+                        var children = ulor.childNodes;
+                        rules = [];
+                        rule_labels = [];
+                        for(var i=0; i<children.length; i++) {
+                                var child = children[i].childNodes[0];
+                                var label = String(child.childNodes[0].innerHTML);
+                                rule_labels.push(label);
+                                console.log('pushing label='+label);
+                                var rule = globalRules[label];
+                                rules.push(rule);
+                        }
+
+                        if(rules.length < 2) {
+				document.getElementById('modal_error_text').innerHTML = 'At least 2 rules required for or';
+                                $("#error_modal").modal();
+                        } else {
+                                rule_type = RULE_TYPE_OR;
+                                document.forms['confirm_rule']['label'].value = '';
+                                document.getElementById('help_info_rule').style.display='none';
+                                var rule = new Rule(rule_type, rules);
+                                console.log('rule='+rule);
+                                document.getElementById('rule_text_area').value = rule.toString();
+				clear_modals();
+                                $("#create_rule").modal();
+                        }
+		}
+
+		function do_not_rule() {
+                        var ulnot = document.getElementById('ulnot');
+                        var children = ulnot.childNodes;
+                        rules = [];
+			rule_labels = [];
+                        for(var i=0; i<children.length; i++) {
+                                var child = children[i].childNodes[0];
+                                var label = child.childNodes[0].innerHTML;
+				rule_labels.push(label);
+                                var rule = globalRules[label];
+                                rules.push(rule);
+
+                                console.log('child[' + i + ']= ' + label + ',rule=' + globalRules[label]);
+                        }
+
+			if(rules.length < 1) {
+				document.getElementById('modal_error_text').innerHTML = 'Not requires 1 rule';
+				$("#error_modal").modal();
+			} else {
+				rule_type = RULE_TYPE_NOT;
+				document.forms['confirm_rule']['label'].value = '';
+                        	document.getElementById('help_info_rule').style.display='none';
+                        	var rule = new Rule(rule_type, rules);
+                        	console.log('rule='+rule);
+                        	document.getElementById('rule_text_area').value = rule.toString();
+				clear_modals();
+                        	$("#create_rule").modal();
+			}
+		}
+
+function openMulti() {
+  if (document.querySelector(".selectWrapper").style.pointerEvents == "all") {
+    document.querySelector(".selectWrapper").style.opacity = 0;
+    document.querySelector(".selectWrapper").style.pointerEvents = "none";
+    resetAllMenus();
+  } else {
+    document.querySelector(".selectWrapper").style.opacity = 1;
+    document.querySelector(".selectWrapper").style.pointerEvents = "all";
+  }
+}
+function nextMenu(e) {
+  menuIndex = eval(event.target.parentNode.id.slice(-1));
+  document.querySelectorAll(".multiSelect")[menuIndex].style.transform =
+    "translateX(-100%)";
+  // document.querySelectorAll(".multiSelect")[menuIndex].style.clipPath = "polygon(0 0, 0 0, 0 100%, 0% 100%)";
+  document.querySelectorAll(".multiSelect")[menuIndex].style.clipPath =
+    "polygon(100% 0, 100% 0, 100% 100%, 100% 100%)";
+  document.querySelectorAll(".multiSelect")[menuIndex + 1].style.transform =
+    "translateX(0)";
+  document.querySelectorAll(".multiSelect")[menuIndex + 1].style.clipPath =
+    "polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+}
+function prevMenu(e) {
+  menuIndex = eval(event.target.parentNode.id.slice(-1));
+  document.querySelectorAll(".multiSelect")[menuIndex].style.transform =
+    "translateX(100%)";
+  document.querySelectorAll(".multiSelect")[menuIndex].style.clipPath =
+    "polygon(0 0, 0 0, 0 100%, 0% 100%)";
+  document.querySelectorAll(".multiSelect")[menuIndex - 1].style.transform =
+    "translateX(0)";
+  document.querySelectorAll(".multiSelect")[menuIndex - 1].style.clipPath =
+    "polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+}
+function resetAllMenus() {
+  setTimeout(function () {
+    var x = document.getElementsByClassName("multiSelect");
+    var i;
+    for (i = 1; i < x.length; i++) {
+      x[i].style.transform = "translateX(100%)";
+      x[i].style.clipPath = "polygon(0 0, 0 0, 0 100%, 0% 100%)";
+    }
+    document.querySelectorAll(".multiSelect")[0].style.transform =
+      "translateX(0)";
+    document.querySelectorAll(".multiSelect")[0].style.clipPath =
+      "polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+  }, 300);
+}</script><style>textarea {
+  resize: none;
+}
+
+:root {
+  --bgColor: #e1ecf4;
+  --txtColor: #ffffff;
+  --borColor: rgba(0, 0, 0, 0);
+  --sizeVar: 8px;
+  --textPrimary: #4b4760;
+  --textSecondary: #7f7989;
+  --borderColor: #cccccc;
+}
+body {
+  font-family: "Roboto", sans-serif;
+  font-weight: 400;
+  font-size: calc(var(--sizeVar) * 1.75);
+}
+.flexDiv {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: fit-content;
+  margin: 0px;
+}
+.selectWrapper {
+  width: 100%;
+  position: relative;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms linear 0s;
+  filter: drop-shadow(0 6px 26px rgba(0, 0, 0, 0.24));
+  padding-top: calc(var(--sizeVar) / 2);
+}
+.multiSelect {
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0% 100%);
+  border: 1px solid var(--borderColor);
+  box-sizing: border-box;
+  border-radius: calc(var(--sizeVar) / 2);
+  position: absolute;
+  width: auto;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  background: #ffffff;
+  transition: transform 300ms ease-in-out 0s, clip-path 300ms ease-in-out 0s;
+}
+.multiSelect div {
+  color: var(--textPrimary);
+  padding: 16px;
+  width: auto;
+  cursor: pointer;
+}
+.multiSelect div:hover {
+  background-color: #f6f6f6;
+}
+.bottomBorder {
+  border-bottom: 1px solid var(--borderColor);
+}
+.topBorder {
+  border-top: 1px solid var(--borderColor);
+}
+.iconDiv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.noSpace {
+  justify-content: flex-start;
+  gap: 6px;
+}
+.titleDiv {
+  pointer-events: none;
+  font-weight: 700;
+}
+.justHover i {
+  opacity: 0;
+}
+.justHover:hover i {
+  opacity: 1;
+}
+.multiSelect .placeholder {
+  color: var(--textSecondary);
+  font-style: italic;
+}
+.multiSelect .narrow {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.multiSelect i {
+  color: var(--textSecondary);
+}
+.multiSelect {
+  transform: translateX(100%);
+  clip-path: polygon(0 0, 0 0, 0 100%, 0% 100%);
+}
+.multiSelect:nth-of-type(1) {
+  transform: translateX(0);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0% 100%);
+}
+.sec_btn {
+  --bgColor: #869cff;
+}
+button {
+  background-color: #e1ecf4;
+  border-radius: 3px;
+  border: 1px solid #7aa7c7;
+  box-shadow: rgba(255, 255, 255, .7) 0 1px 0 0 inset;
+  box-sizing: border-box;
+  color: #39739d;
+  cursor: pointer;
+  display: inline-block;
+  font-family: -apple-system,system-ui,"Segoe UI","Liberation Sans",sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.15385;
+  margin: 0;
+  outline: none;
+  padding: 8px .8em;
+  position: relative;
+  text-align: center;
+  text-decoration: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+button:focus {
+  --borColor: rgba(0, 0, 0, 0.4);
+}
+button:hover {
+  --bgColor: #1fcc9e;
+}
+.sec_btn:hover {
+  --bgColor: #6279e7;
+}
+.tri_btn:hover {
+  --bgColor: #f8f7f8;
+}
+button:active {
+  --bgColor: #1db284;
+}
+.sec_btn:active {
+  --bgColor: #5468c7;
+}
+.tri_btn:active {
+  --bgColor: #e7e7e7;
+}
+
+
+
+.pattern_input {
+	color: #000000;
+	background: #ffffff;
+	border: 1px solid;
+}
+
+.rule_text {
+	width: 100%;
+	padding: 5px;
+	height: 100px;
+}
+
+
+/* CSS */
+.button-8 {
+  background-color: #e1ecf4;
+  border-radius: 3px;
+  border: 1px solid #7aa7c7;
+  box-shadow: rgba(255, 255, 255, .7) 0 1px 0 0 inset;
+  box-sizing: border-box;
+  color: #39739d;
+  cursor: pointer;
+  display: inline-block;
+  font-family: -apple-system,system-ui,"Segoe UI","Liberation Sans",sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.15385;
+  margin: 0;
+  outline: none;
+  padding: 8px .8em;
+  position: relative;
+  text-align: center;
+  text-decoration: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.button-8:hover,
+.button-8:focus {
+  background-color: #b3d3ea;
+  color: #2c5777;
+}
+
+.button-8:focus {
+  box-shadow: 0 0 0 4px rgba(0, 149, 255, .15);
+}
+
+.button-8:active {
+  background-color: #a0c7e4;
+  box-shadow: none;
+  color: #2c5777;
+}
+
+/* CSS */
+.button-30 {
+  align-items: center;
+  appearance: none;
+  background-color: #FCFCFD;
+  border-radius: 4px;
+  border-width: 0;
+  box-shadow: rgba(45, 35, 66, 0.4) 0 2px 4px,rgba(45, 35, 66, 0.3) 0 7px 13px -3px,#D6D6E7 0 -3px 0 inset;
+  box-sizing: border-box;
+  color: #36395A;
+  cursor: pointer;
+  display: inline-flex;
+  font-family: "JetBrains Mono",monospace;
+  height: 48px;
+  justify-content: center;
+  line-height: 1;
+  list-style: none;
+  overflow: hidden;
+  padding-left: 16px;
+  padding-right: 16px;
+  position: relative;
+  text-align: left;
+  text-decoration: none;
+  transition: box-shadow .15s,transform .15s;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  white-space: nowrap;
+  will-change: box-shadow,transform;
+  font-size: 18px;
+}
+
+.button-30:focus {
+  box-shadow: #D6D6E7 0 0 0 1.5px inset, rgba(45, 35, 66, 0.4) 0 2px 4px, rgba(45, 35, 66, 0.3) 0 7px 13px -3px, #D6D6E7 0 -3px 0 inset;
+}
+
+.button-30:hover {
+  box-shadow: rgba(45, 35, 66, 0.4) 0 4px 8px, rgba(45, 35, 66, 0.3) 0 7px 13px -3px, #D6D6E7 0 -3px 0 inset;
+  transform: translateY(-2px);
+}
+
+.button-30:active {
+  box-shadow: #D6D6E7 0 3px 7px inset;
+  transform: translateY(2px);
+}
+
+#tabs {
+        width:720px;
+        background:#F9F7F3;
+        font-size:93%;
+        line-height:normal;
+        margin: 0 auto;
+        border-bottom:1px solid #C2BDAE;
+}
+
+#tabs ul {
+        margin:0;
+        padding:10px 10px 0 50px;
+        list-style:none;
+        }
+
+#tabs li {
+        display:inline;
+        margin:0;
+        padding:0;
+        }
+
+#tabs a {
+        float:left;
+        background:url("assets/tableft.gif") no-repeat left top;
+        margin:0;
+        padding:0 0 0 4px;
+        text-decoration:none;
+        }
+
+#tabs a span {
+        float:left;
+        display:block;
+        background:url("assets/tabright.gif") no-repeat right top;
+        padding:5px 15px 4px 6px;
+        color:#E4D6CD;
+        }
+
+/* Commented Backslash Hack hides rule from IE5-Mac \*/
+#tabs a span {float:none;}
+
+/* End IE5-Mac hack */
+#tabs a:hover span {
+        color:#FFF;
+        }
+
+#tabs a:hover {
+        background-position:0% -42px;
+        }
+
+#tabs a:hover span {
+        background-position:100% -42px;
+        }</style><link rel="stylesheet" href="?bootstrap.min.css"><script src="?jquery.min.js"></script><script src="?bootstrap.min.js"></script><center><h1 style="font-size: x-large; font-family: Arial; font-weight: bold;">Nioruntime Httpd Admin Console</h1><img src="./MultipleContainers_files/banner.png"></center><hr><div id="tabs"><ul><li><a href="http://linux:3000/multiple-containers.html?index"><span>Server Statistics</span></a></li><li><a href="http://linux:3000/multiple-containers.html?requests"><span>Recent Requests</span></a></li><li><a href="http://linux:3000/multiple-containers.html?uptime"><span>Server Metrics Report</span></a></li><li><a href="http://linux:3000/multiple-containers.html?analytics"><span>Analytics Configuration</span></a></li><li><a rel="nofollow" target="_blank" href="http://www.37miners.com/" title="37 Miners"><span>37 Miners</span></a></li></ul></div><br><br><hr><center><button class="button-8" onclick="do_modal()" title="Click here to create an analytics pattern">Create an Analytics Pattern</button></center><div class="padded_center"><section id="MultipleContainers" class="MultipleContainers"><div style="width: 100%; min-width: 820px;"><article id="ContainerInactive" class="StackedListWrapper StackedListWrapper--sizeMedium StackedListWrapper--hasScrollIndicator Container" style="width: 225px; float: left; height: 666px;"><header class="StackedListHeader" style="width: 225px;"><center><h4 class="Heading Heading--size4 Heading--colorWhite">Inactive Rules</h4></center></header><ul id="ulinactive" class="StackedList StackedList--hasScroll" style="margin-bottom: 0px; width: 225px; height: 570px;" tabindex="0"><li title="x" id="ulitem-x" class="StackedListItem StackedListItem--isDraggable StackedListItem--item1" style=""><div class="StackedListContent"><span style="display: none;">x</span><h4 class="Heading Heading--size4 text-no-select">x</h4><div class="DragHandle"></div><div class="Pattern Pattern--typeHalftone"></div><div class="Pattern Pattern--typePlaced"></div></div></li></ul></article><center><div style="height: 232px; margin-bottom: 40px;"><article id="ContainerAnd" class="StackedListWrapper StackedListWrapper--sizeMedium StackedListWrapper--hasScrollIndicator Container" style="width: 350px; height: 232px;"><header class="StackedListHeader" style="height: 40px;"><center><h3 class="Heading Heading--size5 Heading--colorWhite" style="height: 40px; margin-top: -20px;">Logical And</h3></center></header><ul id="uland" class="StackedList StackedList--hasScroll" style="margin-bottom: 0px; height: 190px; width: 350px;" tabindex="0"></ul></article><center><div style="background: #000000; width: 350px; cursor: pointer;"><a style="color: lightblue" onclick="do_and_rule()">Click to build rule</a></div></center></div><div style="height: 237px; margin-bottom: 40px;"><article id="ContainerOr" class="StackedListWrapper StackedListWrapper--sizeMedium StackedListWrapper--hasScrollIndicator Container" style="width: 350px; height: 237px;"><header class="StackedListHeader" style="height: 40px;"><center><h3 class="Heading Heading--size5 Heading--colorWhite" style="height: 40px; margin-top: -20px;">Logical Or</h3></center></header><ul id="ulor" class="StackedList StackedList--hasScroll" style="margin-bottom: 0px; height: 195px; width: 350px;" tabindex="0"></ul></article><center><div style="background: #000000; width: 350px; cursor: pointer;"><a style="color: lightblue" onclick="do_or_rule()">Click to build rule</a></div></center></div><div style="height: 147px; margin-top: 10px;"><article id="ContainerNot" class="StackedListWrapper StackedListWrapper--sizeMedium StackedListWrapper--hasScrollIndicator Container" style="width: 350px; height: 142px;"><header class="StackedListHeader" style="height: 40px;"><center><h3 class="Heading Heading--size5 Heading--colorWhite" style="height: 40px; margin-top: -20px;">Logical Not</h3></center></header><ul id="ulnot" class="StackedList StackedList--hasScroll" style="margin-bottom: 0px; height: 100px; width: 350px;" tabindex="0"></ul></article><center><div style="background: #000000; width: 350px; cursor: pointer;"><a style="color: lightblue" onclick="do_not_rule()">Click to build rule</a></div></center></div></center><article id="ContainerTwo2" class="StackedListWrapper StackedListWrapper--sizeMedium StackedListWrapper--hasScrollIndicator Container" style="width: 225px; float: right; height: 666px; margin-top: -697px;"><header class="StackedListHeader" style="width: 225px;"><center><h4 class="Heading Heading--size4 Heading--colorWhite">Active Rules</h4></center></header><ul id="ulactive" class="StackedList StackedList--hasScroll" style="margin-bottom: 0px; width: 225px; height: 570px;" tabindex="0"></ul></article></div></section></div></div><div class="GridOverlay GridOverlay--isHidden"></div><div id="draggable-live-region" aria-relevant="additions" aria-atomic="true" aria-live="assertive" role="log" style="position: fixed; width: 1px; height: 1px; top: -1px; overflow: hidden;"></div></body></html>

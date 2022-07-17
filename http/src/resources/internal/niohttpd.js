@@ -6,6 +6,11 @@ const WS_ADMIN_GET_MOST_RECENT_REQUESTS          = 3;
 const WS_ADMIN_GET_MOST_RECENT_RESPONSE          = 3;
 const WS_ADMIN_REQUEST_CHART_REQUEST             = 4;
 const WS_ADMIN_REQUEST_CHART_RESPONSE            = 4;
+const WS_ADMIN_CREATE_RULE                       = 9;
+const WS_ADMIN_CREATE_RULE_RESPONSE              = 9;
+const WS_ADMIN_GET_RULES                         = 10;
+const WS_ADMIN_GET_RULES_RESPONSE                = 10;
+const WS_ADMIN_SET_ACTIVE_RULES                  = 12;
 
 const METHOD_GET     = 0;
 const METHOD_POST    = 1;
@@ -933,7 +938,7 @@ function init_listener() {
 }
 
 function load_requests() {
-	let sock = init_listener();
+	var sock = init_listener();
 	load_recent_update(sock);
 
 	sock.addEventListener('open', function (event) {
@@ -949,7 +954,7 @@ function load_requests() {
 }
 
 function load_stats() {
-	let sock = init_listener();
+	var sock = init_listener();
 	ping(sock);
 
 	sock.addEventListener('open', function (event) {
@@ -985,7 +990,7 @@ function load_stats() {
 }
 
 function load_charts_niohttpd() {
-        let sock = init_listener();
+        var sock = init_listener();
 
 	sock.addEventListener('open', function (event) {
 		console.log('connected');
@@ -995,4 +1000,192 @@ function load_charts_niohttpd() {
 		sock.send(buffer);
 	});
 
+}
+
+function set_active_id(ids) {
+	var id_spl = ids.split(" ");
+
+	var loc = window.location, new_uri;
+		if (loc.protocol === "https:") {
+			new_uri = "wss:";
+		} else {
+			new_uri = "ws:";
+	}
+
+        new_uri += "//" + loc.host;
+        new_uri += loc.pathname + "?ws";
+        sock = new WebSocket(new_uri);
+        sock.binaryType = "arraybuffer";
+
+        sock.onmessage = function (ev) {
+                sock_connected = true; 
+                console.log(ev); 
+                var buffer = new Uint8Array(ev.data);
+                if(buffer[0] == WS_ADMIN_CREATE_RULE_RESPONSE) {
+                        var id = to_u64(buffer, 1);
+			console.log("rule created. Id = " + id);
+			sock.close();
+		} else {
+			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
+		}
+	}
+
+        sock.addEventListener('open', function(event) {
+		var count = id_spl.length;
+                const buffer = new ArrayBuffer((8*count) + 9);
+                const view = new Uint8Array(buffer);
+                view[0] = WS_ADMIN_SET_ACTIVE_RULES;
+                view[1] = 0;
+                view[2] = 0;
+		view[3] = 0;
+		view[4] = 0;
+		view[5] = 0;
+		view[6] = 0;
+		view[7] = 0;
+		view[8] = count;
+
+		for(var i=0; i<count; i++) {
+			u64_tobin(new BigInteger(String(id_spl[i]), 10), view, 9 + (i*8));
+		}
+
+                sock.send(buffer);
+        });
+
+	sock.addEventListener('close', function (event) {
+		console.log('disconnected');
+		sock_connected = false;
+	});
+}
+
+function get_all_rules() {
+	var loc = window.location, new_uri;
+	if (loc.protocol === "https:") {
+		new_uri = "wss:";
+	} else {
+		new_uri = "ws:";
+	}
+	new_uri += "//" + loc.host;
+	new_uri += loc.pathname + "?ws";
+	sock = new WebSocket(new_uri);
+	sock.binaryType = "arraybuffer";
+
+        sock.onmessage = function (ev) {
+		console.log(ev);
+		var buffer = new Uint8Array(ev.data);
+		if(buffer[0] == WS_ADMIN_GET_RULES_RESPONSE) {
+			console.log("get rules response");
+			var count = to_u64(buffer, 9);
+			console.log("got " + count + " rules.");
+			var offset = 17;
+			var show_rules = document.getElementById('show_rules');
+			show_rules.innerHTML = '';
+			for(var i=0; i<count; i++) {
+				// this is a functional rule with an 8 byte id in front
+				var functional_id = to_u64(buffer, offset);
+				offset += 8;
+				var rule = new Rule();
+				console.log("offset="+offset);
+				offset = rule.deserialize(buffer, offset);
+				var is_active;
+				if(buffer[offset] == 0) {
+					is_active = false;
+				} else {
+					is_active = true;
+				}
+				offset += 1; // functional rule is_active flag
+				// label
+				var label_len = to_u64(buffer, offset);
+				offset += 8;
+				var label = new ArrayBuffer(label_len);
+				var label = new Uint8Array(label);
+				for(var j=0; j<label_len; j++) {
+					label[j] = buffer[offset];
+					offset += 1;
+				}
+				var label = new TextDecoder().decode(label);
+				console.log("rule["+i+"] label=" + label + ",id=" + functional_id + ",rule="+rule + ",is_active="+is_active);
+				var text = document.createTextNode(
+					"rule["+i+"] label=" + label + ",id=" + functional_id +
+					",rule="+ rule +
+					",is_active=" + is_active);
+				show_rules.appendChild(text);
+				show_rules.appendChild(document.createElement('br'));
+			}
+			sock.close();
+		} else {
+			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
+		}
+	}
+
+	sock.addEventListener('open', function(event) {
+		const buffer = new ArrayBuffer(1);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_GET_RULES;
+		sock.send(buffer);
+	});
+
+	sock.addEventListener('close', function (event) {
+		console.log('disconnected');
+	});
+}
+
+function create_rule(user_input, label_input) {
+	var id = Math.round(Math.random() * 18446744073709551615); // u64 max
+	console.log("id="+id);
+        var loc = window.location, new_uri;
+	if (loc.protocol === "https:") {
+		new_uri = "wss:";
+	} else {
+		new_uri = "ws:";
+	}
+        new_uri += "//" + loc.host;
+        new_uri += loc.pathname + "?ws";
+        sock = new WebSocket(new_uri);
+        sock.binaryType = "arraybuffer";
+
+        sock.onmessage = function (ev) {
+                console.log(ev);
+                var buffer = new Uint8Array(ev.data);
+		if(buffer[0] == WS_ADMIN_CREATE_RULE_RESPONSE) {
+			var id = to_u64(buffer, 1);
+			console.log("rule created. Id = " + id);
+			sock.close();
+		} else {
+			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
+		}
+	}
+
+	sock.addEventListener('open', function(event) {
+		var enc = new TextEncoder();
+		var label = enc.encode(label_input);
+		var regex = enc.encode(user_input);
+		const buffer = new ArrayBuffer(27 + regex.length + label.length);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_CREATE_RULE;
+		view[1] = 4;
+		u64_tobin(new BigInteger(String(regex.length), 10), view, 2);
+		var offset = 10;
+		console.log("regex.length="+regex.length);
+		console.log("regex="+regex);
+		for(var i=0; i<regex.length; i++) {
+			view[offset] = regex[i];
+			offset += 1;
+		}
+		u64_tobin(new BigInteger(String(id), 10), view, offset);
+		offset += 8;
+		view[offset] = 0; // multi_line = false
+		offset += 1;
+		u64_tobin(new BigInteger(String(label.length), 10), view, offset);
+		offset += 8;
+                for(var i=0; i<label.length; i++) {
+                        view[offset] = label[i];  
+                        offset += 1;
+                }
+
+		sock.send(buffer);
+	});
+
+	sock.addEventListener('close', function (event) {
+		console.log('disconnected');
+	});
 }

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::ser::{Reader, Serializable, Writer};
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
+use std::convert::TryInto;
 
 info!();
 
@@ -34,10 +36,46 @@ impl Default for Match {
 	}
 }
 
+#[derive(Clone, Debug, Ord, Eq, PartialEq, PartialOrd)]
 pub struct Pattern {
 	pub regex: String,
 	pub id: u64,
 	pub multi_line: bool,
+}
+
+impl Serializable for Pattern {
+	fn read<R: Reader>(reader: &mut R) -> Result<Self, Error> {
+		let len = reader.read_u64()?;
+		let mut regex = vec![];
+		for _ in 0..len {
+			regex.push(reader.read_u8()?);
+		}
+		let regex = std::str::from_utf8(&regex)?.to_string();
+		let id = reader.read_u64()?;
+		let multi_line = match reader.read_u8()? {
+			0 => false,
+			_ => true,
+		};
+		Ok(Self {
+			regex,
+			id,
+			multi_line,
+		})
+	}
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		let len = self.regex.len();
+		writer.write_u64(len.try_into()?)?;
+		let regex = self.regex.as_bytes();
+		for i in 0..len {
+			writer.write_u8(regex[i])?;
+		}
+		writer.write_u64(self.id)?;
+		match self.multi_line {
+			true => writer.write_u8(1)?,
+			false => writer.write_u8(0)?,
+		}
+		Ok(())
+	}
 }
 
 #[derive(Clone, Debug)]

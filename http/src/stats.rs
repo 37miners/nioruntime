@@ -413,7 +413,13 @@ impl HttpStats {
 
 		let lmdb_dir = config.lmdb_dir.replace("~", &home_dir);
 
-		let db = Arc::new(RwLock::new(Store::new(&lmdb_dir, None, None, None, true)?));
+		let db = Arc::new(RwLock::new(Store::new(
+			&lmdb_dir,
+			Some("stats"),
+			Some("stats"),
+			None,
+			true,
+		)?));
 		let mut log = Log::new();
 
 		log.init(request_log_config)?;

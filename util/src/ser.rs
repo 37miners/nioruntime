@@ -24,6 +24,7 @@ use nioruntime_err::{Error, ErrorKind};
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::io::{self, Read, Write};
+use std::sync::Arc;
 
 /// Implementations defined how different numbers and binary structures are
 /// written to an underlying stream or container (depending on implementation).
@@ -364,6 +365,44 @@ impl Serializable for () {
 
 	fn write<W: Writer>(&self, _writer: &mut W) -> Result<(), Error> {
 		Ok(())
+	}
+}
+
+impl<T> Serializable for Arc<T>
+where
+	T: Serializable,
+{
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		let item = Self::as_ptr(self);
+		unsafe {
+			(*item).write(writer)?;
+		}
+		Ok(())
+	}
+
+	fn read<R: Reader>(reader: &mut R) -> Result<Arc<T>, Error> {
+		Ok(Arc::new(T::read(reader)?))
+	}
+}
+
+impl Serializable for String {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), Error> {
+		let len = self.len();
+		writer.write_u64(len as u64)?;
+		let bytes = self.as_bytes();
+		for i in 0..len {
+			writer.write_u8(bytes[i])?;
+		}
+		Ok(())
+	}
+
+	fn read<R: Reader>(reader: &mut R) -> Result<String, Error> {
+		let len = reader.read_u64()?;
+		let mut v = Vec::with_capacity(len.try_into()?);
+		for _ in 0..len {
+			v.push(reader.read_u8()?);
+		}
+		Ok(std::str::from_utf8(&v)?.to_string())
 	}
 }
 

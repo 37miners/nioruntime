@@ -439,6 +439,15 @@ fn real_main() -> Result<(), Error> {
 		},
 	};
 
+	let lmdb_dir = match args.is_present("lmdb_dir") {
+		true => args.value_of("lmdb_dir").unwrap(),
+		false => match file_args.is_present("lmdb_dir") {
+			true => file_args.value_of("lmdb_dir").unwrap(),
+			false => "~/.niohttpd/lmdb",
+		},
+	}
+	.to_string();
+
 	let requestlog = match args.is_present("requestlog") {
 		true => args.value_of("requestlog").unwrap(),
 		false => match file_args.is_present("requestlog") {
@@ -877,6 +886,7 @@ fn real_main() -> Result<(), Error> {
 		max_async_connections,
 		virtual_ips,
 		virtual_hosts,
+		lmdb_dir,
 		webroot: webroot.as_bytes().to_vec(),
 		stats_frequency,
 		main_log_queue_size,
