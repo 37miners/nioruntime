@@ -2437,6 +2437,12 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				internal.get("bootstrap.min.js").unwrap().to_vec()
 			} else if bytes_eq(query, b"jquery.min.js") {
 				internal.get("jquery.min.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"examples-app.js") {
+				internal.get("examples-app.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"examples-runtime.js") {
+				internal.get("examples-runtime.js").unwrap().to_vec()
+			} else if bytes_eq(query, b"examples-app.css") {
+				internal.get("examples-app.css").unwrap().to_vec()
 			} else if bytes_eq(query, b"ws") {
 				let (_ws, len) = Self::check_websocket(
 					conn_data,
