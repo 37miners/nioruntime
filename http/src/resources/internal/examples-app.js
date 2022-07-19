@@ -2265,6 +2265,7 @@ function MultipleContainers() {
   var currentNotChildren;
   var capacityReached;
   var lastOverContainer;
+  var isFirstSort = true;
   var lastActiveCount = 0; // --- Draggable events --- //
 
   sortable.on('drag:start', function (evt) {
@@ -2285,6 +2286,7 @@ function MultipleContainers() {
     notContainerParent.classList.toggle(Classes.capacity, capacityReached);
   });
   sortable.on('sortable:sort', function (evt) {
+	  console.log("sortable:sort");
     if (!capacityReached) {
       return;
     }
@@ -2299,8 +2301,12 @@ function MultipleContainers() {
     var active = sortable.getDraggableElementsForContainer(sortable.containers[4]);
     var currentActiveCount = active.length;
 
-    if (currentActiveCount != lastActiveCount) {
+    console.log("sortable:sorted: currentActiveCount="+currentActiveCount+",lastActiveCount="+lastActiveCount);
+
+    if (currentActiveCount != lastActiveCount || isFirstSort) {
+      isFirstSort = false;
       console.log("set active rules. last=" + lastActiveCount + ",cur=" + currentActiveCount);
+	set_active(active);
 
       for (var i = 0; i < currentActiveCount; i++) {
         var label = active[i].childNodes[0].childNodes[0].innerHTML;

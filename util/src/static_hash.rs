@@ -128,14 +128,14 @@ impl StaticHashStats {
 pub struct StaticHashConfig {
 	/// The maximum number of entries that may be inserted into this [`StaticHash`].
 	pub max_entries: usize,
-	/// The maximum length of a key in this [`StaticHash`]. The total memory used
+	/// The maximum length of a key in bytes in this [`StaticHash`]. The total memory used
 	/// is equal to (1 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
 	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to false.
 	/// and (17 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
 	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to true.
 	/// Any inserts with greater than this length will result in an error.
 	pub key_len: usize,
-	/// The maximum length of a value in this [`StaticHash`]. The total memory used
+	/// The maximum length of a value in bytes in this [`StaticHash`]. The total memory used
 	/// is equal to (1 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *
 	/// [`StaticHashConfig::max_entries`] with [`StaticHashConfig::iterator`] set to false.
 	/// and (17 + [`StaticHashConfig::key_len`] + [`StaticHashConfig::entry_len`]) *

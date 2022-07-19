@@ -20,7 +20,7 @@ use crate::proxy::{
 	process_proxy_outbound, socket_connect,
 };
 use crate::send_websocket_message;
-use crate::stats::MAX_LOG_STR_LEN;
+use crate::stats::{MAX_LOG_STR_LEN, MAX_USER_MATCHES};
 use crate::types::*;
 use crate::websocket::{process_websocket_data, WebSocketMessage};
 use crate::LogItem;
@@ -1016,6 +1016,9 @@ where
 		admin: &HttpAdmin,
 		rules: &Vec<FunctionalRule>,
 		rule_update: &Arc<RwLock<RuleUpdate>>,
+		id_match_count: &mut usize,
+		match_ids: &mut Vec<u64>,
+		user_defined_matches: &mut StaticHash<(), ()>,
 	) -> Result<
 		(
 			bool,
@@ -1099,6 +1102,9 @@ where
 				admin,
 				rules,
 				rule_update,
+				id_match_count,
+				match_ids,
+				user_defined_matches,
 			)?;
 		}
 
@@ -1205,6 +1211,9 @@ where
 			admin,
 			&mut thread_context.rules,
 			&thread_context.rule_update,
+			&mut thread_context.id_match_count,
+			&mut thread_context.match_ids,
+			&mut thread_context.user_defined_matches,
 		)?;
 
 		if was_post_await {
@@ -1278,6 +1287,9 @@ where
 					admin,
 					&mut thread_context.rules,
 					&thread_context.rule_update,
+					&mut thread_context.id_match_count,
+					&mut thread_context.match_ids,
+					&mut thread_context.user_defined_matches,
 				)?;
 
 				match nconn {
@@ -1341,6 +1353,9 @@ where
 				admin,
 				&mut thread_context.rules,
 				&mut thread_context.rule_update,
+				&mut thread_context.id_match_count,
+				&mut thread_context.match_ids,
+				&mut thread_context.user_defined_matches,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1383,6 +1398,9 @@ where
 		admin: &HttpAdmin,
 		rules: &Vec<FunctionalRule>,
 		rule_update: &Arc<RwLock<RuleUpdate>>,
+		id_match_count: &mut usize,
+		match_ids: &mut Vec<u64>,
+		user_defined_matches: &mut StaticHash<(), ()>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1427,6 +1445,9 @@ where
 				admin,
 				rules,
 				rule_update,
+				id_match_count,
+				match_ids,
+				user_defined_matches,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1549,7 +1570,7 @@ where
 						}
 					}
 					Err(e) => {
-						warn!("Error while communicating with proxy: {}", e.kind(),)?;
+						warn!("Error while communicating with proxy: {}", e,)?;
 
 						match Self::send_file(
 							HTTP_CODE_502,
@@ -1581,6 +1602,8 @@ where
 							dropped_log_items,
 							dropped_lat_sum,
 							thread_pool,
+							headers.get_id_match_count().try_into()?,
+							headers.get_match_ids(),
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1718,6 +1741,9 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		admin: &HttpAdmin,
 		rules: &Vec<FunctionalRule>,
 		rule_update: &Arc<RwLock<RuleUpdate>>,
+		id_match_count: &mut usize,
+		match_ids: &mut Vec<u64>,
+		user_defined_matches: &mut StaticHash<(), ()>,
 	) -> Result<
 		(
 			usize,
@@ -1744,7 +1770,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							let mut rule_update = lockw!(rule_update)?;
 							(*rule_update).version += 1;
 							(*rule_update).rules = Some(active_rules);
-							warn!("rules updated. Version = {}", (*rule_update).version);
+							info!("Match rules updated. Version = {}", (*rule_update).version)?;
 						}
 						None => {}
 					}
@@ -1776,7 +1802,15 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			}
 		}
 
-		let headers = match HttpHeaders::new(buffer, config, matcher, rules) {
+		let headers = match HttpHeaders::new(
+			buffer,
+			config,
+			matcher,
+			rules,
+			id_match_count,
+			match_ids,
+			user_defined_matches,
+		) {
 			Ok(headers) => headers,
 			Err(e) => {
 				match e.kind() {
@@ -1811,6 +1845,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							dropped_log_items,
 							dropped_lat_sum,
 							thread_pool,
+							0,
+							&[0u64; MAX_USER_MATCHES],
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1850,6 +1886,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							dropped_log_items,
 							dropped_lat_sum,
 							thread_pool,
+							0,
+							&[0u64; MAX_USER_MATCHES],
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1889,6 +1927,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							dropped_log_items,
 							dropped_lat_sum,
 							thread_pool,
+							0,
+							&[0u64; MAX_USER_MATCHES],
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1929,6 +1969,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							dropped_log_items,
 							dropped_lat_sum,
 							thread_pool,
+							0,
+							&[0u64; MAX_USER_MATCHES],
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -2002,6 +2044,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						dropped_log_items,
 						dropped_lat_sum,
 						thread_pool,
+						headers.get_id_match_count().try_into()?,
+						headers.get_match_ids(),
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -2185,6 +2229,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						dropped_log_items,
 						dropped_lat_sum,
 						thread_pool,
+						headers.get_id_match_count().try_into()?,
+						headers.get_match_ids(),
 					) {
 						Ok(k) => {
 							key = k;
@@ -2222,6 +2268,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										dropped_log_items,
 										dropped_lat_sum,
 										thread_pool,
+										headers.get_id_match_count().try_into()?,
+										headers.get_match_ids(),
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2261,6 +2309,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										dropped_log_items,
 										dropped_lat_sum,
 										thread_pool,
+										headers.get_id_match_count().try_into()?,
+										headers.get_match_ids(),
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2300,6 +2350,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										dropped_log_items,
 										dropped_lat_sum,
 										thread_pool,
+										headers.get_id_match_count().try_into()?,
+										headers.get_match_ids(),
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2340,6 +2392,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										dropped_log_items,
 										dropped_lat_sum,
 										thread_pool,
+										headers.get_id_match_count().try_into()?,
+										headers.get_match_ids(),
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2544,6 +2598,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						end_micros: 0,
 						uri_requested: uri,
 						response_code: 200,
+						match_count: headers.get_id_match_count(),
+						matches: headers.get_match_ids()[0..MAX_USER_MATCHES].try_into()?,
 					};
 
 					let mut ctx = ApiContext::new(
@@ -2667,6 +2723,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		match_count: u64,
+		matches: &[u64],
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -2741,6 +2799,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			log_queue,
 			dropped_log_items,
 			dropped_lat_sum,
+			match_count.try_into()?,
+			matches,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -2780,6 +2840,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				log_queue,
 				dropped_log_items,
 				dropped_lat_sum,
+				match_count.try_into()?,
+				matches,
 			)?;
 
 			if found && !need_update {
@@ -2847,6 +2909,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			gzip,
 			stat_handler,
 			thread_pool,
+			match_count.try_into()?,
+			matches,
 		)?;
 
 		Ok(None)
@@ -2912,6 +2976,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		log_queue: &mut StaticQueue<LogItem>,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
+		match_count: usize,
+		matches: &[u64],
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -2986,6 +3052,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								None,
 								dropped_log_items,
 								dropped_lat_sum,
+								match_count,
+								matches,
 							)?;
 						} else {
 							Self::send_headers(
@@ -3018,6 +3086,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								None,
 								dropped_log_items,
 								dropped_lat_sum,
+								match_count,
+								matches,
 							)?;
 						}
 						headers_sent = true;
@@ -3080,6 +3150,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		gzip: bool,
 		stat_handler: &StatHandler,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		match_count: usize,
+		matches: &[u64],
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -3132,6 +3204,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			end_micros: 0,
 			uri_requested,
 			response_code,
+			match_count,
+			matches: (&matches[0..MAX_USER_MATCHES]).clone().try_into()?,
 		};
 
 		let mut ctx = ApiContext::new(
@@ -3151,6 +3225,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let if_modified_since = if_modified_since.clone();
 		let if_none_match = if_none_match.clone();
 		let stat_handler = stat_handler.clone();
+		let matches = matches.to_vec();
 
 		let thread_pool = lockw!(thread_pool)?;
 
@@ -3200,6 +3275,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					Some(stat_handler),
 					&mut 0,
 					&mut 0,
+					match_count,
+					&matches,
 				)?;
 			} else {
 				ctx.set_response_code_logging(response_code)?;
@@ -3229,6 +3306,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					Some(stat_handler),
 					&mut 0,
 					&mut 0,
+					match_count,
+					&matches,
 				)?;
 			}
 
@@ -3611,6 +3690,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		stat_handler: Option<StatHandler>,
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
+		match_count: usize,
+		matches: &[u64],
 	) -> Result<(), Error> {
 		let mut response = vec![];
 		match http_version {
@@ -3767,6 +3848,14 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		}
 		uri_requested[0..max].clone_from_slice(&uri_requested_headers[0..max]);
 
+		let mut matches_mod = [0u64; MAX_USER_MATCHES];
+		for i in 0..matches.len() {
+			if i >= matches_mod.len() {
+				break;
+			}
+			matches_mod[i] = matches[i];
+		}
+
 		let mut log_item = LogItem {
 			http_method: http_method.clone(),
 			http_version: http_version.clone(),
@@ -3779,6 +3868,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			end_micros: 0,
 			uri_requested,
 			response_code,
+			match_count,
+			matches: matches_mod,
 		};
 
 		Self::process_stats(
@@ -4193,7 +4284,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let r = socket(AddressFamily::Inet, Stream, SockFlag::empty(), None)?;
 		let o: libc::c_int = 1;
 		let s = mem::size_of_val(&o);
-
 		unsafe {
 			setsockopt(
 				r,
@@ -4203,7 +4293,6 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				s as socklen_t,
 			)
 		};
-
 		unsafe {
 			setsockopt(
 				r,

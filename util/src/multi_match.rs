@@ -276,6 +276,8 @@ impl MultiMatch {
 				has_newline = false;
 				itt = start;
 			}
+
+			let mut last_multi: Option<&Node> = None;
 			loop {
 				if itt >= len {
 					break;
@@ -302,6 +304,7 @@ impl MultiMatch {
 				match cur_node.next[byte as usize] {
 					u32::MAX => {
 						if cur_node.is_multi {
+							last_multi = Some(cur_node);
 							multi_counter += 1;
 							if multi_counter >= self.dictionary.max_wildcard_len {
 								// wild card max length. break as no
@@ -313,7 +316,13 @@ impl MultiMatch {
 						}
 						// check wildcard
 						match cur_node.next[256] {
-							u32::MAX => break,
+							u32::MAX => {
+								if last_multi.is_some() {
+									cur_node = last_multi.unwrap();
+									continue;
+								}
+								break;
+							}
 							_ => cur_node = &self.dictionary.nodes[cur_node.next[256] as usize],
 						}
 					}
@@ -346,6 +355,7 @@ impl MultiMatch {
 								self.matches[self.match_count].id = cur_node.pattern_id;
 								self.matches[self.match_count].end = itt + 1;
 								self.matches[self.match_count].start = start;
+								last_multi = None;
 								self.match_count += 1;
 								if cur_node.is_term {
 									return Ok(());
@@ -1203,6 +1213,31 @@ Random-Header: abc123\r\n\r\n
 		mm.runmatch(bytes)?;
 		assert_eq!(mm.match_count(), 0);
 
+		Ok(())
+	}
+
+	#[test]
+	fn test_multi_match14_header() -> Result<(), Error> {
+		//		let header = b"\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36";
+		let header = b"abc: nnnxnnnxyznnn";
+		let mut dictionary = Dictionary::new(10_000, false, 512);
+		dictionary.add(
+			Pattern {
+				multi_line: true,
+				regex: "abc: .*xyz".to_string(),
+				id: 1,
+			},
+			true,
+		)?;
+
+		let mut mm = MultiMatch::new(300, dictionary.clone(), None);
+		mm.runmatch(header)?;
+		info!("mc={}", mm.match_count())?;
+		for i in 0..mm.match_count() {
+			info!("m[{}]={:?}", i, mm.matches()[i])?;
+		}
+
+		assert_eq!(mm.match_count(), 1);
 		Ok(())
 	}
 }

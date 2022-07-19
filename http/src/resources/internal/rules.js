@@ -61,6 +61,7 @@ class Rule {
 		this.rule_type = rule_type;
 		 if (rule_type == RULE_TYPE_PATTERN) {
 			this.pattern = new Pattern(b, c);
+
 		 } else {
 			this.rules = b;
 		 }
@@ -89,22 +90,25 @@ class Rule {
 			} else {
 				var len = 0;
 				var ser_rules = [];
-				for(var rule in this.rules) {
+				var rules = this.rules;
+				for(var i=0; i<rules.length; i++) {
+					var rule = rules[i];
 					var rule_ser = rule.serialize();
 					len += rule_ser.length;
 					ser_rules.push(rule_ser);
 				}
-				var ret = new ArrayBuffer(len + 1);
+				var ret = new ArrayBuffer(len + 9);
 				var ret = new Uint8Array(ret);
 				ret[0] = this.rule_type;
 				u64_tobin(this.rules.length, ret, 1);
 				var offset = 9;
 
-				for(var rule in ser_rules) {
-					for(var i=0; i<rule.length; i++) {
-						ret[offset] = rule[i];
-						offset += 1;
+				for(var i=0; i<ser_rules.length; i++) {
+					var rule = ser_rules[i];
+					for(var j=0; j<rule.length; j++) {
+						ret[offset+j] = rule[j];
 					}
+					offset += rule.length;
 				}
 				return ret;
 			}
@@ -112,7 +116,6 @@ class Rule {
 	}
 
 	deserialize(buffer, offset) {
-		console.log("deser rule at offset = " + offset + ",type=" + buffer[offset]);
 		this.rule_type = buffer[offset];
 		if(buffer[offset] == RULE_TYPE_PATTERN) {
 			this.pattern = new Pattern();

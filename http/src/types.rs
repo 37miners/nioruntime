@@ -14,7 +14,6 @@
 
 use crate::admin::FunctionalRule;
 use crate::admin::HttpAdmin;
-use crate::admin::Rule;
 use crate::stats::{HttpStats, HttpStatsConfig, LOG_ITEM_SIZE};
 use crate::LogItem;
 use nioruntime_deps::base58;
@@ -504,6 +503,9 @@ pub struct ThreadContext {
 	pub rules: Vec<FunctionalRule>,
 	pub rule_update: Arc<RwLock<RuleUpdate>>,
 	pub rule_version: u64,
+	pub match_ids: Vec<u64>,
+	pub id_match_count: usize,
+	pub user_defined_matches: StaticHash<(), ()>,
 }
 
 impl ThreadContext {
@@ -513,6 +515,19 @@ impl ThreadContext {
 		admin: &HttpAdmin,
 		rule_update: &Arc<RwLock<RuleUpdate>>,
 	) -> Result<Self, Error> {
+		let user_defined_matches: StaticHash<(), ()>;
+		user_defined_matches = StaticHash::new(StaticHashConfig {
+			max_entries: config.max_matches * 2,
+			key_len: 8,
+			entry_len: 0,
+			max_load_factor: 0.95,
+			..Default::default()
+		})?;
+
+		let id_match_count = 0;
+		let mut match_ids = vec![];
+		match_ids.resize(config.max_matches, 0);
+
 		let cache_hits_conf = StaticHashConfig {
 			key_len: 32,
 			entry_len: 16,
@@ -576,7 +591,7 @@ impl ThreadContext {
 		let log_queue = StaticQueue::new(config.thread_log_queue_size);
 		let thread_pool_context = Arc::new(RwLock::new(ThreadPoolContext::new()));
 
-		let mut rules = admin.get_active_rules()?;
+		let rules = admin.get_active_rules()?;
 
 		let matcher = Self::build_matcher(
 			config.max_matches,
@@ -615,6 +630,9 @@ impl ThreadContext {
 			rules,
 			rule_update,
 			rule_version: 0,
+			user_defined_matches,
+			id_match_count,
+			match_ids,
 		})
 	}
 
@@ -920,7 +938,8 @@ pub struct HttpHeaders<'a> {
 	accept_gzip_encoding: bool,
 	matcher: &'a MultiMatch,
 	buffer: &'a [u8],
-	match_ids: Vec<u64>,
+	match_ids: &'a [u64],
+	id_match_count: usize,
 }
 
 impl<'a> Display for HttpHeaders<'a> {
@@ -959,7 +978,10 @@ impl<'a> Display for HttpHeaders<'a> {
 			}
 		}
 		write!(f, "\n\nPattern Matches:")?;
-		for id in header_clone.get_match_ids() {
+		let id_match_count = header_clone.get_id_match_count();
+		let id_matches = header_clone.get_match_ids();
+		for i in 0..id_match_count {
+			let id = id_matches[i];
 			write!(f, "\n{}", id)?;
 		}
 		Ok(())
@@ -972,7 +994,12 @@ impl<'a> HttpHeaders<'a> {
 		config: &HttpConfig,
 		matcher: &'a mut MultiMatch,
 		rules: &Vec<FunctionalRule>,
+		id_match_count: &mut usize,
+		match_ids: &'a mut Vec<u64>,
+		user_defined_matches: &mut StaticHash<(), ()>,
 	) -> Result<Option<Self>, Error> {
+		user_defined_matches.clear()?;
+
 		matcher.runmatch(buffer)?;
 
 		let match_count = matcher.match_count();
@@ -1010,8 +1037,6 @@ impl<'a> HttpHeaders<'a> {
 		let mut accept_gzip_encoding = false;
 		let mut referer = EMPTY;
 		let mut user_agent = EMPTY;
-
-		let mut user_defined_matches = HashSet::new();
 
 		for i in 0..match_count {
 			match matches[i].id {
@@ -1124,15 +1149,16 @@ impl<'a> HttpHeaders<'a> {
 				}
 				_ => {
 					// these must be user defined patterns
-					user_defined_matches.insert(matches[i].id);
+					user_defined_matches.insert_raw(&matches[i].id.to_be_bytes(), &[])?;
 				}
 			}
 		}
 
-		let mut match_ids = vec![];
+		*id_match_count = 0;
 		for rule in rules {
 			if rule.evaluate(&user_defined_matches)? == true {
-				match_ids.push(rule.id());
+				match_ids[*id_match_count] = rule.id();
+				*id_match_count += 1;
 			}
 		}
 
@@ -1166,11 +1192,16 @@ impl<'a> HttpHeaders<'a> {
 			matcher,
 			buffer,
 			match_ids,
+			id_match_count: *id_match_count,
 		}))
 	}
 
-	pub fn get_match_ids(&self) -> &Vec<u64> {
+	pub fn get_match_ids(&self) -> &'a [u64] {
 		&self.match_ids
+	}
+
+	pub fn get_id_match_count(&self) -> usize {
+		self.id_match_count
 	}
 
 	pub fn get_cookies(&self) -> &Vec<&[u8]> {
@@ -1595,7 +1626,7 @@ impl Default for HttpConfig {
 			max_header_name_len: 128,
 			max_header_value_len: 1024,
 			max_header_entries: 1_000,
-			max_matches: 500,
+			max_matches: 200,
 			dictionary_capacity: 500,
 			webroot: "~/.niohttpd/www".to_string().as_bytes().to_vec(),
 			mainlog: "~/.niohttpd/logs/mainlog.log".to_string(),
@@ -2368,7 +2399,24 @@ Y012345678: 01234567890123456789\r\n\r\n";
 		config.max_header_size = 200;
 		config.max_header_name_len = 10;
 		config.max_header_value_len = 20;
-		let mut headers = HttpHeaders::new(buffer, &config, &mut matcher, &vec![])?.unwrap();
+		let v1 = &mut vec![];
+		let v2 = &mut vec![];
+		let mut headers = HttpHeaders::new(
+			buffer,
+			&config,
+			&mut matcher,
+			v1,
+			&mut 0,
+			v2,
+			&mut StaticHash::new(StaticHashConfig {
+				max_entries: 100,
+				key_len: 8,
+				entry_len: 0,
+				max_load_factor: 0.95,
+				..Default::default()
+			})?,
+		)?
+		.unwrap();
 
 		assert_eq!(headers.get_uri(), b"/");
 		assert_eq!(headers.get_query(), b"");
@@ -2383,7 +2431,16 @@ Y012345678: 01234567890123456789\r\n\r\n";
 			b"GET / HTTP/1.1\r\nHost: localhost\r\nX01234567: 1\r\nY: 2\r\n\r",
 			&config,
 			&mut matcher,
-			&vec![]
+			&vec![],
+			&mut 0,
+			&mut vec![],
+			&mut StaticHash::new(StaticHashConfig {
+				max_entries: 100,
+				key_len: 8,
+				entry_len: 0,
+				max_load_factor: 0.95,
+				..Default::default()
+			})?,
 		)?
 		.is_none());
 
@@ -2393,7 +2450,16 @@ Y012345678: 01234567890123456789\r\n\r\n";
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\nA0123456789: 0\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
@@ -2405,21 +2471,40 @@ Y012345678: 01234567890123456789\r\n\r\n";
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\nA: 012345678901234567890\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
 			ErrorKind::HttpError431("Request Header Field Value Too Large".into())
 		);
 
-		assert_eq!(HttpHeaders::new(b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
-A: \
-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\
-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\r\n\r\n",
-		        &config,
-		        &mut matcher
-                        , &vec![]
-		).unwrap_err().kind(), ErrorKind::HttpError431("Request Header Fields Too Large".into()));
+		assert_eq!(
+							HttpHeaders::new(b"GET / HTTP/1.1\r\nHost: localhost\r\nX: 1\r\n\
+		A: \
+		0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\
+		0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\r\n\r\n",
+								&config,
+								&mut matcher,
+								&vec![],
+								&mut 0,
+								&mut vec![],
+								&mut StaticHash::new(StaticHashConfig {
+                                                                                                  max_entries: 100,
+                                                                                                                                          key_len: 8,
+                                                                                                                                                                                  entry_len: 0,
+                                                                                                                                                                                                                          max_load_factor: 0.95,
+									..Default::default()
+								})?,
+							).unwrap_err().kind(), ErrorKind::HttpError431("Request Header Fields Too Large".into()));
 
 		assert_eq!(
 			HttpHeaders::new(
@@ -2427,7 +2512,16 @@ A: \
                         A: ok\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
@@ -2440,7 +2534,16 @@ A: \
 A: ok\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
@@ -2453,7 +2556,16 @@ A: ok\r\n\r\n",
                                                                                 A: ok\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
@@ -2465,7 +2577,16 @@ A: ok\r\n\r\n",
 				b"PUT / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2478,7 +2599,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2491,7 +2621,16 @@ A: ok\r\n\r\n",
 				b"HEAD / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2504,7 +2643,16 @@ A: ok\r\n\r\n",
 				b"TRACE / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2517,7 +2665,16 @@ A: ok\r\n\r\n",
 				b"OPTIONS / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2530,7 +2687,16 @@ A: ok\r\n\r\n",
 				b"PATCH / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2543,7 +2709,16 @@ A: ok\r\n\r\n",
 				b"CONNECT / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2556,7 +2731,16 @@ A: ok\r\n\r\n",
 				b"POST / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2569,7 +2753,16 @@ A: ok\r\n\r\n",
 				b"DELETE / HTTP/1.1\r\nRange: bytes=10..20\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2585,7 +2778,16 @@ A: ok\r\n\r\n",
 				b"POST / HTTP/1.1\r\nContent-Length: 24\r\n\r\n01234567890123456789\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2598,8 +2800,17 @@ A: ok\r\n\r\n",
 			HttpHeaders::new(
 				b"POST / HTTP/1.1\r\nContent-Length: 24\r\nHost: example.com\r\n\r\n01234567890123456789\r\n\r\n",
 				&config,
-				&mut matcher
-                                , &vec![]
+				&mut matcher,
+								&vec![],
+								&mut 0,
+								&mut vec![],
+								&mut StaticHash::new(StaticHashConfig {
+                                                                        max_entries: 100,
+                                                                        key_len: 8,
+                                                                        entry_len: 0,
+                                                                        max_load_factor: 0.95,
+									..Default::default()
+								})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2612,7 +2823,16 @@ A: ok\r\n\r\n",
 				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2625,7 +2845,16 @@ A: ok\r\n\r\n",
 				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2638,7 +2867,16 @@ A: ok\r\n\r\n",
 				b"GET /abc.def?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2651,7 +2889,16 @@ A: ok\r\n\r\n",
 				b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2664,7 +2911,16 @@ A: ok\r\n\r\n",
 				b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2678,7 +2934,16 @@ A: ok\r\n\r\n",
 					b"GET /?abc=123 HTTP/1.1\r\nHost: example.com\r\n\r\n",
 					&config,
 					&mut matcher,
-					&vec![]
+					&vec![],
+					&mut 0,
+					&mut vec![],
+					&mut StaticHash::new(StaticHashConfig {
+						max_entries: 100,
+						key_len: 8,
+						entry_len: 0,
+						max_load_factor: 0.95,
+						..Default::default()
+					})?,
 				)
 				.unwrap()
 				.unwrap()
@@ -2692,7 +2957,16 @@ A: ok\r\n\r\n",
 				b"GET /. HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2705,7 +2979,16 @@ A: ok\r\n\r\n",
 				b"GET /. HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2718,7 +3001,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2731,7 +3023,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2744,7 +3045,16 @@ A: ok\r\n\r\n",
 				b"GET /.?  HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap_err()
 			.kind(),
@@ -2756,7 +3066,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/1.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2769,7 +3088,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/1.0\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2782,7 +3110,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/2.0\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2795,7 +3132,16 @@ A: ok\r\n\r\n",
 				b"GET /.? HTTP/2.1\r\nHost: example.com\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2808,7 +3154,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nCookie: abc=123;\r\nCookie: def=123;\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2821,7 +3176,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nCookie: abc=123;\r\nCookie: def=456;\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2834,7 +3198,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2847,7 +3220,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nUpgrade: Websocket\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2860,7 +3242,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nUpgrade2: Websocket\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2873,7 +3264,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nExpect: 100-continue\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2886,7 +3286,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nSec-WebSocket-Key: 1234\r\nExpect: 200-continue\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2899,7 +3308,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nReferer: http://www.example.com/abc\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2912,7 +3330,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nUser-Agent: myagent1.0\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2925,7 +3352,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nAccept-Encoding: deflate, gzip\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2938,7 +3374,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nAccept-Encoding: gzip\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2951,7 +3396,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2966,7 +3420,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2979,7 +3442,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -2992,7 +3464,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3005,7 +3486,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nif-modified-since: 1234\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3018,7 +3508,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nabc: 1234\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3031,7 +3530,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nif-none-match: 5678\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3044,7 +3552,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nHost: localhost\r\nabc: 1234\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3053,10 +3570,24 @@ A: ok\r\n\r\n",
 		);
 
 		assert_eq!(
-			HttpHeaders::new(b"GET / HTTP/1.0\r\n\r\n", &config, &mut matcher, &vec![])
-				.unwrap()
-				.unwrap()
-				.len(),
+			HttpHeaders::new(
+				b"GET / HTTP/1.0\r\n\r\n",
+				&config,
+				&mut matcher,
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
+			)
+			.unwrap()
+			.unwrap()
+			.len(),
 			18,
 		);
 
@@ -3065,7 +3596,16 @@ A: ok\r\n\r\n",
 				b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n012345\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3078,7 +3618,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3092,7 +3641,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()
@@ -3106,6 +3664,15 @@ A: ok\r\n\r\n",
 			&config,
 			&mut matcher,
 			&vec![],
+			&mut 0,
+			&mut vec![],
+			&mut StaticHash::new(StaticHashConfig {
+				max_entries: 100,
+				key_len: 8,
+				entry_len: 0,
+				max_load_factor: 0.95,
+				..Default::default()
+			})?,
 		)
 		.unwrap()
 		.unwrap()
@@ -3123,7 +3690,16 @@ A: ok\r\n\r\n",
 				b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nB: 3\r\nC: 4\r\n\r\n",
 				&config,
 				&mut matcher,
-				&vec![]
+				&vec![],
+				&mut 0,
+				&mut vec![],
+				&mut StaticHash::new(StaticHashConfig {
+					max_entries: 100,
+					key_len: 8,
+					entry_len: 0,
+					max_load_factor: 0.95,
+					..Default::default()
+				})?,
 			)
 			.unwrap()
 			.unwrap()

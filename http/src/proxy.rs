@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::http::insert_step_allocator;
-use crate::stats::MAX_LOG_STR_LEN;
+use crate::stats::{MAX_LOG_STR_LEN, MAX_USER_MATCHES};
 use crate::types::ConnectionInfo;
 use crate::types::*;
 use crate::LogItem;
@@ -357,6 +357,9 @@ pub fn process_proxy_outbound(
 				}
 				referer[0..max].clone_from_slice(&headers_referer[0..max]);
 
+				let mut matches = [0u64; MAX_USER_MATCHES];
+				matches.clone_from_slice(&headers.get_match_ids()[0..MAX_USER_MATCHES]);
+
 				let clen = headers.content_len()?;
 				let log_item = LogItem {
 					http_method: headers.get_method().clone(),
@@ -370,6 +373,8 @@ pub fn process_proxy_outbound(
 					end_micros: 0,
 					uri_requested: uri,
 					response_code: 200,
+					match_count: headers.get_id_match_count(),
+					matches,
 				};
 
 				// we still read the remaining data on this connection
@@ -643,6 +648,10 @@ pub fn process_proxy_outbound(
 		max = MAX_LOG_STR_LEN;
 	}
 	referer[0..max].clone_from_slice(&headers_referer[0..max]);
+
+	let mut matches = [0u64; MAX_USER_MATCHES];
+	matches.clone_from_slice(&headers.get_match_ids()[0..MAX_USER_MATCHES]);
+
 	let log_item = LogItem {
 		http_method: headers.get_method().clone(),
 		http_version: headers.get_version().clone(),
@@ -655,6 +664,8 @@ pub fn process_proxy_outbound(
 		end_micros: 0,
 		uri_requested: uri,
 		response_code: 200,
+		match_count: headers.get_id_match_count(),
+		matches,
 	};
 
 	let mut ctx = ApiContext::new(

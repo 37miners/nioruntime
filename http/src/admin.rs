@@ -25,6 +25,7 @@ use nioruntime_util::multi_match::Dictionary;
 use nioruntime_util::multi_match::Pattern;
 use nioruntime_util::ser::{serialize, BinReader, Serializable};
 use nioruntime_util::ser::{Reader, Writer};
+use nioruntime_util::StaticHash;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::Cursor;
@@ -75,7 +76,7 @@ impl FunctionalRule {
 		self.rule.get_all_patterns()
 	}
 
-	pub fn evaluate(&self, patterns: &HashSet<u64>) -> Result<bool, Error> {
+	pub fn evaluate(&self, patterns: &StaticHash<(), ()>) -> Result<bool, Error> {
 		self.rule.evaluate(patterns)
 	}
 
@@ -206,9 +207,9 @@ impl Rule {
 		})
 	}
 
-	pub fn evaluate(&self, pattern_map: &HashSet<u64>) -> Result<bool, Error> {
+	pub fn evaluate(&self, pattern_map: &StaticHash<(), ()>) -> Result<bool, Error> {
 		Ok(match self {
-			Self::Pattern(pattern) => pattern_map.get(&pattern.id).is_some(),
+			Self::Pattern(pattern) => pattern_map.get_raw(&pattern.id.to_be_bytes()).is_some(),
 			Self::Not(rule) => rule.evaluate(pattern_map)? == false,
 			Self::Or(rules) => {
 				let mut ret = false;
@@ -299,6 +300,17 @@ impl HttpAdmin {
 		Ok(id)
 	}
 
+	fn delete_rule(&self, id: u64) -> Result<(), Error> {
+		let mut rule_key = vec![RULE_PREFIX];
+		rule_key.append(&mut id.to_be_bytes().to_vec());
+
+		let db = lockw!(self.db)?;
+		let batch = db.batch()?;
+		batch.delete(&rule_key)?;
+		batch.commit()?;
+		Ok(())
+	}
+
 	fn reply_error(msg: &str) -> Result<WebSocketMessage, Error> {
 		let mut payload = vec![WS_ADMIN_ERROR_REPLY];
 		payload.append(&mut ((msg.len() as u64).to_be_bytes()).to_vec());
@@ -375,20 +387,16 @@ impl HttpAdmin {
 			if msg.payload.len() == 0 {
 				return Ok((false, None, None));
 			}
-
 			let response = match msg.payload[0] {
 				WS_ADMIN_CREATE_RULE => {
-					warn!("create rule buf = {:?}", &msg.payload[1..]);
 					let mut cursor = Cursor::new(msg.payload[1..].to_vec());
 					cursor.set_position(0);
 					let mut reader = BinReader::new(&mut cursor);
 					let rule = Rule::read(&mut reader)?;
 					let label = String::read(&mut reader)?;
-					warn!("Create rule = {:?}, label = {}", rule, label);
 					match self.create_rule(&rule, label) {
 						Ok(id) => {
 							let mut payload = vec![WS_ADMIN_CREATE_RULE_RESPONSE];
-							warn!("rule created. Id={}", id);
 							payload.append(&mut id.to_be_bytes().to_vec());
 							Some(WebSocketMessage {
 								payload,
@@ -417,7 +425,6 @@ impl HttpAdmin {
 							serialize(&mut v, &rules[i])?;
 							payload.append(&mut v);
 						}
-						warn!("payload={:?}", payload);
 						Some(WebSocketMessage {
 							payload,
 							mtype: WebSocketMessageType::Binary,
@@ -431,9 +438,38 @@ impl HttpAdmin {
 						)?)
 					}
 				},
-				WS_ADMIN_SET_ACTIVE_RULES => {
+				WS_ADMIN_DELETE_RULE => {
 					if msg.payload.len() < 9 {
 						error!(
+							"invalid delete_rule message, msg len = {}",
+							msg.payload.len()
+						)?;
+						return Ok((
+							true,
+							Some(Self::reply_error(
+								&format!("WS_ADMIN_DELETE_RULE: invalid message length")[..],
+							)?),
+							None,
+						));
+					}
+					let id = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+					match self.delete_rule(id) {
+						Ok(_) => Some(WebSocketMessage {
+							payload: vec![WS_ADMIN_DELETE_RULE_RESPONSE],
+							mtype: WebSocketMessageType::Binary,
+							mask: false,
+						}),
+						Err(e) => {
+							warn!("delete rule generated error: {}", e)?;
+							Some(Self::reply_error(
+								&format!("WS_ADMIN_DELETE_RULE: delete rule generated error")[..],
+							)?)
+						}
+					}
+				}
+				WS_ADMIN_SET_ACTIVE_RULES => {
+					if msg.payload.len() < 9 {
+						warn!(
 							"invalid set_active_rules message, msg len = {}",
 							msg.payload.len()
 						)?;
@@ -455,7 +491,7 @@ impl HttpAdmin {
                                                             msg.payload.len(),
                                                             rule_count
                                                         )?;
-							error!("payload={:?}", msg.payload);
+							error!("payload={:?}", msg.payload)?;
 							return Ok((
 								true,
 								Some(Self::reply_error(
@@ -482,7 +518,6 @@ impl HttpAdmin {
 						)?),
 					}
 				}
-				WS_ADMIN_DELETE_RULE => None,
 				WS_ADMIN_GET_DATA => None,
 				WS_ADMIN_GET_STATS_REQUEST => {
 					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
@@ -884,6 +919,24 @@ mod test {
 		}
 		active_cur_rules.sort();
 		assert_eq!(active_cur_rules, active_list_expect);
+
+		let mut payload = vec![WS_ADMIN_DELETE_RULE];
+		payload.append(&mut (id1.to_be_bytes()).to_vec());
+		let wsm = WebSocketMessage {
+			payload,
+			mtype: WebSocketMessageType::Binary,
+			mask: false,
+		};
+		let res = http_admin.process_admin_ws(wsm, &http_stats)?;
+		assert_eq!(res.0, true);
+		assert_eq!(
+			res.1.as_ref().unwrap().payload,
+			vec![WS_ADMIN_DELETE_RULE_RESPONSE]
+		);
+		assert!(res.2.is_none());
+
+		let active_cur = http_admin.get_active_rules()?;
+		assert_eq!(active_cur.len(), 1);
 
 		tear_down_test_dir(root_dir)?;
 

@@ -11,6 +11,9 @@ const WS_ADMIN_CREATE_RULE_RESPONSE              = 9;
 const WS_ADMIN_GET_RULES                         = 10;
 const WS_ADMIN_GET_RULES_RESPONSE                = 10;
 const WS_ADMIN_SET_ACTIVE_RULES                  = 12;
+const WS_ADMIN_SET_ACTIVE_RULES_RESPONSE         = 12;
+const WS_ADMIN_DELETE_RULE                       = 13;
+const WS_ADMIN_DELETE_RULE_RESPONSE              = 13;
 
 const METHOD_GET     = 0;
 const METHOD_POST    = 1;
@@ -29,6 +32,13 @@ const VERSION_UNKNOWN = 0;
 
 const MAX_LOG_STR_LEN = 128;
 
+var rules = [];
+var rule_labels = [];
+var rule_type = 0;
+var lastDragEvent = new Object();
+var viewRule;
+var globalSortable;
+var chart;
 var last_scroll = 0;
 var mr_micros = 0;
 var mr_timestamp = 0;
@@ -37,6 +47,16 @@ var color_alternate = 0;
 var sock_connected = true;
 var sock;
 var pause = false;
+var rule_ids = {};
+var active_by_id = {};
+
+function show_spinner() {
+	$("#spinner_only").modal({backdrop: 'static', keyboard: false});
+}
+
+function hide_spinner () {
+	$('#spinner_only').modal('hide');
+}
 
 function do_pause() {
 	if(pause) {
@@ -1002,8 +1022,11 @@ function load_charts_niohttpd() {
 
 }
 
-function set_active_id(ids) {
-	var id_spl = ids.split(" ");
+function set_active_ids(ids) {
+	active_by_id = {};
+	for (var i=0; i<ids.length; i++) {
+		active_by_id[ids[i]] = true;
+	}
 
 	var loc = window.location, new_uri;
 		if (loc.protocol === "https:") {
@@ -1014,16 +1037,15 @@ function set_active_id(ids) {
 
         new_uri += "//" + loc.host;
         new_uri += loc.pathname + "?ws";
-        sock = new WebSocket(new_uri);
+        var sock = new WebSocket(new_uri);
         sock.binaryType = "arraybuffer";
 
         sock.onmessage = function (ev) {
                 sock_connected = true; 
                 console.log(ev); 
                 var buffer = new Uint8Array(ev.data);
-                if(buffer[0] == WS_ADMIN_CREATE_RULE_RESPONSE) {
-                        var id = to_u64(buffer, 1);
-			console.log("rule created. Id = " + id);
+                if(buffer[0] == WS_ADMIN_SET_ACTIVE_RULES_RESPONSE) {
+			console.log("set active successful");
 			sock.close();
 		} else {
 			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
@@ -1031,7 +1053,7 @@ function set_active_id(ids) {
 	}
 
         sock.addEventListener('open', function(event) {
-		var count = id_spl.length;
+		var count = ids.length;
                 const buffer = new ArrayBuffer((8*count) + 9);
                 const view = new Uint8Array(buffer);
                 view[0] = WS_ADMIN_SET_ACTIVE_RULES;
@@ -1045,7 +1067,7 @@ function set_active_id(ids) {
 		view[8] = count;
 
 		for(var i=0; i<count; i++) {
-			u64_tobin(new BigInteger(String(id_spl[i]), 10), view, 9 + (i*8));
+			u64_tobin(new BigInteger(String(ids[i]), 10), view, 9 + (i*8));
 		}
 
                 sock.send(buffer);
@@ -1066,7 +1088,7 @@ function get_all_rules() {
 	}
 	new_uri += "//" + loc.host;
 	new_uri += loc.pathname + "?ws";
-	sock = new WebSocket(new_uri);
+	var sock = new WebSocket(new_uri);
 	sock.binaryType = "arraybuffer";
 
         sock.onmessage = function (ev) {
@@ -1077,8 +1099,6 @@ function get_all_rules() {
 			var count = to_u64(buffer, 9);
 			console.log("got " + count + " rules.");
 			var offset = 17;
-			var show_rules = document.getElementById('show_rules');
-			show_rules.innerHTML = '';
 			for(var i=0; i<count; i++) {
 				// this is a functional rule with an 8 byte id in front
 				var functional_id = to_u64(buffer, offset);
@@ -1103,13 +1123,12 @@ function get_all_rules() {
 					offset += 1;
 				}
 				var label = new TextDecoder().decode(label);
+				if(is_active) {
+					active_by_id[functional_id] = true;
+				}
+				rule_ids[label] = functional_id;
 				console.log("rule["+i+"] label=" + label + ",id=" + functional_id + ",rule="+rule + ",is_active="+is_active);
-				var text = document.createTextNode(
-					"rule["+i+"] label=" + label + ",id=" + functional_id +
-					",rule="+ rule +
-					",is_active=" + is_active);
-				show_rules.appendChild(text);
-				show_rules.appendChild(document.createElement('br'));
+				create_dom(label, rule, is_active);
 			}
 			sock.close();
 		} else {
@@ -1129,58 +1148,128 @@ function get_all_rules() {
 	});
 }
 
-function create_rule(user_input, label_input) {
-	var id = Math.round(Math.random() * 18446744073709551615); // u64 max
-	console.log("id="+id);
-        var loc = window.location, new_uri;
+function set_active(active_rules) {
+	var ids = [];
+	for(var i=0; i<active_rules.length; i++) {
+		var rule = active_rules[i];
+		var child = rule.childNodes[0];
+		var label = String(child.childNodes[0].innerHTML);
+
+		console.log('child['+i+']='+label);
+		ids.push(rule_ids[label]);
+	}
+	console.log('set active = ' + active_rules);
+	console.log('ids='+ ids);
+	set_active_ids(ids);
+}
+
+function delete_rule(label) {
+	var id = rule_ids[label];
+	console.log("active_by_id=" + active_by_id[id] + ",id=" + id);
+	if(active_by_id[id] == true) {
+		document.getElementById('modal_error_text').innerHTML =
+			'You cannot delete active rules. Make this rule inactive first.';
+		$("#error_modal").modal();
+		return false;
+	}
+	delete_rule_dom(label);
+	var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
-		new_uri = "wss:";
+		 new_uri = "wss:";
 	} else {
 		new_uri = "ws:";
 	}
-        new_uri += "//" + loc.host;
-        new_uri += loc.pathname + "?ws";
-        sock = new WebSocket(new_uri);
-        sock.binaryType = "arraybuffer";
+
+	new_uri += "//" + loc.host;
+	new_uri += loc.pathname + "?ws";
+	var sock = new WebSocket(new_uri);
+	sock.binaryType = "arraybuffer";
 
         sock.onmessage = function (ev) {
-                console.log(ev);
-                var buffer = new Uint8Array(ev.data);
-		if(buffer[0] == WS_ADMIN_CREATE_RULE_RESPONSE) {
-			var id = to_u64(buffer, 1);
-			console.log("rule created. Id = " + id);
+		console.log(ev);
+		var buffer = new Uint8Array(ev.data);
+		if(buffer[0] == WS_ADMIN_DELETE_RULE_RESPONSE) {
+			console.log("rule deleted");
 			sock.close();
 		} else {
 			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
 		}
 	}
 
+        sock.addEventListener('open', function(event) {
+		const buffer = new ArrayBuffer(9);
+		const view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_DELETE_RULE;
+		u64_tobin(new BigInteger(String(id), 10), view, 1);
+		console.log("sending buffer = " + view);
+		sock.send(buffer);
+	});
+
+	sock.addEventListener('close', function (event) {
+		console.log('disconnected');
+	});
+
+	return true;
+}
+
+function create_rule(label_in, rule) {
+	var loc = window.location, new_uri;
+	if (loc.protocol === "https:") {
+		new_uri = "wss:";
+	} else {
+		new_uri = "ws:";
+	}
+
+        new_uri += "//" + loc.host;
+        new_uri += loc.pathname + "?ws";
+	var sock = new WebSocket(new_uri);
+        sock.binaryType = "arraybuffer";
+	show_spinner();
+
+	sock.onerror = function (ev) {
+		console.log("Error connecting socket - create_rule");
+		document.getElementById('modal_error_text').innerHTML =
+			'Failure to connect to nioruntime server';
+		$("#error_modal").modal();
+		hide_spinner();
+	}
+
+        sock.onmessage = function (ev) {
+                console.log(ev);
+                var buffer = new Uint8Array(ev.data);
+		hide_spinner();
+		if(buffer[0] == WS_ADMIN_CREATE_RULE_RESPONSE) {
+			var id = to_u64(buffer, 1);
+			console.log("rule created. Id = " + id);
+			create_dom(label_in, rule, false);
+			rule_ids[label_in] = id;
+			sock.close();
+		} else {
+			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
+			document.getElementById('modal_error_text').innerHTML =
+				'Unexpected response from nioruntime server. See logs for details.';
+			$("#error_modal").modal();
+		}
+	}
+
 	sock.addEventListener('open', function(event) {
-		var enc = new TextEncoder();
-		var label = enc.encode(label_input);
-		var regex = enc.encode(user_input);
-		const buffer = new ArrayBuffer(27 + regex.length + label.length);
+		let label = new TextEncoder().encode(label_in);
+		console.log('label='+label);
+		var rule_ser = rule.serialize();
+		const buffer = new ArrayBuffer(rule_ser.length + label.length + 9);
 		const view = new Uint8Array(buffer);
 		view[0] = WS_ADMIN_CREATE_RULE;
-		view[1] = 4;
-		u64_tobin(new BigInteger(String(regex.length), 10), view, 2);
-		var offset = 10;
-		console.log("regex.length="+regex.length);
-		console.log("regex="+regex);
-		for(var i=0; i<regex.length; i++) {
-			view[offset] = regex[i];
-			offset += 1;
+		for(var i=0; i<rule_ser.length; i++) {
+			view[i+1] = rule_ser[i];
 		}
-		u64_tobin(new BigInteger(String(id), 10), view, offset);
-		offset += 8;
-		view[offset] = 0; // multi_line = false
-		offset += 1;
-		u64_tobin(new BigInteger(String(label.length), 10), view, offset);
-		offset += 8;
-                for(var i=0; i<label.length; i++) {
-                        view[offset] = label[i];  
-                        offset += 1;
-                }
+		u64_tobin(new BigInteger(String(label.length), 10), view, rule_ser.length + 1);
+		var offset = rule_ser.length + 9;
+		console.log('label.length=' + label.length);
+		for(var i=0; i<label.length; i++) {
+			view[i + offset] = label[i];
+		}
+
+		console.log("sending buffer = " + view);
 
 		sock.send(buffer);
 	});
@@ -1188,4 +1277,339 @@ function create_rule(user_input, label_input) {
 	sock.addEventListener('close', function (event) {
 		console.log('disconnected');
 	});
+}
+
+function delete_rule_dom(label) {
+	console.log('delete rule = ' + label);
+	delete globalRules[label];
+	delete rule_ids[label];
+	var ulitem = document.getElementById('ulitem-' + label);
+	ulitem.parentNode.removeChild(ulitem);
+}
+
+function set_view_rule(label) {
+	var rule = globalRules[label];
+	document.getElementById('rule_view_text_area').value = rule.toString();
+	document.getElementById('modal-title').innerHTML =
+		'Rule Info - ' + label + ' (' + rule_ids[label] + ')';
+	viewRule = label;
+	var labels = ["Jan", "Feb", "Mar", "Apr", "May"];
+	var data = [1,2,3,4,5];
+	const chart_data = {
+		labels: labels,
+		datasets: [{
+		label: 'Matches for Pattern \'' + label + '\'',
+		backgroundColor: 'rgb(74, 20, 140)',
+		borderColor: 'rgb(74, 20, 140)',
+		data,
+		}]
+	};
+
+	const config = {
+		type: 'line',
+		data: chart_data,
+		options: {}
+	};
+
+	if (typeof chart === 'undefined') {
+		console.log('new chart');
+	} else {
+		console.log('destroy');
+		chart.destroy();
+	}
+
+	chart = new Chart(
+		document.getElementById('chartdiv'),
+		config
+	);
+}
+
+function create_expr(label, rules, delete_subs) {
+	if(label.length == 0) {
+		var error_text = document.getElementById("rule_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'label must be at least 1 char length';
+	} else if(!validateCode(label)) {
+		var error_text = document.getElementById("rule_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'label must be alpha numeric';
+	} else if(typeof(globalRules[label]) != "undefined") {
+                var error_text = document.getElementById("rule_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'This label already exists';
+	} else {
+		console.log('create_expr with rules = ' + rules + ',rules.length=' + rules.length + ',cur='+ typeof(globalRules[label]));
+		var rule = new Rule(rule_type, rules);
+		create_rule(label, rule);
+		if(delete_subs == 'true') {
+			console.log('delete subs yes');
+			for(var i=0; i<rule_labels.length; i++) {
+				delete_rule(rule_labels[i]);
+			}
+		}
+		$('#create_rule').modal('hide');
+	}
+}
+
+function validateCode(code) {
+	for (var i = 0; i < code.length; i++) {
+		var char1 = code.charAt(i);
+		var cc = char1.charCodeAt(0);
+		if ((cc > 47 && cc < 58) || (cc > 64 && cc < 91) || (cc > 96 && cc < 123)) {
+		} else {
+			return false;
+		}
+	}
+	return true;
+}
+
+function create_new(label, regex) {
+	if(regex.length == 0) {
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'pattern must be at least 1 char length';
+	} else if(regex.startsWith("^") && regex.length == 1) {
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = "pattern cannot start with '^' and be length of 1.";
+	} else if(label.length == 0) {
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'label must be at least 1 char length';
+	} else if(validateCode(label) == false) {
+		console.log('not valid');
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'label must be alpha numeric';
+	} else if(typeof(globalRules[label]) != "undefined") {
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'block';
+		error_text.innerHTML = 'This label already exists';
+	} else {
+		var success = true;
+		for(var i=0; i<regex.length; i++) {
+			var ch = regex.charAt(i);
+			if(ch == '\\' && i == regex.length - 1) {
+				var error_text = document.getElementById("pattern_input_error_text");
+				error_text.style.display = 'block';
+				error_text.innerHTML = 'illegal escape char at the end of the pattern';
+				success = false;
+			} else if(ch == '\\' && regex.charAt(i+1) != '\\' && regex.charAt(i+1) != '.') {
+				var error_text = document.getElementById("pattern_input_error_text");
+				error_text.style.display = 'block';
+				error_text.innerHTML = "illegal escape char found. '" + '\\' +
+				regex.charAt(i+1) + "' is not allowed";
+				success = false;
+			}
+			if(ch == '\\') {
+				i++;
+			}
+		}
+		if(success) {
+			var rule = new Rule(RULE_TYPE_PATTERN, regex, true);
+			create_rule(label, rule);
+			//create_dom(label, rule, false);
+			$('#pattern_input_modal').modal('hide');
+		}
+	}
+}
+
+function create_dom(label, rule, is_active) {
+	console.log('rule='+rule);
+	var ul  = document.createElement('li');
+	ul.title = label;
+	ul.id = 'ulitem-' + label;
+	ul.className = "StackedListItem StackedListItem--isDraggable StackedListItem--item1";
+	ul.tabindex = 1;
+	var div = document.createElement('div');
+	div.className = "StackedListContent";
+
+	// create hidden spans with the label and timestamp of last click
+	var hidden_label_span = document.createElement('span');
+	hidden_label_span.style.display = 'none';
+	hidden_label_span.innerHTML = label;
+	globalRules[label] = rule;
+	lastDragEvent[label] = new Date().getTime();
+	div.appendChild(hidden_label_span);
+	var h4 = document.createElement('h4');
+	h4.className = "Heading Heading--size4 text-no-select";
+
+	var label_truncated = label;
+	if(label.length > 9) {
+		label_truncated = label.substring(0, 9);
+		label_truncated += "..";
+	}
+	h4.appendChild(document.createTextNode(label_truncated));
+	div.appendChild(h4);
+	var drag_handle_div = document.createElement('div');
+	drag_handle_div.className = 'DragHandle';
+	div.appendChild(drag_handle_div);
+	var halftone = document.createElement('div');
+	halftone.className = "Pattern Pattern--typeHalftone";
+	div.appendChild(halftone);
+	var placed = document.createElement('div');
+	placed.className = "Pattern Pattern--typePlaced";
+	div.appendChild(placed);
+	ul.appendChild(div);
+	var ulh;
+	if(is_active) {
+		ulh = document.getElementById('ulactive');
+	} else {
+		ulh = document.getElementById('ulinactive');
+	}
+	ulh.appendChild(ul);
+}
+
+	function clear_modals() {
+		var error_text = document.getElementById("pattern_input_error_text");
+		error_text.style.display = 'none';
+		var error_text = document.getElementById("rule_input_error_text");
+		error_text.style.display = 'none';
+		document.forms['pattern_input']['label'].value = '';
+		document.forms['pattern_input']['regex'].value = '';
+		document.getElementById('help_info').style.display='none';
+		document.forms['confirm_rule']['label'].value = '';
+	}
+
+	function do_modal() {
+		clear_modals();
+		$("#pattern_input_modal").modal();
+	}
+
+	function do_and_rule() {
+		var uland = document.getElementById('uland');
+		var children = uland.childNodes;
+		rules = [];
+		rule_labels = [];
+		for(var i=0; i<children.length; i++) {
+			var child = children[i].childNodes[0];
+			var label = String(child.childNodes[0].innerHTML);
+			rule_labels.push(label);
+			console.log('pushing label='+label);
+			var rule = globalRules[label];
+			rules.push(rule);
+		}
+
+		if(rules.length < 2) {
+			document.getElementById('modal_error_text').innerHTML = 'At least 2 rules required for and';
+			$("#error_modal").modal();
+		} else {
+			rule_type = RULE_TYPE_AND;
+			document.forms['confirm_rule']['label'].value = '';
+			document.getElementById('help_info_rule').style.display='none';
+			console.log('creating new rule with rules = ' + rules + ',rules.length='+rules.length);
+			var rule = new Rule(rule_type, rules);
+			console.log('complete rule='+rule);
+			document.getElementById('rule_text_area').value = rule.toString();
+			clear_modals();
+			$("#create_rule").modal();
+		}
+	}
+
+	function do_or_rule() {
+		var ulor = document.getElementById('ulor');
+		var children = ulor.childNodes;
+		rules = [];
+		rule_labels = [];
+		for(var i=0; i<children.length; i++) {
+			var child = children[i].childNodes[0];
+			var label = String(child.childNodes[0].innerHTML);
+			rule_labels.push(label);
+			console.log('pushing label='+label);
+			var rule = globalRules[label];
+			rules.push(rule);
+		}
+
+		if(rules.length < 2) {
+			document.getElementById('modal_error_text').innerHTML = 'At least 2 rules required for or';
+			$("#error_modal").modal();
+		} else {
+			rule_type = RULE_TYPE_OR;
+			document.forms['confirm_rule']['label'].value = '';
+			document.getElementById('help_info_rule').style.display='none';
+			var rule = new Rule(rule_type, rules);
+			console.log('rule='+rule);
+			document.getElementById('rule_text_area').value = rule.toString();
+			clear_modals();
+			$("#create_rule").modal();
+		}
+	}
+
+	function do_not_rule() {
+		var ulnot = document.getElementById('ulnot');
+		var children = ulnot.childNodes;
+		rules = [];
+		rule_labels = [];
+		for(var i=0; i<children.length; i++) {
+			var child = children[i].childNodes[0];
+			var label = child.childNodes[0].innerHTML;
+			rule_labels.push(label);
+			var rule = globalRules[label];
+			rules.push(rule);
+			console.log('child[' + i + ']= ' + label + ',rule=' + globalRules[label]);
+		}
+
+		if(rules.length < 1) {
+			document.getElementById('modal_error_text').innerHTML = 'Not requires 1 rule';
+			$("#error_modal").modal();
+		} else {
+			rule_type = RULE_TYPE_NOT;
+			document.forms['confirm_rule']['label'].value = '';
+			document.getElementById('help_info_rule').style.display='none';
+			var rule = new Rule(rule_type, rules);
+			console.log('rule='+rule);
+			document.getElementById('rule_text_area').value = rule.toString();
+			clear_modals();
+			$("#create_rule").modal();
+		}
+	}
+
+	function openMulti() {
+		if (document.querySelector(".selectWrapper").style.pointerEvents == "all") {
+			document.querySelector(".selectWrapper").style.opacity = 0;
+			document.querySelector(".selectWrapper").style.pointerEvents = "none";
+			resetAllMenus();
+		} else {
+			document.querySelector(".selectWrapper").style.opacity = 1;
+			document.querySelector(".selectWrapper").style.pointerEvents = "all";
+		}
+	}
+
+function nextMenu(e) {
+	menuIndex = eval(event.target.parentNode.id.slice(-1));
+	document.querySelectorAll(".multiSelect")[menuIndex].style.transform =
+		"translateX(-100%)";
+	document.querySelectorAll(".multiSelect")[menuIndex].style.clipPath =
+		"polygon(100% 0, 100% 0, 100% 100%, 100% 100%)";
+	document.querySelectorAll(".multiSelect")[menuIndex + 1].style.transform =
+		"translateX(0)";
+	document.querySelectorAll(".multiSelect")[menuIndex + 1].style.clipPath =
+		"polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+}
+
+function prevMenu(e) {
+	menuIndex = eval(event.target.parentNode.id.slice(-1));
+	document.querySelectorAll(".multiSelect")[menuIndex].style.transform =
+		"translateX(100%)";
+	document.querySelectorAll(".multiSelect")[menuIndex].style.clipPath =
+		"polygon(0 0, 0 0, 0 100%, 0% 100%)";
+	document.querySelectorAll(".multiSelect")[menuIndex - 1].style.transform =
+		"translateX(0)";
+	document.querySelectorAll(".multiSelect")[menuIndex - 1].style.clipPath =
+		"polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+}
+
+function resetAllMenus() {
+	setTimeout(function () {
+	var x = document.getElementsByClassName("multiSelect");
+	var i;
+	for (i = 1; i < x.length; i++) {
+		x[i].style.transform = "translateX(100%)";
+		x[i].style.clipPath = "polygon(0 0, 0 0, 0 100%, 0% 100%)";
+	}
+	document.querySelectorAll(".multiSelect")[0].style.transform =
+		"translateX(0)";
+	document.querySelectorAll(".multiSelect")[0].style.clipPath =
+		"polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
+	}, 300);
 }

@@ -26,6 +26,7 @@ use nioruntime_util::ser::BinReader;
 use nioruntime_util::ser::Serializable;
 use nioruntime_util::ser::{Reader, Writer};
 use nioruntime_util::StaticQueue;
+use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fmt::Formatter;
@@ -39,7 +40,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 info!();
 
 pub const MAX_LOG_STR_LEN: usize = 128;
-pub const LOG_ITEM_SIZE: usize = MAX_LOG_STR_LEN * 5 + 28;
+pub const MAX_USER_MATCHES: usize = 10;
+pub const LOG_ITEM_SIZE: usize = MAX_LOG_STR_LEN * 5 + (1 + MAX_USER_MATCHES) * 8 + 28;
+
+const STAT_RECORD_PREFIX: u8 = 1;
 
 #[derive(Clone, Debug, Copy)]
 pub struct LogItem {
@@ -54,6 +58,8 @@ pub struct LogItem {
 	pub start_micros: u64,
 	pub end_micros: u64,
 	pub response_code: u16,
+	pub match_count: usize,
+	pub matches: [u64; MAX_USER_MATCHES],
 }
 
 impl Default for LogItem {
@@ -70,6 +76,8 @@ impl Default for LogItem {
 			start_micros: 0,
 			end_micros: 0,
 			response_code: 0,
+			match_count: 0,
+			matches: [0u64; MAX_USER_MATCHES],
 		}
 	}
 }
@@ -128,6 +136,12 @@ impl Serializable for LogItem {
 			uri_requested[i] = reader.read_u8()?;
 		}
 
+		let match_count = reader.read_u64()? as usize;
+		let mut matches = [064; MAX_USER_MATCHES];
+		for i in 0..MAX_USER_MATCHES {
+			matches[i] = reader.read_u64()?;
+		}
+
 		Ok(Self {
 			http_method,
 			http_version,
@@ -140,6 +154,8 @@ impl Serializable for LogItem {
 			referer,
 			uri_requested,
 			response_code,
+			match_count,
+			matches,
 		})
 	}
 	fn write<W>(&self, writer: &mut W) -> Result<(), Error>
@@ -189,6 +205,12 @@ impl Serializable for LogItem {
 			writer.write_u8(self.uri_requested[i])?;
 		}
 
+		writer.write_u64(self.match_count.try_into()?)?;
+
+		for i in 0..MAX_USER_MATCHES {
+			writer.write_u64(self.matches[i])?;
+		}
+
 		Ok(())
 	}
 }
@@ -207,6 +229,8 @@ impl LogItem {
 		start_micros: u64,
 		end_micros: u64,
 		response_code: u16,
+		match_count: usize,
+		matches: [u64; MAX_USER_MATCHES],
 	) -> Result<(), Error> {
 		self.http_method = http_method;
 		self.http_version = http_version;
@@ -219,6 +243,8 @@ impl LogItem {
 		self.start_micros = start_micros;
 		self.end_micros = end_micros;
 		self.response_code = response_code;
+		self.match_count = match_count;
+		self.matches = matches;
 		Ok(())
 	}
 
@@ -251,6 +277,17 @@ impl LogItem {
 		buf[28 + MAX_LOG_STR_LEN * 3..28 + MAX_LOG_STR_LEN * 4].clone_from_slice(&self.referer[..]);
 		buf[28 + MAX_LOG_STR_LEN * 4..28 + MAX_LOG_STR_LEN * 5]
 			.clone_from_slice(&self.uri_requested[..]);
+		buf[28 + MAX_LOG_STR_LEN * 5..36 + MAX_LOG_STR_LEN * 5]
+			.clone_from_slice(&self.match_count.to_be_bytes()[..]);
+		let max = if self.match_count > MAX_USER_MATCHES {
+			MAX_USER_MATCHES
+		} else {
+			self.match_count
+		};
+		for i in 0..max {
+			buf[36 + MAX_LOG_STR_LEN * 5 + i * 8..44 + MAX_LOG_STR_LEN * 5 + i * 8]
+				.clone_from_slice(&self.matches[i].to_be_bytes()[..]);
+		}
 		Ok(())
 	}
 
@@ -285,7 +322,15 @@ impl LogItem {
 		self.referer[..].clone_from_slice(&buf[28 + MAX_LOG_STR_LEN * 3..28 + MAX_LOG_STR_LEN * 4]);
 		self.uri_requested[..]
 			.clone_from_slice(&buf[28 + MAX_LOG_STR_LEN * 4..28 + MAX_LOG_STR_LEN * 5]);
-
+		self.match_count =
+			u64::from_be_bytes(buf[28 + MAX_LOG_STR_LEN * 5..36 + MAX_LOG_STR_LEN * 5].try_into()?)
+				as usize;
+		for i in 0..self.match_count {
+			self.matches[i] = u64::from_be_bytes(
+				buf[36 + MAX_LOG_STR_LEN * 5 + i * 8..44 + MAX_LOG_STR_LEN * 5 + i * 8]
+					.try_into()?,
+			);
+		}
 		Ok(())
 	}
 }
@@ -371,6 +416,7 @@ pub struct HttpStats {
 	request_log: Arc<RwLock<Log>>,
 	_startup_time: u128,
 	stat_record_accumulator: Arc<RwLock<StatRecord>>,
+	user_match_accumulator: Arc<RwLock<HashMap<u64, u64>>>,
 	recent_requests: Arc<RwLock<StaticQueue<LogItem>>>,
 }
 
@@ -492,8 +538,14 @@ impl HttpStats {
 		}
 
 		let stat_record_accumulator = Arc::new(RwLock::new(StatRecord::new(startup_time)));
+		let user_match_accumulator = Arc::new(RwLock::new(HashMap::new()));
 
-		Self::start_stats_thread(&stat_record_accumulator, &db, &config)?;
+		Self::start_stats_thread(
+			&stat_record_accumulator,
+			&user_match_accumulator,
+			&db,
+			&config,
+		)?;
 
 		let recent_requests = Arc::new(RwLock::new(StaticQueue::new(100)));
 
@@ -503,16 +555,19 @@ impl HttpStats {
 			request_log,
 			_startup_time: startup_time,
 			stat_record_accumulator,
+			user_match_accumulator,
 			recent_requests,
 		})
 	}
 
 	pub fn start_stats_thread(
 		stat_record_accumulator: &Arc<RwLock<StatRecord>>,
+		user_match_accumulator: &Arc<RwLock<HashMap<u64, u64>>>,
 		db: &Arc<RwLock<Store>>,
 		config: &HttpStatsConfig,
 	) -> Result<(), Error> {
 		let stat_record_accumulator = stat_record_accumulator.clone();
+		let user_match_accumulator = user_match_accumulator.clone();
 		let db = db.clone();
 		let config = config.clone();
 
@@ -523,7 +578,12 @@ impl HttpStats {
 					config.stats_frequency.saturating_sub(elapsed),
 				));
 				let start = Instant::now();
-				match Self::process_stats(&stat_record_accumulator, &db, &config) {
+				match Self::process_stats(
+					&stat_record_accumulator,
+					&user_match_accumulator,
+					&db,
+					&config,
+				) {
 					Ok(_) => {}
 					Err(e) => {
 						warn!("Stats processing generated error: {}", e)?;
@@ -543,6 +603,7 @@ impl HttpStats {
 
 	pub fn process_stats(
 		stat_record_accumulator: &Arc<RwLock<StatRecord>>,
+		user_match_accumulator: &Arc<RwLock<HashMap<u64, u64>>>,
 		db: &Arc<RwLock<Store>>,
 		config: &HttpStatsConfig,
 	) -> Result<(), Error> {
@@ -563,21 +624,30 @@ impl HttpStats {
 			ret
 		};
 
+		let user_match_accumulator = {
+			let mut user_match_accumulator = lockw!(user_match_accumulator)?;
+			let ret = (*user_match_accumulator).clone();
+			(*user_match_accumulator).clear();
+			ret
+		};
+
 		if config.debug_show_stats {
-			warn!("stats = {:?}", stat_record_accumulator)?;
+			warn!(
+				"stats = {:?}, user_matches = {:?}",
+				stat_record_accumulator, user_match_accumulator
+			)?;
+		}
+
+		let mut stat_record_key = vec![];
+		stat_record_key.push(STAT_RECORD_PREFIX);
+		for b in stat_record_accumulator.timestamp.to_be_bytes() {
+			stat_record_key.push(b);
 		}
 
 		{
 			let db = lockw!(db)?;
 			let batch = db.batch()?;
-
-			let mut timestamp_bytes = vec![];
-			timestamp_bytes.push(1);
-			for b in stat_record_accumulator.timestamp.to_be_bytes() {
-				timestamp_bytes.push(b);
-			}
-
-			batch.put_ser(&timestamp_bytes, &stat_record_accumulator)?;
+			batch.put_ser(&stat_record_key, &stat_record_accumulator)?;
 			batch.commit()?;
 		}
 
@@ -622,6 +692,7 @@ impl HttpStats {
 
 		let mut requests: u64 = 0;
 		let mut lat_sum_micros = 0;
+		let mut user_match_counts = HashMap::new();
 
 		let mut recent_requests = lockw!(self.recent_requests)?;
 		for log_item in log_items {
@@ -639,10 +710,28 @@ impl HttpStats {
 			lat_sum_micros += micro_diff;
 			let response_code = log_item.response_code;
 
+			let mut match_string = String::new();
+			for i in 0..log_item.match_count {
+				let match_id = log_item.matches[i];
+				match_string.push_str(&format!("{}", match_id).to_string());
+				match_string.push(',');
+				let create_entry = match user_match_counts.get_mut(&match_id) {
+					Some(match_count) => {
+						*match_count += 1;
+						false
+					}
+					None => true,
+				};
+
+				if create_entry {
+					user_match_counts.insert(match_id, 1);
+				}
+			}
+
 			logger.log(
 				INFO,
 				&format!(
-					"{}|{}|{}|{}|{}|{}|{}|{}",
+					"{}|{}|{}|{}|{}|{}|{}|{}|{}",
 					log_item.http_method,
 					uri,
 					uri_requested,
@@ -651,6 +740,7 @@ impl HttpStats {
 					referer,
 					micro_diff,
 					response_code,
+					match_string,
 				)[..],
 			)?;
 		}
@@ -671,7 +761,7 @@ impl HttpStats {
 		}
 
 		if drop_count > 0 && self.config.debug_log_queue {
-			warn!("Drop {} items", drop_count)?;
+			warn!("Log drop {} items", drop_count)?;
 		}
 
 		requests += drop_count;
@@ -688,6 +778,23 @@ impl HttpStats {
 			(*stat_record_accumulator).conns =
 				(*stat_record_accumulator).conns.saturating_sub(disconnects);
 			(*stat_record_accumulator).lat_sum_micros += lat_sum_micros;
+		}
+
+		{
+			let mut user_match_accumulator = lockw!(self.user_match_accumulator)?;
+			for (match_id, match_count) in user_match_counts {
+				let create_entry = match (*user_match_accumulator).get_mut(&match_id) {
+					Some(match_count_cur) => {
+						*match_count_cur += match_count;
+						false
+					}
+					None => true,
+				};
+
+				if create_entry {
+					(*user_match_accumulator).insert(match_id, match_count);
+				}
+			}
 		}
 
 		Ok(())
@@ -710,7 +817,7 @@ impl HttpStats {
 		let db = lockw!(self.db)?;
 		let batch = db.batch()?;
 
-		let mut itt = batch.iter_rev(&([1u8])[..], |_k, v| {
+		let mut itt = batch.iter_rev(&([STAT_RECORD_PREFIX])[..], |_k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
 			cursor.set_position(0);
 			let mut reader = BinReader::new(&mut cursor);
