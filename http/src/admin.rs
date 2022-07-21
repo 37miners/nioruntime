@@ -12,25 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::data::HttpData;
+use crate::data::RULE_PREFIX;
+use crate::data::STAT_RECORD_PREFIX;
+use crate::data::USER_RECORD_PREFIX;
 use crate::stats::HttpStats;
+use crate::stats::StatRecord;
 use crate::stats::LOG_ITEM_SIZE;
 use crate::websocket::{WebSocketMessage, WebSocketMessageType};
-use nioruntime_deps::dirs;
 use nioruntime_deps::rand;
 use nioruntime_derive::Serializable;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use nioruntime_util::lmdb::Store;
+use nioruntime_util::misc::invert_timestamp128;
 use nioruntime_util::multi_match::Dictionary;
 use nioruntime_util::multi_match::Pattern;
 use nioruntime_util::ser::{serialize, BinReader, Serializable};
 use nioruntime_util::ser::{Reader, Writer};
 use nioruntime_util::StaticHash;
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::Cursor;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 warn!();
@@ -56,7 +60,6 @@ const WS_ADMIN_DELETE_RULE_RESPONSE: u8 = 13u8;
 const WS_ADMIN_GET_DATA: u8 = 14u8;
 const WS_ADMIN_GET_DATA_RESPONSE: u8 = 14u8;
 const WS_ADMIN_ERROR_REPLY: u8 = 15u8;
-const RULE_PREFIX: u8 = 2u8;
 
 const RULE_TYPE_AND: u8 = 1;
 const RULE_TYPE_OR: u8 = 2;
@@ -237,29 +240,63 @@ impl Rule {
 	}
 }
 
+#[derive(Clone, Debug, Hash)]
+struct TimestampCountPair {
+	timestamp: u64,
+	count: u64,
+}
+
+impl PartialOrd for TimestampCountPair {
+	fn partial_cmp(&self, x: &Self) -> Option<Ordering> {
+		if x.timestamp > self.timestamp {
+			Some(Ordering::Less)
+		} else if x.timestamp < self.timestamp {
+			Some(Ordering::Greater)
+		} else {
+			Some(Ordering::Equal)
+		}
+	}
+}
+
+impl PartialEq for TimestampCountPair {
+	fn eq(&self, x: &Self) -> bool {
+		x.timestamp == self.timestamp && x.count == self.count
+	}
+}
+
+impl Eq for TimestampCountPair {}
+
+impl Ord for TimestampCountPair {
+	fn cmp(&self, x: &Self) -> Ordering {
+		if x.timestamp > self.timestamp {
+			Ordering::Less
+		} else if x.timestamp < self.timestamp {
+			Ordering::Greater
+		} else {
+			Ordering::Equal
+		}
+	}
+}
+
+impl TimestampCountPair {
+	fn new(timestamp: u64, count: u64) -> Self {
+		Self { timestamp, count }
+	}
+}
+
 #[derive(Clone)]
 pub struct HttpAdmin {
-	db: Arc<RwLock<Store>>,
+	db: HttpData,
 }
 
 impl HttpAdmin {
-	pub fn new(lmdb_dir: String) -> Result<Self, Error> {
-		let home_dir = match dirs::home_dir() {
-			Some(p) => p,
-			None => PathBuf::new(),
-		}
-		.as_path()
-		.display()
-		.to_string();
-		let lmdb_dir = lmdb_dir.replace("~", &home_dir);
-		let db = Store::new(&lmdb_dir, Some("admin"), Some("admin"), None, true)?;
-		let db = Arc::new(RwLock::new(db));
+	pub fn new(db: HttpData) -> Result<Self, Error> {
 		Ok(Self { db })
 	}
 
 	pub fn get_active_rules(&self) -> Result<Vec<FunctionalRule>, Error> {
 		let mut ret = vec![];
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		let mut itt = batch.iter(&([RULE_PREFIX])[..], |_k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
@@ -292,7 +329,7 @@ impl HttpAdmin {
 		let mut rule_key = vec![RULE_PREFIX];
 		rule_key.append(&mut functional_rule.id.to_be_bytes().to_vec());
 
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		batch.put_ser(&rule_key, &functional_rule)?;
 		batch.commit()?;
@@ -304,7 +341,7 @@ impl HttpAdmin {
 		let mut rule_key = vec![RULE_PREFIX];
 		rule_key.append(&mut id.to_be_bytes().to_vec());
 
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		batch.delete(&rule_key)?;
 		batch.commit()?;
@@ -325,7 +362,7 @@ impl HttpAdmin {
 
 	fn get_rules(&self) -> Result<Vec<FunctionalRule>, Error> {
 		let mut ret = vec![];
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		let mut itt = batch.iter(&([RULE_PREFIX])[..], |_k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
@@ -346,7 +383,7 @@ impl HttpAdmin {
 
 	fn set_active_rules(&self, rules: HashSet<u64>) -> Result<Vec<FunctionalRule>, Error> {
 		let mut ret = vec![];
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		let mut itt = batch.iter(&([RULE_PREFIX])[..], |k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
@@ -518,7 +555,122 @@ impl HttpAdmin {
 						)?),
 					}
 				}
-				WS_ADMIN_GET_DATA => None,
+				WS_ADMIN_GET_DATA => {
+					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
+					let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
+					let count = u64::from_be_bytes(msg.payload[17..25].try_into()?);
+					let mut payload = vec![WS_ADMIN_GET_DATA_RESPONSE];
+					payload.append(&mut count.to_be_bytes().to_vec());
+
+					let db = lockw!(self.db.db())?;
+					let batch = db.batch()?;
+
+					for i in 0..count {
+						let id = u64::from_be_bytes(
+							msg.payload[25 + i as usize * 8..33 + i as usize * 8].try_into()?,
+						);
+
+						// 0 a special case for total request count
+						let search = if id == 0 {
+							vec![STAT_RECORD_PREFIX]
+						} else {
+							let mut ret = vec![USER_RECORD_PREFIX];
+							ret.append(&mut id.to_be_bytes().to_vec());
+							ret
+						};
+						let mut itt = batch.iter(&search, |k, v| {
+							if id == 0 {
+								let timestamp =
+									invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+								let mut cursor = Cursor::new(v.to_vec());
+								cursor.set_position(0);
+								let mut reader = BinReader::new(&mut cursor);
+								let sr = StatRecord::read(&mut reader)?;
+
+								let count = sr.requests;
+								Ok(TimestampCountPair::new(timestamp.try_into()?, count))
+							} else {
+								let count = u64::from_be_bytes(v[8..16].try_into()?);
+								let timestamp =
+									invert_timestamp128(u128::from_be_bytes(k[9..25].try_into()?));
+								Ok(TimestampCountPair::new(timestamp.try_into()?, count))
+							}
+						})?;
+
+						let mut itt2 = batch.iter(&([STAT_RECORD_PREFIX])[..], |k, _v| {
+							let timestamp =
+								invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+							Ok(TimestampCountPair::new(timestamp.try_into()?, 0))
+						})?;
+
+						let mut timestamp_count_pairs_value = HashMap::new();
+						let mut timestamp_count_pairs_no_value = HashMap::new();
+						let mut itt_complete = false;
+						let mut itt2_complete = false;
+						loop {
+							if !itt_complete {
+								match itt.next() {
+									Some(pair) => {
+										if pair.timestamp >= start && pair.timestamp <= end {
+											timestamp_count_pairs_value
+												.insert(pair.timestamp, pair);
+										} else if pair.timestamp < start {
+											itt_complete = true;
+										}
+									}
+									None => itt_complete = true,
+								}
+							}
+
+							if !itt2_complete {
+								match itt2.next() {
+									Some(pair) => {
+										if pair.timestamp >= start && pair.timestamp <= end {
+											timestamp_count_pairs_no_value
+												.insert(pair.timestamp, pair);
+										} else if pair.timestamp < start {
+											itt2_complete = true;
+										}
+									}
+									None => {
+										itt2_complete = true;
+									}
+								}
+
+								if itt_complete && itt2_complete {
+									break;
+								}
+							}
+						}
+
+						let mut timestamp_count_pairs = vec![];
+						for (_, v) in &timestamp_count_pairs_value {
+							timestamp_count_pairs.push(v.clone());
+						}
+						for (k, v) in timestamp_count_pairs_no_value {
+							if timestamp_count_pairs_value.get(&k).is_none() {
+								timestamp_count_pairs.push(v.clone());
+							}
+						}
+
+						timestamp_count_pairs.sort();
+
+						payload.append(&mut timestamp_count_pairs.len().to_be_bytes().to_vec());
+						for j in 0..timestamp_count_pairs.len() {
+							payload.append(
+								&mut timestamp_count_pairs[j].timestamp.to_be_bytes().to_vec(),
+							);
+							payload
+								.append(&mut timestamp_count_pairs[j].count.to_be_bytes().to_vec());
+						}
+					}
+
+					Some(WebSocketMessage {
+						payload,
+						mtype: WebSocketMessageType::Binary,
+						mask: false,
+					})
+				}
 				WS_ADMIN_GET_STATS_REQUEST => {
 					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
 					let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
@@ -743,14 +895,14 @@ mod test {
 				file_path: Some(format!("{}/logs", root_dir)),
 				..LogConfig::default()
 			},
-			lmdb_dir: lmdb_dir.clone(),
 			stats_frequency: 10_000,
 			debug_log_queue: false,
 			debug_show_stats: false,
 		};
 
-		let http_stats = HttpStats::new(config)?;
-		let http_admin = HttpAdmin::new(lmdb_dir)?;
+		let db = HttpData::new(&lmdb_dir)?;
+		let http_stats = HttpStats::new(config, db.clone())?;
+		let http_admin = HttpAdmin::new(db)?;
 
 		let mut payload = vec![WS_ADMIN_CREATE_RULE];
 		let rule1 = Rule::Pattern(Pattern {

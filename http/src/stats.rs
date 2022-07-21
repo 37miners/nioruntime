@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::data::HttpData;
+use crate::data::STAT_RECORD_PREFIX;
+use crate::data::USER_RECORD_PREFIX;
 use crate::types::LogEvent;
 use crate::types::{HttpMethod, HttpVersion};
 use nioruntime_deps::dirs;
@@ -22,6 +25,7 @@ use nioruntime_err::Error;
 use nioruntime_err::ErrorKind;
 use nioruntime_log::*;
 use nioruntime_util::lmdb::Store;
+use nioruntime_util::misc::invert_timestamp128;
 use nioruntime_util::ser::BinReader;
 use nioruntime_util::ser::Serializable;
 use nioruntime_util::ser::{Reader, Writer};
@@ -42,8 +46,6 @@ info!();
 pub const MAX_LOG_STR_LEN: usize = 128;
 pub const MAX_USER_MATCHES: usize = 10;
 pub const LOG_ITEM_SIZE: usize = MAX_LOG_STR_LEN * 5 + (1 + MAX_USER_MATCHES) * 8 + 28;
-
-const STAT_RECORD_PREFIX: u8 = 1;
 
 #[derive(Clone, Debug, Copy)]
 pub struct LogItem {
@@ -338,7 +340,6 @@ impl LogItem {
 #[derive(Clone)]
 pub struct HttpStatsConfig {
 	pub request_log_config: LogConfig,
-	pub lmdb_dir: String,
 	pub stats_frequency: u64,
 	pub debug_log_queue: bool,
 	pub debug_show_stats: bool,
@@ -412,7 +413,7 @@ impl StatRecord {
 #[derive(Clone)]
 pub struct HttpStats {
 	config: HttpStatsConfig,
-	db: Arc<RwLock<Store>>,
+	db: HttpData,
 	request_log: Arc<RwLock<Log>>,
 	_startup_time: u128,
 	stat_record_accumulator: Arc<RwLock<StatRecord>>,
@@ -432,7 +433,7 @@ impl Debug for HttpStats {
 // starting, connects, disconnects, connect_timeout, read_timeouts, server start timestamp to
 // link back, timestamp, prev_timestamp
 impl HttpStats {
-	pub fn new(config: HttpStatsConfig) -> Result<Self, Error> {
+	pub fn new(config: HttpStatsConfig, db: HttpData) -> Result<Self, Error> {
 		let mut request_log_config = config.request_log_config.clone();
 		let home_dir = match dirs::home_dir() {
 			Some(p) => p,
@@ -457,15 +458,6 @@ impl HttpStats {
 		);
 		request_log_config.file_path = Some(path_clean(&request_log_config.file_path.unwrap()));
 
-		let lmdb_dir = config.lmdb_dir.replace("~", &home_dir);
-
-		let db = Arc::new(RwLock::new(Store::new(
-			&lmdb_dir,
-			Some("stats"),
-			Some("stats"),
-			None,
-			true,
-		)?));
 		let mut log = Log::new();
 
 		log.init(request_log_config)?;
@@ -475,7 +467,7 @@ impl HttpStats {
 
 		// insert our time into the db.
 		{
-			let db = lockw!(db)?;
+			let db = lockw!(db.db())?;
 			let batch = (*db).batch()?;
 			let mut timestamp_bytes = vec![];
 			timestamp_bytes.push(0);
@@ -489,7 +481,7 @@ impl HttpStats {
 		}
 
 		if config.debug_show_stats {
-			let db = lockw!(db)?;
+			let db = lockw!(db.db())?;
 			let batch = (*db).batch()?;
 			let mut itt = batch.iter(&([0u8])[..], |k, _v| {
 				Ok(u128::from_be_bytes(k[1..17].try_into()?))
@@ -512,9 +504,9 @@ impl HttpStats {
 		}
 
 		if config.debug_show_stats {
-			let db = lockw!(db)?;
+			let db = lockw!(db.db())?;
 			let batch = (*db).batch()?;
-			let mut itt = batch.iter_rev(&([1u8])[..], |_k, v| {
+			let mut itt = batch.iter(&([STAT_RECORD_PREFIX])[..], |_k, v| {
 				let mut cursor = Cursor::new(v.to_vec());
 				cursor.set_position(0);
 				let mut reader = BinReader::new(&mut cursor);
@@ -543,7 +535,7 @@ impl HttpStats {
 		Self::start_stats_thread(
 			&stat_record_accumulator,
 			&user_match_accumulator,
-			&db,
+			&db.db(),
 			&config,
 		)?;
 
@@ -640,14 +632,23 @@ impl HttpStats {
 
 		let mut stat_record_key = vec![];
 		stat_record_key.push(STAT_RECORD_PREFIX);
-		for b in stat_record_accumulator.timestamp.to_be_bytes() {
-			stat_record_key.push(b);
-		}
+		let timestamp = invert_timestamp128(stat_record_accumulator.timestamp);
+		stat_record_key.append(&mut timestamp.to_be_bytes().to_vec());
 
 		{
 			let db = lockw!(db)?;
 			let batch = db.batch()?;
 			batch.put_ser(&stat_record_key, &stat_record_accumulator)?;
+
+			for (k, v) in user_match_accumulator {
+				let mut user_record_key = vec![];
+				user_record_key.push(USER_RECORD_PREFIX);
+				user_record_key.append(&mut k.to_be_bytes().to_vec());
+				user_record_key.append(&mut timestamp.to_be_bytes().to_vec());
+				let user_record_value = v.to_be_bytes().to_vec();
+				batch.put_ser(&user_record_key, &user_record_value)?;
+			}
+
 			batch.commit()?;
 		}
 
@@ -692,7 +693,6 @@ impl HttpStats {
 
 		let mut requests: u64 = 0;
 		let mut lat_sum_micros = 0;
-		let mut user_match_counts = HashMap::new();
 
 		let mut recent_requests = lockw!(self.recent_requests)?;
 		for log_item in log_items {
@@ -714,17 +714,8 @@ impl HttpStats {
 			for i in 0..log_item.match_count {
 				let match_id = log_item.matches[i];
 				match_string.push_str(&format!("{}", match_id).to_string());
-				match_string.push(',');
-				let create_entry = match user_match_counts.get_mut(&match_id) {
-					Some(match_count) => {
-						*match_count += 1;
-						false
-					}
-					None => true,
-				};
-
-				if create_entry {
-					user_match_counts.insert(match_id, 1);
+				if i < log_item.match_count.saturating_sub(1) {
+					match_string.push(',');
 				}
 			}
 
@@ -750,14 +741,29 @@ impl HttpStats {
 		let mut disconnects = 0;
 		let mut read_timeouts = 0;
 		let mut connect_timeouts = 0;
+		{
+			let mut user_match_accumulator = lockw!(self.user_match_accumulator)?;
+			for log_event in log_events {
+				drop_count += log_event.dropped_count;
+				connects += log_event.connect_count;
+				disconnects += log_event.disconnect_count;
+				read_timeouts += log_event.read_timeout_count;
+				connect_timeouts += log_event.connect_timeout_count;
+				lat_sum_micros += log_event.dropped_lat_sum;
+				for (id, count) in log_event.user_matches {
+					let create_entry = match (*user_match_accumulator).get_mut(&id) {
+						Some(match_count_cur) => {
+							*match_count_cur += count;
+							false
+						}
+						None => true,
+					};
 
-		for log_event in log_events {
-			drop_count += log_event.dropped_count;
-			connects += log_event.connect_count;
-			disconnects += log_event.disconnect_count;
-			read_timeouts += log_event.read_timeout_count;
-			connect_timeouts += log_event.connect_timeout_count;
-			lat_sum_micros += log_event.dropped_lat_sum;
+					if create_entry {
+						(*user_match_accumulator).insert(id, count);
+					}
+				}
+			}
 		}
 
 		if drop_count > 0 && self.config.debug_log_queue {
@@ -780,23 +786,6 @@ impl HttpStats {
 			(*stat_record_accumulator).lat_sum_micros += lat_sum_micros;
 		}
 
-		{
-			let mut user_match_accumulator = lockw!(self.user_match_accumulator)?;
-			for (match_id, match_count) in user_match_counts {
-				let create_entry = match (*user_match_accumulator).get_mut(&match_id) {
-					Some(match_count_cur) => {
-						*match_count_cur += match_count;
-						false
-					}
-					None => true,
-				};
-
-				if create_entry {
-					(*user_match_accumulator).insert(match_id, match_count);
-				}
-			}
-		}
-
 		Ok(())
 	}
 
@@ -814,10 +803,10 @@ impl HttpStats {
 		timestamp: u64,
 		quantity: u64,
 	) -> Result<Vec<StatRecord>, Error> {
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 
-		let mut itt = batch.iter_rev(&([STAT_RECORD_PREFIX])[..], |_k, v| {
+		let mut itt = batch.iter(&([STAT_RECORD_PREFIX])[..], |_k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
 			cursor.set_position(0);
 			let mut reader = BinReader::new(&mut cursor);
@@ -850,10 +839,10 @@ impl HttpStats {
 		offset_start: u64,
 		offset_end: u64,
 	) -> Result<Vec<StatRecord>, Error> {
-		let db = lockw!(self.db)?;
+		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 
-		let mut itt = batch.iter_rev(&([1u8])[..], |_k, v| {
+		let mut itt = batch.iter(&([STAT_RECORD_PREFIX])[..], |_k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
 			cursor.set_position(0);
 			let mut reader = BinReader::new(&mut cursor);

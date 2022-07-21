@@ -461,6 +461,34 @@ impl<K: Serializable, V: Serializable> StaticHash<K, V> {
 	}
 
 	/// Get the value associated with this key in raw format. In this function, the key is
+	/// pre-serialized by the caller. Return a mutable reference.
+	pub fn get_raw_mut(&mut self, key: &[u8]) -> Option<&mut [u8]> {
+		if key.len() != self.config.key_len as usize {
+			return None;
+		}
+		let hash = self.get_hash(key);
+
+		for count in 0..self.config.max_entries {
+			let n = hash + count;
+			let entry = n % self.config.max_entries;
+			let ohb = self.get_overhead_byte(entry);
+			if ohb == EMPTY {
+				return None;
+			} else if ohb == OCCUPIED {
+				if self.cmp_key(key, entry) {
+					let offset = self.get_value_offset(entry);
+					let start = offset;
+					let end = offset + self.config.entry_len;
+					let ret = &mut self.data[start..end];
+					return Some(ret);
+				}
+			}
+		}
+		// not found
+		return None;
+	}
+
+	/// Get the value associated with this key in raw format. In this function, the key is
 	/// pre-serialized by the caller.
 	pub fn get_raw(&self, key: &[u8]) -> Option<&[u8]> {
 		if key.len() != self.config.key_len as usize {

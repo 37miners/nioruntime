@@ -14,6 +14,7 @@
 
 mod admin;
 mod cache;
+mod data;
 mod http;
 mod proxy;
 mod stats;

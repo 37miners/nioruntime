@@ -16,6 +16,7 @@ mod byte_utils;
 mod hex;
 pub mod lmdb;
 mod macros;
+pub mod misc;
 pub mod multi_match;
 pub mod ser;
 pub mod slabs;

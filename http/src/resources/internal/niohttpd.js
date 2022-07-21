@@ -14,6 +14,8 @@ const WS_ADMIN_SET_ACTIVE_RULES                  = 12;
 const WS_ADMIN_SET_ACTIVE_RULES_RESPONSE         = 12;
 const WS_ADMIN_DELETE_RULE                       = 13;
 const WS_ADMIN_DELETE_RULE_RESPONSE              = 13;
+const WS_ADMIN_GET_DATA                          = 14;
+const WS_ADMIN_GET_DATA_RESPONSE                 = 14;
 
 const METHOD_GET     = 0;
 const METHOD_POST    = 1;
@@ -31,9 +33,12 @@ const VERSION_20      = 3;
 const VERSION_UNKNOWN = 0;
 
 const MAX_LOG_STR_LEN = 128;
+const MAX_USER_MATCHES = 10;
 
 var rules = [];
 var rule_labels = [];
+var view_rule_labels = [];
+var view_rule_ids = [];
 var rule_type = 0;
 var lastDragEvent = new Object();
 var viewRule;
@@ -757,6 +762,7 @@ function process_get_most_recent_requests(buffer) {
 		var user_agent    = text_decode(buffer, offset, 128); offset += 128;
 		var referer       = text_decode(buffer, offset, 128); offset += 128;
 		var uri_requested = text_decode(buffer, offset, 128); offset += 128;
+		offset += (MAX_USER_MATCHES + 1) * 8; // skip over user matches
 
 		add_log_request_tr(server_time, http_method, http_version, content_len, end_micros, start_micros, response_code,
 			uri, query, user_agent, referer, uri_requested, table, color_alternate);
@@ -1020,6 +1026,124 @@ function load_charts_niohttpd() {
 		sock.send(buffer);
 	});
 
+}
+
+function graph_data(ids, start, end, id_labels) {
+        var loc = window.location, new_uri;
+	if (loc.protocol === "https:") {
+		new_uri = "wss:";
+	} else {
+		new_uri = "ws:";
+	}
+
+	new_uri += "//" + loc.host;
+	new_uri += loc.pathname + "?ws";
+	var sock = new WebSocket(new_uri);
+	sock.binaryType = "arraybuffer";
+
+	var colors = [
+		'rgb(74, 20, 140)',
+		'rgb(255, 99, 132)',
+		'rgb(255, 205, 86)',
+		'rgb(124, 252, 0)',
+		'rgb(255,165,0)',
+	];
+
+	sock.onmessage = function (ev) {
+		sock_connected = true;
+		var buffer = new Uint8Array(ev.data);
+		if(buffer[0] == WS_ADMIN_GET_DATA_RESPONSE) {
+			var count_ret = to_u64(buffer, 1);
+			console.log("count_ret="+count_ret);
+			var offset = 9;
+			var data = [];
+			var labels = [];
+			for(var i=0; i<count_ret; i++) {
+				var entries = to_u64(buffer, offset);
+				offset += 8;
+				console.log("entry count = " + entries);
+				var labels_inner = [];
+				var data_inner = [];
+				for(var j=0; j<entries; j++) {
+					var timestamp = to_u64(buffer, offset);
+					offset += 8;
+					var count = to_u64(buffer, offset);
+					offset += 8;
+					labels_inner.push(format_date(new Date(timestamp/1)));
+					data_inner.push(Number(count));
+				}
+
+				console.log('data='+data_inner);
+				console.log('labels='+labels_inner);
+
+				data.push(data_inner);
+				labels.push(labels_inner);
+			}
+
+			console.log('data[0]='+data[1]);
+
+			var datasets = [];
+			for(var i=0; i<data.length; i++) {
+				var label = '\'' + id_labels[i] + '\'';
+				if(ids[i] == 0) {
+					label = 'All';
+				}
+				datasets.push(
+					{
+						label,
+						backgroundColor: colors[i % colors.length],
+						borderColor: colors[i % colors.length],
+						data: data[i],
+					}
+				);
+			}
+			const chart_data = {
+				labels: labels[0],
+				datasets,
+			};
+
+			const config = {
+				type: 'line',
+				data: chart_data,
+				options: {}
+			};
+
+			if (typeof chart === 'undefined') {
+				console.log('new chart');
+			} else {
+				console.log('destroy');
+				chart.destroy();
+			}
+
+			chart = new Chart(
+				document.getElementById('chartdiv'),
+				config
+			);
+
+			sock.close();
+		} else {
+			console.log("Unknown command: " + buffer[0] + " full=" + buffer);
+		}
+	}
+
+	sock.addEventListener('open', function(event) {
+		console.log('pre send: ' + ids + ',ids.length='+ids.length);
+		var len = 25 + 8 * ids.length;
+		console.log('len='+len);
+		const buffer = new ArrayBuffer(len);
+		var view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_GET_DATA;
+		var now = Date.now();
+		u64_tobin(new BigInteger(String(start), 10), view, 1);
+		var now = new BigInteger(String(end), 10);
+		u64_tobin(now, view, 9);
+		u64_tobin(new BigInteger(String(ids.length), 10), view, 17);
+		for(var i=0; i<ids.length; i++) {
+			u64_tobin(new BigInteger(String(ids[i]), 10), view, 25 + i * 8);
+		}
+		console.log('send graph req:' + view + ",view.leng="+view.length);
+		sock.send(buffer);
+	});
 }
 
 function set_active_ids(ids) {
@@ -1288,40 +1412,15 @@ function delete_rule_dom(label) {
 }
 
 function set_view_rule(label) {
+	view_rule_labels = [label];
+	view_rule_ids = [rule_ids[label]];
 	var rule = globalRules[label];
 	document.getElementById('rule_view_text_area').value = rule.toString();
 	document.getElementById('modal-title').innerHTML =
 		'Rule Info - ' + label + ' (' + rule_ids[label] + ')';
 	viewRule = label;
-	var labels = ["Jan", "Feb", "Mar", "Apr", "May"];
-	var data = [1,2,3,4,5];
-	const chart_data = {
-		labels: labels,
-		datasets: [{
-		label: 'Matches for Pattern \'' + label + '\'',
-		backgroundColor: 'rgb(74, 20, 140)',
-		borderColor: 'rgb(74, 20, 140)',
-		data,
-		}]
-	};
 
-	const config = {
-		type: 'line',
-		data: chart_data,
-		options: {}
-	};
-
-	if (typeof chart === 'undefined') {
-		console.log('new chart');
-	} else {
-		console.log('destroy');
-		chart.destroy();
-	}
-
-	chart = new Chart(
-		document.getElementById('chartdiv'),
-		config
-	);
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
 }
 
 function create_expr(label, rules, delete_subs) {
@@ -1408,13 +1507,21 @@ function create_new(label, regex) {
 		if(success) {
 			var rule = new Rule(RULE_TYPE_PATTERN, regex, true);
 			create_rule(label, rule);
-			//create_dom(label, rule, false);
 			$('#pattern_input_modal').modal('hide');
 		}
 	}
 }
 
 function create_dom(label, rule, is_active) {
+	// add to view menu
+	var view_rule_menu = document.getElementById('view_rule_menu');
+	var data_set_div = document.createElement('div');
+	data_set_div.appendChild(document.createTextNode(label));
+	data_set_div.onclick = function(evt) {
+		add_data_set(label);
+	};
+	view_rule_menu.appendChild(data_set_div);
+
 	console.log('rule='+rule);
 	var ul  = document.createElement('li');
 	ul.title = label;
@@ -1564,6 +1671,21 @@ function create_dom(label, rule, is_active) {
 		}
 	}
 
+	function add_data_set(label) {
+		// special case for all requests
+		if(label == '') {
+			view_rule_ids.push(0);
+			view_rule_labels.push('All Requests');
+			console.log('graph view_rule_ids = ' + view_rule_ids + ' , view_rule_labels = ' + view_rule_labels);
+			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
+		} else {
+			view_rule_ids.push(rule_ids[label]);
+			view_rule_labels.push(label);
+			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
+		}
+		openMulti();
+	}
+
 	function openMulti() {
 		if (document.querySelector(".selectWrapper").style.pointerEvents == "all") {
 			document.querySelector(".selectWrapper").style.opacity = 0;
@@ -1613,3 +1735,4 @@ function resetAllMenus() {
 		"polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
 	}, 300);
 }
+

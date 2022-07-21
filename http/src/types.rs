@@ -14,6 +14,7 @@
 
 use crate::admin::FunctionalRule;
 use crate::admin::HttpAdmin;
+use crate::data::HttpData;
 use crate::stats::{HttpStats, HttpStatsConfig, LOG_ITEM_SIZE};
 use crate::LogItem;
 use nioruntime_deps::base58;
@@ -408,7 +409,7 @@ impl ProxyState {
 #[derive(Debug)]
 pub struct StatQueues {
 	pub log_items: StaticQueue<LogItem>,
-	pub log_events: StaticQueue<LogEvent>,
+	pub log_events: Vec<LogEvent>,
 }
 
 impl StatQueues {
@@ -416,12 +417,12 @@ impl StatQueues {
 		Self {
 			log_items: StaticQueue::new(capacity),
 			// 1 per thread + buffer
-			log_events: StaticQueue::new(threads + 100),
+			log_events: Vec::with_capacity(threads + 100),
 		}
 	}
 }
 
-#[derive(Clone, Debug, Default, Copy)]
+#[derive(Clone, Debug, Default)]
 pub struct LogEvent {
 	pub dropped_count: u64,
 	pub read_timeout_count: u64,
@@ -429,6 +430,7 @@ pub struct LogEvent {
 	pub connect_count: u64,
 	pub disconnect_count: u64,
 	pub dropped_lat_sum: u64,
+	pub user_matches: Vec<(u64, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -443,19 +445,21 @@ impl StatHandler {
 		threads: usize,
 		debug_log_queue: bool,
 		request_log_config: LogConfig,
-		lmdb_dir: String,
 		debug_show_stats: bool,
 		stats_frequency: u64,
+		data: HttpData,
 	) -> Result<Self, Error> {
 		Ok(Self {
 			queue: Arc::new(RwLock::new(StatQueues::new(capacity, threads))),
-			http_stats: HttpStats::new(HttpStatsConfig {
-				debug_log_queue,
-				debug_show_stats,
-				request_log_config,
-				lmdb_dir,
-				stats_frequency,
-			})?,
+			http_stats: HttpStats::new(
+				HttpStatsConfig {
+					debug_log_queue,
+					debug_show_stats,
+					request_log_config,
+					stats_frequency,
+				},
+				data,
+			)?,
 		})
 	}
 }
@@ -506,6 +510,7 @@ pub struct ThreadContext {
 	pub match_ids: Vec<u64>,
 	pub id_match_count: usize,
 	pub user_defined_matches: StaticHash<(), ()>,
+	pub match_accumulator: StaticHash<(), ()>,
 }
 
 impl ThreadContext {
@@ -520,6 +525,15 @@ impl ThreadContext {
 			max_entries: config.max_matches * 2,
 			key_len: 8,
 			entry_len: 0,
+			max_load_factor: 0.95,
+			..Default::default()
+		})?;
+
+		let match_accumulator: StaticHash<(), ()>;
+		match_accumulator = StaticHash::new(StaticHashConfig {
+			max_entries: config.max_matches * 2,
+			key_len: 8,
+			entry_len: 8,
 			max_load_factor: 0.95,
 			..Default::default()
 		})?;
@@ -633,6 +647,7 @@ impl ThreadContext {
 			user_defined_matches,
 			id_match_count,
 			match_ids,
+			match_accumulator,
 		})
 	}
 

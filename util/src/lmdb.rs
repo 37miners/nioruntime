@@ -269,11 +269,9 @@ impl Store {
 	}
 
 	/// Produces an iterator from the provided key prefix. Iteration occurs in reverse order.
-	pub fn iter_rev<F, T>(
-		&self,
-		prefix: &[u8],
-		deserialize: F,
-	) -> Result<PrefixIterator<F, T>, Error>
+	/// This does not work as intended. Only works with fixed sizes. Commenting out for now.
+	/// Alternative is to invert the key if this is needed.
+	fn _iter_rev<F, T>(&self, prefix: &[u8], deserialize: F) -> Result<PrefixIterator<F, T>, Error>
 	where
 		F: Fn(&[u8], &[u8]) -> Result<T, Error>,
 	{
@@ -367,15 +365,12 @@ impl<'a> Batch<'a> {
 	}
 
 	/// Produces an iterator from the provided key prefix. Iteration occurs in reverse order.
-	pub fn iter_rev<F, T>(
-		&self,
-		prefix: &[u8],
-		deserialize: F,
-	) -> Result<PrefixIterator<F, T>, Error>
+	/// Not working as intended. See comment in Store implementation.
+	fn _iter_rev<F, T>(&self, prefix: &[u8], deserialize: F) -> Result<PrefixIterator<F, T>, Error>
 	where
 		F: Fn(&[u8], &[u8]) -> Result<T, Error>,
 	{
-		self.store.iter_rev(prefix, deserialize)
+		self.store._iter_rev(prefix, deserialize)
 	}
 
 	/// Gets a `Serializable` value from the db by provided key and default deserialization strategy.
@@ -547,7 +542,7 @@ mod test {
 			assert!(itt.next() == Some(td3.clone()));
 			assert!(itt.next() == None);
 
-			let mut itt = batch.iter_rev(&(b"h")[..], |_k, v| {
+			let mut itt = batch._iter_rev(&(b"h")[..], |_k, v| {
 				let mut cursor = Cursor::new(v.to_vec());
 				cursor.set_position(0);
 				let mut reader = BinReader::new(&mut cursor);

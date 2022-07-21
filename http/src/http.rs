@@ -15,6 +15,7 @@
 use crate::admin::FunctionalRule;
 use crate::admin::HttpAdmin;
 use crate::cache::HttpCache;
+use crate::data::HttpData;
 use crate::proxy::{
 	process_health_check, process_health_check_response, process_proxy_inbound,
 	process_proxy_outbound, socket_connect,
@@ -158,14 +159,18 @@ where
 			Self::init_temp_dir(&temp_dir)?;
 		}
 
+		let lmdb_dir = config.lmdb_dir.replace("~", &home_dir);
+
+		let db = HttpData::new(&lmdb_dir)?;
+
 		let stat_handler = StatHandler::new(
 			config.main_log_queue_size,
 			config.evh_config.threads,
 			config.debug_log_queue,
 			config.request_log_config.clone(),
-			config.lmdb_dir.clone(),
 			config.debug_show_stats,
 			config.stats_frequency,
+			db.clone(),
 		)?;
 
 		if config.admin_uri.len() == 0 {
@@ -187,7 +192,7 @@ where
 			config.admin_uri = admin_uri;
 		}
 
-		let admin = HttpAdmin::new(config.lmdb_dir.clone())?;
+		let admin = HttpAdmin::new(db.clone())?;
 
 		let rule_update = Arc::new(RwLock::new(RuleUpdate {
 			version: 0,
@@ -1019,6 +1024,7 @@ where
 		id_match_count: &mut usize,
 		match_ids: &mut Vec<u64>,
 		user_defined_matches: &mut StaticHash<(), ()>,
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<
 		(
 			bool,
@@ -1105,6 +1111,7 @@ where
 				id_match_count,
 				match_ids,
 				user_defined_matches,
+				match_accumulator,
 			)?;
 		}
 
@@ -1214,6 +1221,7 @@ where
 			&mut thread_context.id_match_count,
 			&mut thread_context.match_ids,
 			&mut thread_context.user_defined_matches,
+			&mut thread_context.match_accumulator,
 		)?;
 
 		if was_post_await {
@@ -1290,6 +1298,7 @@ where
 					&mut thread_context.id_match_count,
 					&mut thread_context.match_ids,
 					&mut thread_context.user_defined_matches,
+					&mut thread_context.match_accumulator,
 				)?;
 
 				match nconn {
@@ -1356,6 +1365,7 @@ where
 				&mut thread_context.id_match_count,
 				&mut thread_context.match_ids,
 				&mut thread_context.user_defined_matches,
+				&mut thread_context.match_accumulator,
 			)?;
 			nconns.append(&mut ps_nconns);
 			nupdates.append(&mut ps_nupdates);
@@ -1401,6 +1411,7 @@ where
 		id_match_count: &mut usize,
 		match_ids: &mut Vec<u64>,
 		user_defined_matches: &mut StaticHash<(), ()>,
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<(Vec<ConnectionInfo>, Vec<(ConnectionData, u128)>), Error> {
 		let mut offset = 0;
 		let mut nconns = vec![];
@@ -1448,6 +1459,7 @@ where
 				id_match_count,
 				match_ids,
 				user_defined_matches,
+				match_accumulator,
 			)?;
 			if amt == 0 {
 				Self::append_buffer(&pbuf, buffer)?;
@@ -1510,6 +1522,7 @@ where
 		dropped_log_items: &mut u64,
 		dropped_lat_sum: &mut u64,
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<
 		(
 			bool,
@@ -1604,6 +1617,7 @@ where
 							thread_pool,
 							headers.get_id_match_count().try_into()?,
 							headers.get_match_ids(),
+							match_accumulator,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1744,6 +1758,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		id_match_count: &mut usize,
 		match_ids: &mut Vec<u64>,
 		user_defined_matches: &mut StaticHash<(), ()>,
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<
 		(
 			usize,
@@ -1847,6 +1862,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							thread_pool,
 							0,
 							&[0u64; MAX_USER_MATCHES],
+							match_accumulator,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1888,6 +1904,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							thread_pool,
 							0,
 							&[0u64; MAX_USER_MATCHES],
+							match_accumulator,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1929,6 +1946,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							thread_pool,
 							0,
 							&[0u64; MAX_USER_MATCHES],
+							match_accumulator,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -1971,6 +1989,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 							thread_pool,
 							0,
 							&[0u64; MAX_USER_MATCHES],
+							match_accumulator,
 						) {
 							Ok(_) => {}
 							Err(_e) => {
@@ -2046,6 +2065,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						thread_pool,
 						headers.get_id_match_count().try_into()?,
 						headers.get_match_ids(),
+						match_accumulator,
 					) {
 						Ok(_) => {}
 						Err(_e) => {
@@ -2058,7 +2078,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 
 				// check for api mapping/extension
 				let was_api = {
-					Self::process_api(
+					let ret = Self::process_api(
 						now,
 						buffer,
 						&mut headers,
@@ -2073,7 +2093,16 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						dropped_log_items,
 						stat_handler,
 						dropped_lat_sum,
-					)?
+					)?;
+
+					if ret {
+						Self::update_match_counts(
+							headers.get_id_match_count().try_into()?,
+							headers.get_match_ids(),
+							match_accumulator,
+						)?;
+					}
+					ret
 				};
 
 				if !was_api {
@@ -2133,7 +2162,16 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						dropped_log_items,
 						dropped_lat_sum,
 						thread_pool,
+						match_accumulator,
 					)?;
+
+					if was_proxy {
+						Self::update_match_counts(
+							headers.get_id_match_count().try_into()?,
+							headers.get_match_ids(),
+							match_accumulator,
+						)?;
+					}
 
 					match api_context {
 						Some(api_context) => {
@@ -2231,6 +2269,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 						thread_pool,
 						headers.get_id_match_count().try_into()?,
 						headers.get_match_ids(),
+						match_accumulator,
 					) {
 						Ok(k) => {
 							key = k;
@@ -2270,6 +2309,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										thread_pool,
 										headers.get_id_match_count().try_into()?,
 										headers.get_match_ids(),
+										match_accumulator,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2311,6 +2351,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										thread_pool,
 										headers.get_id_match_count().try_into()?,
 										headers.get_match_ids(),
+										match_accumulator,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2352,6 +2393,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										thread_pool,
 										headers.get_id_match_count().try_into()?,
 										headers.get_match_ids(),
+										match_accumulator,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2394,6 +2436,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 										thread_pool,
 										headers.get_id_match_count().try_into()?,
 										headers.get_match_ids(),
+										match_accumulator,
 									) {
 										Ok(k) => key = k,
 										Err(_e) => {
@@ -2725,6 +2768,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 		match_count: u64,
 		matches: &[u64],
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<Option<[u8; 32]>, Error> {
 		if http_method != &HttpMethod::Get && http_method != &HttpMethod::Head {
 			return Err(ErrorKind::HttpError405("Method not allowed.".into()).into());
@@ -2801,6 +2845,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			dropped_lat_sum,
 			match_count.try_into()?,
 			matches,
+			match_accumulator,
 		)?;
 		let need_update = if found && !need_update {
 			match http_version {
@@ -2842,6 +2887,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 				dropped_lat_sum,
 				match_count.try_into()?,
 				matches,
+				match_accumulator,
 			)?;
 
 			if found && !need_update {
@@ -2911,6 +2957,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			thread_pool,
 			match_count.try_into()?,
 			matches,
+			match_accumulator,
 		)?;
 
 		Ok(None)
@@ -2978,6 +3025,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		dropped_lat_sum: &mut u64,
 		match_count: usize,
 		matches: &[u64],
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<(bool, bool, [u8; 32]), Error> {
 		let (key, update_lc, etag) = {
 			let cache = lockr!(cache)?;
@@ -3054,6 +3102,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								dropped_lat_sum,
 								match_count,
 								matches,
+								Some(match_accumulator),
 							)?;
 						} else {
 							Self::send_headers(
@@ -3088,6 +3137,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 								dropped_lat_sum,
 								match_count,
 								matches,
+								Some(match_accumulator),
 							)?;
 						}
 						headers_sent = true;
@@ -3152,6 +3202,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		thread_pool: &Arc<RwLock<StaticThreadPool>>,
 		match_count: usize,
 		matches: &[u64],
+		match_accumulator: &mut StaticHash<(), ()>,
 	) -> Result<(), Error> {
 		let http_version = http_version.clone();
 		let mime_map = mime_map.clone();
@@ -3227,6 +3278,8 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		let stat_handler = stat_handler.clone();
 		let matches = matches.to_vec();
 
+		Self::update_match_counts(match_count as u64, &matches, match_accumulator)?;
+
 		let thread_pool = lockw!(thread_pool)?;
 
 		thread_pool.execute(async move {
@@ -3277,6 +3330,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					&mut 0,
 					match_count,
 					&matches,
+					None,
 				)?;
 			} else {
 				ctx.set_response_code_logging(response_code)?;
@@ -3308,6 +3362,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					&mut 0,
 					match_count,
 					&matches,
+					None,
 				)?;
 			}
 
@@ -3664,6 +3719,32 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		Ok(())
 	}
 
+	fn update_match_counts(
+		match_count: u64,
+		matches: &[u64],
+		match_accumulator: &mut StaticHash<(), ()>,
+	) -> Result<(), Error> {
+		for i in 0..match_count {
+			let i = i as usize;
+			let found = match match_accumulator.get_raw_mut(&(matches[i].to_be_bytes())) {
+				Some(m) => {
+					let mut m_u64 = u64::from_be_bytes(m.try_into()?);
+					m_u64 += 1;
+					(*m).clone_from_slice(&m_u64.to_be_bytes());
+					true
+				}
+				None => false,
+			};
+
+			if !found {
+				match_accumulator
+					.insert_raw(&matches[i].to_be_bytes(), &(1 as u64).to_be_bytes())?;
+			}
+		}
+
+		Ok(())
+	}
+
 	fn send_headers(
 		code: &[u8],
 		response_code: u16,
@@ -3692,7 +3773,15 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 		dropped_lat_sum: &mut u64,
 		match_count: usize,
 		matches: &[u64],
+		match_accumulator: Option<&mut StaticHash<(), ()>>,
 	) -> Result<(), Error> {
+		match match_accumulator {
+			Some(match_accumulator) => {
+				Self::update_match_counts(match_count as u64, matches, match_accumulator)?
+			}
+			None => {}
+		}
+
 		let mut response = vec![];
 		match http_version {
 			HttpVersion::V10 | HttpVersion::Unknown => {
@@ -4067,7 +4156,7 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 			log_events = (*queue).log_events.clone();
 			log_items = (*queue).log_items.clone();
 			(*queue).log_items.clear()?;
-			(*queue).log_events.clear()?;
+			(*queue).log_events.clear();
 		}
 
 		match stat_handler
@@ -4132,42 +4221,49 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 	}
 
 	fn process_housekeep_log_queue(thread_context: &mut ThreadContext) -> Result<(), Error> {
-		{
-			{
-				let mut queue = lockw!(thread_context.stat_handler.queue)?;
-				let mut i: u64 = 0;
-				let size = thread_context.log_queue.size() as u64;
-				for item in &thread_context.log_queue {
-					match queue.log_items.enqueue(item) {
-						Ok(_) => {}
-						Err(_) => {
-							// queue full
-							thread_context.dropped_log_items += size.saturating_sub(i);
-							break;
-						}
-					}
-					i += 1;
-				}
+		let mut user_matches = vec![];
+		for (k, v) in thread_context.match_accumulator.iter_raw() {
+			let id = u64::from_be_bytes(k[0..8].try_into()?);
+			let count = u64::from_be_bytes(v[0..8].try_into()?);
+			user_matches.push((id, count));
+		}
+		let mut i: u64 = 0;
+		let size = thread_context.log_queue.size() as u64;
 
-				let le = LogEvent {
-					dropped_count: thread_context.dropped_log_items,
-					read_timeout_count: thread_context.read_timeouts,
-					connect_timeout_count: thread_context.connect_timeouts,
-					connect_count: thread_context.connects,
-					disconnect_count: thread_context.disconnects,
-					dropped_lat_sum: thread_context.dropped_lat_sum,
-				};
-				queue.log_events.enqueue(le)?;
+		{
+			let mut queue = lockw!(thread_context.stat_handler.queue)?;
+			for item in &thread_context.log_queue {
+				match queue.log_items.enqueue(item) {
+					Ok(_) => {}
+					Err(_) => {
+						// queue full
+						thread_context.dropped_log_items += size.saturating_sub(i);
+						break;
+					}
+				}
+				i += 1;
 			}
 
-			thread_context.dropped_log_items = 0;
-			thread_context.read_timeouts = 0;
-			thread_context.connect_timeouts = 0;
-			thread_context.connects = 0;
-			thread_context.disconnects = 0;
-			thread_context.dropped_lat_sum = 0;
-			thread_context.log_queue.clear()?;
+			let le = LogEvent {
+				dropped_count: thread_context.dropped_log_items,
+				read_timeout_count: thread_context.read_timeouts,
+				connect_timeout_count: thread_context.connect_timeouts,
+				connect_count: thread_context.connects,
+				disconnect_count: thread_context.disconnects,
+				dropped_lat_sum: thread_context.dropped_lat_sum,
+				user_matches,
+			};
+			queue.log_events.push(le);
 		}
+
+		thread_context.dropped_log_items = 0;
+		thread_context.read_timeouts = 0;
+		thread_context.connect_timeouts = 0;
+		thread_context.connects = 0;
+		thread_context.disconnects = 0;
+		thread_context.dropped_lat_sum = 0;
+		thread_context.log_queue.clear()?;
+		thread_context.match_accumulator.clear()?;
 
 		Ok(())
 	}
