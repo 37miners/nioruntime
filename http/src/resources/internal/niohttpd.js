@@ -34,7 +34,10 @@ const VERSION_UNKNOWN = 0;
 
 const MAX_LOG_STR_LEN = 128;
 const MAX_USER_MATCHES = 10;
+const MAX_BAR_CHART_SIZE = 25;
 
+var last_chart_type = 'line';
+var csv_data_sets;
 var rules = [];
 var rule_labels = [];
 var view_rule_labels = [];
@@ -44,6 +47,7 @@ var lastDragEvent = new Object();
 var viewRule;
 var globalSortable;
 var chart;
+var full_screen_chart;
 var last_scroll = 0;
 var mr_micros = 0;
 var mr_timestamp = 0;
@@ -206,6 +210,11 @@ function add_tr(
 	server_time,
 	lat_sum_micros,
 ) {
+	console.log("add tr with requests = " + requests + ",dropped_log=" + dropped_log + ",conns=" + conns + ",connects=" + connects
+		+ ",disconnects=" + disconnects + ",connect_timeouts=" + connect_timeouts + ",read_timeouts=" + read_timeouts +
+		",timestamp=" + timestamp + ",prev_timestamp=" + prev_timestamp + ",startup_time=" + startup_time + ",table=" + table
+		+ ",color_alternate=" + color_alternate + ",first=" + first + ",server_time=" + server_time + ",lat_sum_micros=" +
+		lat_sum_micros);
 	if(timestamp > mr_timestamp) {
 		mr_timestamp = timestamp;
 	}
@@ -262,6 +271,9 @@ function add_tr(
 	var td = document.createElement('td');
 	if (color_alternate % 2 == 0) { td.className = 'table_odd'; } else { td.className = 'table_even'; }
 	var duration = Math.round((timestamp - prev_timestamp) / 1000);
+	if(duration < 0) {
+console.log("duration was less than 0. timestamp = " + timestamp + ",prev=" + prev_timestamp);
+	}
 	td.appendChild(document.createTextNode(duration + ' secs'));
 	tr.appendChild(td);
 
@@ -311,7 +323,7 @@ function process_pong(buffer) {
 	console.log('count='+count);
 
 	for(var i=count-1; i>=0; i--) {
-		var offset = 17 + i * 88;
+		var offset = 17 + i * 96;
 		console.log('offset='+offset + ",i=" + i);
 		var requests = to_u64(buffer, offset); offset += 8;
 		var dropped_log = to_u64(buffer, offset); offset += 8;
@@ -327,6 +339,7 @@ function process_pong(buffer) {
 		var memory_bytes = to_u64(buffer, offset); offset += 8;
 
 		if(timestamp > mr_timestamp) {
+			console.log("mr_timestamp='" + mr_timestamp + "',timestamp='" + timestamp + "'");
 			mr_timestamp = timestamp;
 			color_alternate += 1;
 
@@ -1028,7 +1041,8 @@ function load_charts_niohttpd() {
 
 }
 
-function graph_data(ids, start, end, id_labels) {
+function graph_data(ids, start, end, id_labels, is_full_screen, chart_type) {
+	csv_data_sets = '';
         var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
 		new_uri = "wss:";
@@ -1053,6 +1067,16 @@ function graph_data(ids, start, end, id_labels) {
 		sock_connected = true;
 		var buffer = new Uint8Array(ev.data);
 		if(buffer[0] == WS_ADMIN_GET_DATA_RESPONSE) {
+			if(chart_type == 'pie' && is_full_screen) {
+				document.getElementById('fullscreenchartdiv').style.maxHeight = '600px';
+				document.getElementById('fullscreenchartdiv').style.maxWidth = '600px';
+			} else if(chart_type == 'pie') {
+				document.getElementById('chartdiv').style.maxHeight = '300px';
+				document.getElementById('chartdiv').style.maxWidth = '700px';
+			} else {
+				document.getElementById('fullscreenchartdiv').style.maxHeight = '';
+				document.getElementById('fullscreenchartdiv').style.maxWidth = '';
+			}
 			var count_ret = to_u64(buffer, 1);
 			console.log("count_ret="+count_ret);
 			var offset = 9;
@@ -1073,52 +1097,153 @@ function graph_data(ids, start, end, id_labels) {
 					data_inner.push(Number(count));
 				}
 
-				console.log('data='+data_inner);
-				console.log('labels='+labels_inner);
-
-				data.push(data_inner);
 				labels.push(labels_inner);
+
+				if(i > 0 && data_inner.length < data[0].length) {
+					var len = data[0].length - data_inner.length;
+					for(var j=0; j<len; j++) {
+						data_inner.unshift(null);
+					}
+				} else if(i > 0 && data_inner.length > data[0].length) {
+					var len = data_inner.length - data[0].length;
+					for(var j=0; j<len; j++) {
+						data_inner.shift();
+					}
+				}
+
+				console.log('data_inner.len='+data_inner.length);
+				data.push(data_inner);
 			}
 
-			console.log('data[0]='+data[1]);
+                        csv_data_sets += '-,';
+			for(var i=0; i<labels[0].length; i++) {
+				if(i==labels[0].length-1) {
+					csv_data_sets += labels[0][i];
+				} else {
+					csv_data_sets += labels[0][i] + ',';
+				}
+			}
+			csv_data_sets += '\n';
+			for(var i=0; i<data.length; i++) {
+				if(ids[i] == 0) {
+					csv_data_sets += 'All Requests,';
+				} else {
+					csv_data_sets += id_labels[i] + ','
+				}
+				for(var j=0; j<data[i].length; j++) {
+					if(j == data[i].length - 1) {
+						csv_data_sets += data[i][j];
+					} else {
+						csv_data_sets += data[i][j] + ','
+					}
+				}
+				csv_data_sets += '\n';
+			}
+
+			if(chart_type == 'bar') {
+				var shift_count = labels[0].length - MAX_BAR_CHART_SIZE;
+				console.log("data[0].length="+data[0].length+"labels[0].length="+labels[0].length);
+				if(data[0].length > MAX_BAR_CHART_SIZE) {
+					for(var i=0; i<shift_count; i++) {
+						labels[0].shift();
+					}
+					for(var i=0; i<data.length; i++) {
+						for(var j=0; j<shift_count; j++) {
+							data[i].shift();
+						}
+					}
+				}
+			}
+
+			console.log("ndata.len="+data[0].length+",labelsnlen="+labels[0].length+",data[0]="+data[0]+",labels="+labels[0]);
 
 			var datasets = [];
-			for(var i=0; i<data.length; i++) {
-				var label = '\'' + id_labels[i] + '\'';
-				if(ids[i] == 0) {
-					label = 'All';
-				}
-				datasets.push(
-					{
-						label,
-						backgroundColor: colors[i % colors.length],
-						borderColor: colors[i % colors.length],
-						data: data[i],
-					}
-				);
-			}
-			const chart_data = {
-				labels: labels[0],
-				datasets,
-			};
+			var chart_data;
 
+
+			if(chart_type == 'pie') {
+				var data_sums = [];
+				for(var i=0; i<data.length; i++) {
+					data_sums.push(0);
+					for(var j=0; j<data[i].length; j++) {
+						data_sums[i] += data[i][j];
+					}
+				}
+				var data_labels = [];
+				for(var i=0; i<ids.length; i++) {
+					if(ids[i] == 0) {
+						data_labels.push('All Requests');
+					} else {
+						data_labels.push(id_labels[i]);
+					}
+				}
+
+				datasets.push({
+					label: data_labels,
+					backgroundColor: colors,
+					borderColor: colors,
+					data: data_sums,
+				});
+
+				chart_data = {
+					labels: data_labels,
+					datasets,
+		                };
+				console.log('data_sums='+data_sums+',data_labels='+data_labels);
+			} else {
+				for(var i=0; i<data.length; i++) {
+					var label = '\'' + id_labels[i] + '\'';
+					if(ids[i] == 0) {
+						label = 'All';
+					}
+					datasets.push(
+						{
+							label,
+							backgroundColor: colors[i % colors.length],
+							borderColor: colors[i % colors.length],
+							data: data[i],
+						}
+					);
+				}
+
+				chart_data = {
+					labels: labels[0],
+					datasets,
+				};
+			}
+
+			console.log("chart type = " + chart_type);
 			const config = {
-				type: 'line',
+				type: chart_type,
 				data: chart_data,
 				options: {}
 			};
 
-			if (typeof chart === 'undefined') {
+			var local_chart;
+			if(is_full_screen) {
+				local_chart = full_screen_chart;
+			} else {
+				local_chart = chart;
+			}
+
+			if (typeof local_chart === 'undefined') {
 				console.log('new chart');
 			} else {
 				console.log('destroy');
-				chart.destroy();
+				local_chart.destroy();
 			}
 
-			chart = new Chart(
-				document.getElementById('chartdiv'),
-				config
-			);
+			if(is_full_screen) {
+				full_screen_chart = new Chart(
+					document.getElementById('fullscreenchartdiv'),
+					config
+				);
+			} else {
+				chart = new Chart(
+					document.getElementById('chartdiv'),
+					config
+				);
+			}
 
 			sock.close();
 		} else {
@@ -1287,7 +1412,14 @@ function set_active(active_rules) {
 	set_active_ids(ids);
 }
 
-function delete_rule(label) {
+function delete_rule(label, show_confirm) {
+	if(show_confirm) {
+		if(!confirm('Delete rule "' + label + '"?')) {
+			return;
+		}
+		$('#view_rule').modal('hide');
+	}
+
 	var id = rule_ids[label];
 	console.log("active_by_id=" + active_by_id[id] + ",id=" + id);
 	if(active_by_id[id] == true) {
@@ -1296,6 +1428,12 @@ function delete_rule(label) {
 		$("#error_modal").modal();
 		return false;
 	}
+
+        // delete from the add data set menu
+	var view_rule_menu = document.getElementById('view_rule_menu');
+	var data_set_div = document.getElementById('data_set_div_' + label);
+	view_rule_menu.removeChild(data_set_div);
+
 	delete_rule_dom(label);
 	var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
@@ -1412,6 +1550,7 @@ function delete_rule_dom(label) {
 }
 
 function set_view_rule(label) {
+	ensureCloseMenus();
 	view_rule_labels = [label];
 	view_rule_ids = [rule_ids[label]];
 	var rule = globalRules[label];
@@ -1420,7 +1559,8 @@ function set_view_rule(label) {
 		'Rule Info - ' + label + ' (' + rule_ids[label] + ')';
 	viewRule = label;
 
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
+	last_chart_type = 'line';
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'line');
 }
 
 function create_expr(label, rules, delete_subs) {
@@ -1443,7 +1583,7 @@ function create_expr(label, rules, delete_subs) {
 		if(delete_subs == 'true') {
 			console.log('delete subs yes');
 			for(var i=0; i<rule_labels.length; i++) {
-				delete_rule(rule_labels[i]);
+				delete_rule(rule_labels[i], false);
 			}
 		}
 		$('#create_rule').modal('hide');
@@ -1516,9 +1656,21 @@ function create_dom(label, rule, is_active) {
 	// add to view menu
 	var view_rule_menu = document.getElementById('view_rule_menu');
 	var data_set_div = document.createElement('div');
+	data_set_div.id = 'data_set_div_' + label;
 	data_set_div.appendChild(document.createTextNode(label));
 	data_set_div.onclick = function(evt) {
-		add_data_set(label);
+		console.log("on click with view_rule_labels = " + view_rule_labels + " label = " + label);
+		var found = false;
+		for(var i=0; i<view_rule_labels.length; i++) {
+			if(view_rule_labels[i] == label) {
+				found = true;
+			} else if(view_rule_labels[i] == 'All Requests' && label == '') {
+				found = true;
+			}
+		}
+
+		if(!found)
+			add_data_set(label);
 	};
 	view_rule_menu.appendChild(data_set_div);
 
@@ -1677,11 +1829,11 @@ function create_dom(label, rule, is_active) {
 			view_rule_ids.push(0);
 			view_rule_labels.push('All Requests');
 			console.log('graph view_rule_ids = ' + view_rule_ids + ' , view_rule_labels = ' + view_rule_labels);
-			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
+			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, last_chart_type);
 		} else {
 			view_rule_ids.push(rule_ids[label]);
 			view_rule_labels.push(label);
-			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels);
+			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, last_chart_type);
 		}
 		openMulti();
 	}
@@ -1695,6 +1847,12 @@ function create_dom(label, rule, is_active) {
 			document.querySelector(".selectWrapper").style.opacity = 1;
 			document.querySelector(".selectWrapper").style.pointerEvents = "all";
 		}
+	}
+
+	function ensureCloseMenus() {
+		document.querySelector(".selectWrapper").style.opacity = 0;
+		document.querySelector(".selectWrapper").style.pointerEvents = "none";
+		resetAllMenus();
 	}
 
 function nextMenu(e) {
@@ -1734,5 +1892,58 @@ function resetAllMenus() {
 	document.querySelectorAll(".multiSelect")[0].style.clipPath =
 		"polygon(0 0, 100% 0, 100% 100%, 0% 100%)";
 	}, 300);
+}
+
+function full_screen() {
+	console.log("view_rule.style.zIndex=" + document.getElementById('view_rule').style.zIndex + ",graph_full_screen.style.zIndex=" + document.getElementById('graph_full_screen').style.zIndex);
+	document.getElementById('view_rule').style.zIndex = "2000";
+	document.getElementById('graph_full_screen').style.zIndex = "2001";
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, true, last_chart_type);
+	$("#graph_full_screen").modal({backdrop: 'static', keyboard: false});
+}
+
+function hide_full_screen() {
+	document.getElementById('view_rule').style.zIndex = "2001";
+	document.getElementById('graph_full_screen').style.zIndex = "2000";
+	$("#view_rule").modal();
+	$("#graph_full_screen").modal('hide');
+}
+
+function download_csv() {
+	download(csv_data_sets, view_rule_labels[0] + '.csv', 'csv');
+}
+
+// Function to download data to a file
+function download(data, filename, type) {
+	var file = new Blob([data], {type: type});
+	if (window.navigator.msSaveOrOpenBlob) { // IE10+
+		window.navigator.msSaveOrOpenBlob(file, filename);
+	} else { // Others
+		var a = document.createElement("a"),
+		url = URL.createObjectURL(file);
+		a.href = url;
+		a.download = filename;
+		document.body.appendChild(a);
+		a.click();
+		setTimeout(function() {
+			document.body.removeChild(a);
+			window.URL.revokeObjectURL(url);  
+		}, 0); 
+	}
+}
+
+function to_pie() {
+	last_chart_type = 'pie';
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'pie');
+}
+
+function to_bar() {
+	last_chart_type = 'bar';
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'bar');
+}
+
+function to_line() {
+	last_chart_type = 'line';
+	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'line');
 }
 

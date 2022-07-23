@@ -385,6 +385,40 @@ impl HttpAdmin {
 		let mut ret = vec![];
 		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
+
+		// get last timestamp for any new rules
+		let search = vec![STAT_RECORD_PREFIX];
+		let mut itt = batch.iter(&search, |k, _v| {
+			Ok(u128::from_be_bytes(k[1..17].try_into()?))
+		})?;
+
+		let last = match itt.next() {
+			Some(timestamp) => timestamp,
+			None => invert_timestamp128(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()),
+		};
+
+		for id in &rules {
+			let mut search = vec![USER_RECORD_PREFIX];
+			search.append(&mut id.to_be_bytes().to_vec());
+			let mut itt = batch.iter(&search, |k, _v| {
+				let timestamp = invert_timestamp128(u128::from_be_bytes(k[9..25].try_into()?));
+				Ok(timestamp)
+			})?;
+
+			let found = match itt.next() {
+				Some(_) => true,
+				None => false,
+			};
+
+			if !found {
+				let mut key = vec![USER_RECORD_PREFIX];
+				key.append(&mut id.to_be_bytes().to_vec());
+				key.append(&mut last.to_be_bytes().to_vec());
+				let value = (0 as u64).to_be_bytes().to_vec();
+				batch.put_ser(&key, &value)?;
+			}
+		}
+
 		let mut itt = batch.iter(&([RULE_PREFIX])[..], |k, v| {
 			let mut cursor = Cursor::new(v.to_vec());
 			cursor.set_position(0);
@@ -578,22 +612,25 @@ impl HttpAdmin {
 							ret.append(&mut id.to_be_bytes().to_vec());
 							ret
 						};
+						let mut first_timestamp = u64::MAX;
 						let mut itt = batch.iter(&search, |k, v| {
 							if id == 0 {
 								let timestamp =
 									invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+								let timestamp: u64 = timestamp.try_into()?;
 								let mut cursor = Cursor::new(v.to_vec());
 								cursor.set_position(0);
 								let mut reader = BinReader::new(&mut cursor);
 								let sr = StatRecord::read(&mut reader)?;
 
 								let count = sr.requests;
-								Ok(TimestampCountPair::new(timestamp.try_into()?, count))
+								Ok(TimestampCountPair::new(timestamp, count))
 							} else {
 								let count = u64::from_be_bytes(v[8..16].try_into()?);
 								let timestamp =
 									invert_timestamp128(u128::from_be_bytes(k[9..25].try_into()?));
-								Ok(TimestampCountPair::new(timestamp.try_into()?, count))
+								let timestamp: u64 = timestamp.try_into()?;
+								Ok(TimestampCountPair::new(timestamp, count))
 							}
 						})?;
 
@@ -611,6 +648,9 @@ impl HttpAdmin {
 							if !itt_complete {
 								match itt.next() {
 									Some(pair) => {
+										if pair.timestamp < first_timestamp {
+											first_timestamp = pair.timestamp;
+										}
 										if pair.timestamp >= start && pair.timestamp <= end {
 											timestamp_count_pairs_value
 												.insert(pair.timestamp, pair);
@@ -644,11 +684,14 @@ impl HttpAdmin {
 						}
 
 						let mut timestamp_count_pairs = vec![];
-						for (_, v) in &timestamp_count_pairs_value {
-							timestamp_count_pairs.push(v.clone());
+						for (k, v) in &timestamp_count_pairs_value {
+							if k >= &first_timestamp {
+								timestamp_count_pairs.push(v.clone());
+							}
 						}
 						for (k, v) in timestamp_count_pairs_no_value {
-							if timestamp_count_pairs_value.get(&k).is_none() {
+							if k >= first_timestamp && timestamp_count_pairs_value.get(&k).is_none()
+							{
 								timestamp_count_pairs.push(v.clone());
 							}
 						}
