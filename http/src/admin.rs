@@ -354,6 +354,21 @@ impl HttpAdmin {
 		Ok(id)
 	}
 
+	fn delete_user_matches(batch: &Batch, id: u64, prefix: u8) -> Result<(), Error> {
+		let mut search = vec![prefix];
+		search.append(&mut id.to_be_bytes().to_vec());
+		let mut itt = batch.iter(&search, move |k, _v| Ok(k.to_owned()))?;
+
+		loop {
+			match itt.next() {
+				Some(k) => batch.delete(&k)?,
+				None => break,
+			}
+		}
+
+		Ok(())
+	}
+
 	fn delete_rule(&self, id: u64) -> Result<(), Error> {
 		let mut rule_key = vec![RULE_PREFIX];
 		rule_key.append(&mut id.to_be_bytes().to_vec());
@@ -361,6 +376,13 @@ impl HttpAdmin {
 		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
 		batch.delete(&rule_key)?;
+
+		// delete all user match data
+		Self::delete_user_matches(&batch, id, USER_RECORD_PREFIX)?;
+		Self::delete_user_matches(&batch, id, USER_RECORD_HOURLY_PREFIX)?;
+		Self::delete_user_matches(&batch, id, USER_RECORD_DAILY_PREFIX)?;
+		Self::delete_user_matches(&batch, id, USER_RECORD_MONTHLY_PREFIX)?;
+
 		batch.commit()?;
 		Ok(())
 	}
@@ -662,7 +684,6 @@ impl HttpAdmin {
 			ret.append(&mut id.to_be_bytes().to_vec());
 			ret
 		};
-
 		batch.iter(&search, move |k, v| {
 			if id == 0 && time_frame == WS_ADMIN_GET_DATA_REAL_TIME {
 				let timestamp = invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
