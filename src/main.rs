@@ -741,6 +741,11 @@ fn real_main() -> Result<(), Error> {
 		false => file_args.is_present("debug_websocket"),
 	};
 
+	let debug_db_update = match args.is_present("debug_db_update") {
+		true => true,
+		false => file_args.is_present("debug_db_update"),
+	};
+
 	let debug_log_queue = match args.is_present("debug_log_queue") {
 		true => true,
 		false => file_args.is_present("debug_log_queue"),
@@ -897,6 +902,7 @@ fn real_main() -> Result<(), Error> {
 		debug_websocket,
 		debug_log_queue,
 		debug_show_stats,
+		debug_db_update,
 		proxy_config,
 		admin_uri,
 		request_log_config: LogConfig {

@@ -1,0 +1,49 @@
+name: perf
+author: 37 Miners, LLC
+
+args:
+    - db:
+        help: The location of the lmdb database. The default value is ~/.niohttpd/lmdb.
+        long: db
+        short: d
+        takes_value: true
+        value_name: db
+    - requestlog:
+        help: The location of the request log. The default value is ~/.niohttpd/logs/request.log.
+        long: requestlog
+        short: l
+        takes_value: true
+        value_name: requestlog
+    - rulename:
+        help: The name of the rule to create.
+        long: rulename
+        short: r
+        takes_value: true
+        value_name: rulename
+    - min:
+        help: The min value of matches.
+        long: min
+        takes_value: true
+        value_name: min
+    - max:
+        help: The max value of matches.
+        long: max
+        takes_value: true
+        value_name: max
+    - count:
+        help: The number of timestamps to insert.
+        long: count
+        short: c
+        takes_value: true
+        value_name: count
+    - diff:
+        help: The time in milliseconds between each request. Default is 10,000 ms or 10 seconds.
+        long: diff
+        takes_value: true
+        value_name: diff
+    - ids:
+        help: The number of ids to create. The default is 1.
+        long: ids
+        short: i
+        takes_value: true
+        value_name: ids

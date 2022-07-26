@@ -14,16 +14,24 @@
 
 use crate::data::HttpData;
 use crate::data::RULE_PREFIX;
+use crate::data::STAT_RECORD_DAILY_PREFIX;
 use crate::data::STAT_RECORD_PREFIX;
+use crate::data::USER_RECORD_DAILY_PREFIX;
+use crate::data::USER_RECORD_HOURLY_PREFIX;
+use crate::data::USER_RECORD_MONTHLY_PREFIX;
 use crate::data::USER_RECORD_PREFIX;
 use crate::stats::HttpStats;
 use crate::stats::StatRecord;
 use crate::stats::LOG_ITEM_SIZE;
 use crate::websocket::{WebSocketMessage, WebSocketMessageType};
+use crate::HttpConfig;
+use nioruntime_deps::chrono::naive::{NaiveDate, NaiveDateTime};
+use nioruntime_deps::chrono::Datelike;
 use nioruntime_deps::rand;
 use nioruntime_derive::Serializable;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
+use nioruntime_util::lmdb::Batch;
 use nioruntime_util::misc::invert_timestamp128;
 use nioruntime_util::multi_match::Dictionary;
 use nioruntime_util::multi_match::Pattern;
@@ -31,13 +39,16 @@ use nioruntime_util::ser::{serialize, BinReader, Serializable};
 use nioruntime_util::ser::{Reader, Writer};
 use nioruntime_util::StaticHash;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 warn!();
+
+const HOUR_MILLIS: u128 = 1000 * 60 * 60;
+const DAY_MILLIS: u128 = HOUR_MILLIS * 24;
 
 const WS_ADMIN_GET_STATS_REQUEST: u8 = 0u8;
 const WS_ADMIN_GET_STATS_RESPONSE: u8 = 0u8;
@@ -48,7 +59,6 @@ const WS_ADMIN_GET_RECENT_REQUESTS: u8 = 3u8;
 const WS_ADMIN_RECENT_REQUESTS_RESPONSE: u8 = 3u8;
 const WS_ADMIN_REQUEST_CHART_REQUEST: u8 = 4u8;
 const WS_ADMIN_REQUEST_CHART_RESPONSE: u8 = 4u8;
-
 const WS_ADMIN_CREATE_RULE: u8 = 9u8;
 const WS_ADMIN_CREATE_RULE_RESPONSE: u8 = 9u8;
 const WS_ADMIN_GET_RULES: u8 = 10u8;
@@ -60,6 +70,11 @@ const WS_ADMIN_DELETE_RULE_RESPONSE: u8 = 13u8;
 const WS_ADMIN_GET_DATA: u8 = 14u8;
 const WS_ADMIN_GET_DATA_RESPONSE: u8 = 14u8;
 const WS_ADMIN_ERROR_REPLY: u8 = 15u8;
+
+const WS_ADMIN_GET_DATA_REAL_TIME: u8 = 0;
+const WS_ADMIN_GET_DATA_HOURLY: u8 = 1;
+const WS_ADMIN_GET_DATA_DAILY: u8 = 2;
+const WS_ADMIN_GET_DATA_MONTHLY: u8 = 3;
 
 const RULE_TYPE_AND: u8 = 1;
 const RULE_TYPE_OR: u8 = 2;
@@ -287,11 +302,13 @@ impl TimestampCountPair {
 #[derive(Clone)]
 pub struct HttpAdmin {
 	db: HttpData,
+	config: HttpConfig,
 }
 
 impl HttpAdmin {
-	pub fn new(db: HttpData) -> Result<Self, Error> {
-		Ok(Self { db })
+	pub fn new(db: HttpData, config: &HttpConfig) -> Result<Self, Error> {
+		let config = config.clone();
+		Ok(Self { db, config })
 	}
 
 	pub fn get_active_rules(&self) -> Result<Vec<FunctionalRule>, Error> {
@@ -381,7 +398,7 @@ impl HttpAdmin {
 		Ok(ret)
 	}
 
-	fn set_active_rules(&self, rules: HashSet<u64>) -> Result<Vec<FunctionalRule>, Error> {
+	pub fn set_active_rules(&self, rules: HashSet<u64>) -> Result<Vec<FunctionalRule>, Error> {
 		let mut ret = vec![];
 		let db = lockw!(self.db.db())?;
 		let batch = db.batch()?;
@@ -414,7 +431,7 @@ impl HttpAdmin {
 				let mut key = vec![USER_RECORD_PREFIX];
 				key.append(&mut id.to_be_bytes().to_vec());
 				key.append(&mut last.to_be_bytes().to_vec());
-				let value = (0 as u64).to_be_bytes().to_vec();
+				let value = (0 as u64).to_be_bytes();
 				batch.put_ser(&key, &value)?;
 			}
 		}
@@ -444,6 +461,258 @@ impl HttpAdmin {
 		}
 		batch.commit()?;
 		Ok(ret)
+	}
+
+	fn process_get_data(
+		&self,
+		start: u64,
+		end: u64,
+		time_frame: u8,
+		count: u64,
+		ids: Vec<u64>,
+		config: &HttpConfig,
+	) -> Result<Vec<u8>, Error> {
+		let db = lockw!(self.db.db())?;
+		let batch = db.batch()?;
+		let mut payload = vec![WS_ADMIN_GET_DATA_RESPONSE];
+		payload.append(&mut count.to_be_bytes().to_vec());
+		for id in ids {
+			let timestamp1;
+			let buckets = if time_frame == WS_ADMIN_GET_DATA_HOURLY {
+				timestamp1 = (start / HOUR_MILLIS as u64) * HOUR_MILLIS as u64;
+				let end = end / HOUR_MILLIS as u64;
+				let start = start / HOUR_MILLIS as u64;
+				end.saturating_sub(start)
+			} else if time_frame == WS_ADMIN_GET_DATA_DAILY {
+				timestamp1 = (start / DAY_MILLIS as u64) * DAY_MILLIS as u64;
+				let end = end / DAY_MILLIS as u64;
+				let start = start / DAY_MILLIS as u64;
+				end.saturating_sub(start)
+			} else if time_frame == WS_ADMIN_GET_DATA_MONTHLY {
+				let end = end / 1000;
+				let start = start / 1000;
+				let date_end = NaiveDateTime::from_timestamp(end.try_into()?, 0).date();
+				let date_start = NaiveDateTime::from_timestamp(start.try_into()?, 0).date();
+				let end_month: u128 = date_end.month().try_into()?;
+				let end_year: u128 = date_end.year().try_into()?;
+				let start_month: u128 = date_start.month().try_into()?;
+				let start_year: u128 = date_start.year().try_into()?;
+				let end = end_month + end_year.saturating_sub(1970) * 12;
+				let start = start_month + start_year.saturating_sub(1970) * 12;
+
+				let start_date: NaiveDateTime =
+					NaiveDate::from_ymd(start_year.try_into()?, start_month.try_into()?, 1)
+						.and_hms(0, 0, 0);
+				let start_date: u64 = start_date.timestamp().try_into()?;
+				timestamp1 = start_date * 1000;
+
+				end.saturating_sub(start) as u64
+			} else {
+				timestamp1 = start;
+				// real time
+				end.saturating_sub(start) as u64 / config.stats_frequency as u64
+			};
+			if buckets == 0 {
+				return Err(ErrorKind::IllegalArgument(format!(
+					"timeframe too short, end less than begining. end={},start={}, time_frame={}",
+					end, start, time_frame
+				))
+				.into());
+			}
+			let bucket_delta = end.saturating_sub(start) / buckets;
+
+			let mut bucket_counts = vec![];
+			for _ in 0..(buckets + 1) {
+				bucket_counts.push(0 as u64);
+			}
+
+			// for id == 0 (all requests, we can ignore this.)
+			let mut first_timestamp = if id == 0 { 0 } else { u64::MAX };
+			let mut itt = self.get_iterator(id, WS_ADMIN_GET_DATA_REAL_TIME, &batch)?;
+			loop {
+				match itt.next() {
+					Some(pair) => {
+						if pair.timestamp < first_timestamp {
+							first_timestamp = pair.timestamp;
+						}
+						if pair.timestamp < start {
+							break;
+						}
+					}
+					None => break,
+				}
+			}
+
+			let mut timestamps = vec![];
+
+			if time_frame == WS_ADMIN_GET_DATA_MONTHLY {
+				timestamps.push(timestamp1);
+				let ts = timestamp1 / 1000;
+				let dt = NaiveDateTime::from_timestamp(ts.try_into()?, 0).date();
+				let mut cur_year = dt.year();
+				let mut cur_month = dt.month();
+				for _ in 0..buckets {
+					cur_month += 1;
+					if cur_month >= 13 {
+						cur_month = 1;
+						cur_year += 1;
+					}
+					let next_date_time =
+						NaiveDate::from_ymd(cur_year.try_into()?, cur_month.try_into()?, 1)
+							.and_hms(0, 0, 0);
+					let timestamp = next_date_time.timestamp();
+					let timestamp = timestamp * 1000;
+					timestamps.push(timestamp.try_into()?);
+				}
+			} else {
+				timestamps.push(timestamp1);
+				for i in 0..buckets {
+					let timestamp = timestamp1 + ((1 + i as u64) * bucket_delta);
+					timestamps.push(timestamp);
+				}
+			}
+
+			let mut first_bucket: usize = timestamps.len() - 1;
+			loop {
+				if first_timestamp > timestamps[first_bucket] {
+					break;
+				}
+				first_bucket = first_bucket.saturating_sub(1);
+				if first_bucket == 0 {
+					break;
+				}
+			}
+
+			let itts = vec![
+				self.get_iterator(id, WS_ADMIN_GET_DATA_REAL_TIME, &batch)?,
+				self.get_iterator(id, WS_ADMIN_GET_DATA_HOURLY, &batch)?,
+				self.get_iterator(id, WS_ADMIN_GET_DATA_DAILY, &batch)?,
+				self.get_iterator(id, WS_ADMIN_GET_DATA_MONTHLY, &batch)?,
+			];
+			for mut itt in itts {
+				let mut cur_slot = bucket_counts.len() - 1;
+				loop {
+					match itt.next() {
+						Some(pair) => {
+							if pair.timestamp < start {
+								break;
+							} else if pair.timestamp < end {
+								loop {
+									if cur_slot == 0 || pair.timestamp > timestamps[cur_slot] {
+										break;
+									}
+									cur_slot -= 1;
+								}
+								bucket_counts[cur_slot as usize] += pair.count;
+							}
+						}
+						None => {
+							break;
+						}
+					}
+				}
+			}
+
+			if time_frame == WS_ADMIN_GET_DATA_REAL_TIME {
+				// for real time, we don't keep the last entry
+				payload.append(
+					&mut (timestamps.len() - (first_bucket + 1))
+						.to_be_bytes()
+						.to_vec(),
+				);
+				for i in first_bucket..buckets as usize {
+					payload.append(&mut timestamps[i as usize].to_be_bytes().to_vec());
+					payload.append(&mut bucket_counts[i as usize].to_be_bytes().to_vec());
+				}
+			} else {
+				payload.append(&mut (timestamps.len() - first_bucket).to_be_bytes().to_vec());
+				for i in first_bucket..(buckets + 1) as usize {
+					payload.append(&mut timestamps[i as usize].to_be_bytes().to_vec());
+					payload.append(&mut bucket_counts[i as usize].to_be_bytes().to_vec());
+				}
+			}
+		}
+
+		Ok(payload)
+	}
+
+	fn get_iterator(
+		&self,
+		id: u64,
+		time_frame: u8,
+		batch: &Batch,
+	) -> Result<impl Iterator<Item = TimestampCountPair>, Error> {
+		let search = if id == 0 {
+			if time_frame == WS_ADMIN_GET_DATA_REAL_TIME {
+				vec![STAT_RECORD_PREFIX]
+			} else {
+				vec![STAT_RECORD_DAILY_PREFIX]
+			}
+		} else {
+			let mut ret;
+			if time_frame == WS_ADMIN_GET_DATA_HOURLY {
+				ret = vec![USER_RECORD_HOURLY_PREFIX];
+			} else if time_frame == WS_ADMIN_GET_DATA_DAILY {
+				ret = vec![USER_RECORD_DAILY_PREFIX];
+			} else if time_frame == WS_ADMIN_GET_DATA_MONTHLY {
+				ret = vec![USER_RECORD_MONTHLY_PREFIX];
+			} else {
+				ret = vec![USER_RECORD_PREFIX];
+			}
+			ret.append(&mut id.to_be_bytes().to_vec());
+			ret
+		};
+
+		batch.iter(&search, move |k, v| {
+			if id == 0 && time_frame == WS_ADMIN_GET_DATA_REAL_TIME {
+				let timestamp = invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+				let timestamp: u64 = timestamp.try_into()?;
+				let mut cursor = Cursor::new(v.to_vec());
+				cursor.set_position(0);
+				let mut reader = BinReader::new(&mut cursor);
+				let sr = StatRecord::read(&mut reader)?;
+
+				let count = sr.requests;
+				Ok(TimestampCountPair::new(timestamp, count))
+			} else if id == 0 && time_frame == WS_ADMIN_GET_DATA_DAILY {
+				let timestamp = invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+				let timestamp: u64 = timestamp.try_into()?;
+				let timestamp = timestamp * DAY_MILLIS as u64;
+				let mut cursor = Cursor::new(v.to_vec());
+				cursor.set_position(0);
+				let mut reader = BinReader::new(&mut cursor);
+				let sr = StatRecord::read(&mut reader)?;
+				let count = sr.requests;
+				Ok(TimestampCountPair::new(timestamp, count))
+			} else if id == 0 {
+				let timestamp = invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
+				let timestamp: u64 = timestamp.try_into()?;
+				Ok(TimestampCountPair::new(timestamp, 0))
+			} else {
+				let count = u64::from_be_bytes(v[0..8].try_into()?);
+				let timestamp = u128::from_be_bytes(k[9..25].try_into()?);
+				let timestamp = if time_frame == WS_ADMIN_GET_DATA_HOURLY {
+					timestamp * HOUR_MILLIS
+				} else if time_frame == WS_ADMIN_GET_DATA_DAILY {
+					timestamp * DAY_MILLIS
+				} else if time_frame == WS_ADMIN_GET_DATA_MONTHLY {
+					let timestamp = invert_timestamp128(timestamp);
+					let year = (timestamp / 12) + 1970;
+					let month = (timestamp % 12) + 1;
+					let date: NaiveDateTime =
+						NaiveDate::from_ymd(year.try_into()?, month.try_into()?, 1)
+							.and_hms(0, 0, 0);
+					let monthly_timestamp: u128 = date.timestamp().try_into()?;
+					let monthly_timestamp = monthly_timestamp * 1_000;
+					invert_timestamp128(monthly_timestamp)
+				} else {
+					timestamp
+				};
+				let timestamp = invert_timestamp128(timestamp);
+				let timestamp: u64 = timestamp.try_into()?;
+				Ok(TimestampCountPair::new(timestamp, count))
+			}
+		})
 	}
 
 	pub fn process_admin_ws(
@@ -590,123 +859,22 @@ impl HttpAdmin {
 					}
 				}
 				WS_ADMIN_GET_DATA => {
+					let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
 					let start = u64::from_be_bytes(msg.payload[1..9].try_into()?);
 					let end = u64::from_be_bytes(msg.payload[9..17].try_into()?);
-					let count = u64::from_be_bytes(msg.payload[17..25].try_into()?);
-					let mut payload = vec![WS_ADMIN_GET_DATA_RESPONSE];
-					payload.append(&mut count.to_be_bytes().to_vec());
-
-					let db = lockw!(self.db.db())?;
-					let batch = db.batch()?;
-
+					let start = now.saturating_sub(start);
+					let end = now.saturating_sub(end);
+					let time_frame = msg.payload[17];
+					let count = u64::from_be_bytes(msg.payload[18..26].try_into()?);
+					let mut ids = vec![];
 					for i in 0..count {
-						let id = u64::from_be_bytes(
-							msg.payload[25 + i as usize * 8..33 + i as usize * 8].try_into()?,
-						);
-
-						// 0 a special case for total request count
-						let search = if id == 0 {
-							vec![STAT_RECORD_PREFIX]
-						} else {
-							let mut ret = vec![USER_RECORD_PREFIX];
-							ret.append(&mut id.to_be_bytes().to_vec());
-							ret
-						};
-						let mut first_timestamp = u64::MAX;
-						let mut itt = batch.iter(&search, |k, v| {
-							if id == 0 {
-								let timestamp =
-									invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
-								let timestamp: u64 = timestamp.try_into()?;
-								let mut cursor = Cursor::new(v.to_vec());
-								cursor.set_position(0);
-								let mut reader = BinReader::new(&mut cursor);
-								let sr = StatRecord::read(&mut reader)?;
-
-								let count = sr.requests;
-								Ok(TimestampCountPair::new(timestamp, count))
-							} else {
-								let count = u64::from_be_bytes(v[8..16].try_into()?);
-								let timestamp =
-									invert_timestamp128(u128::from_be_bytes(k[9..25].try_into()?));
-								let timestamp: u64 = timestamp.try_into()?;
-								Ok(TimestampCountPair::new(timestamp, count))
-							}
-						})?;
-
-						let mut itt2 = batch.iter(&([STAT_RECORD_PREFIX])[..], |k, _v| {
-							let timestamp =
-								invert_timestamp128(u128::from_be_bytes(k[1..17].try_into()?));
-							Ok(TimestampCountPair::new(timestamp.try_into()?, 0))
-						})?;
-
-						let mut timestamp_count_pairs_value = HashMap::new();
-						let mut timestamp_count_pairs_no_value = HashMap::new();
-						let mut itt_complete = false;
-						let mut itt2_complete = false;
-						loop {
-							if !itt_complete {
-								match itt.next() {
-									Some(pair) => {
-										if pair.timestamp < first_timestamp {
-											first_timestamp = pair.timestamp;
-										}
-										if pair.timestamp >= start && pair.timestamp <= end {
-											timestamp_count_pairs_value
-												.insert(pair.timestamp, pair);
-										} else if pair.timestamp < start {
-											itt_complete = true;
-										}
-									}
-									None => itt_complete = true,
-								}
-							}
-
-							if !itt2_complete {
-								match itt2.next() {
-									Some(pair) => {
-										if pair.timestamp >= start && pair.timestamp <= end {
-											timestamp_count_pairs_no_value
-												.insert(pair.timestamp, pair);
-										} else if pair.timestamp < start {
-											itt2_complete = true;
-										}
-									}
-									None => {
-										itt2_complete = true;
-									}
-								}
-
-								if itt_complete && itt2_complete {
-									break;
-								}
-							}
-						}
-
-						let mut timestamp_count_pairs = vec![];
-						for (k, v) in &timestamp_count_pairs_value {
-							if k >= &first_timestamp {
-								timestamp_count_pairs.push(v.clone());
-							}
-						}
-						for (k, v) in timestamp_count_pairs_no_value {
-							if k >= first_timestamp && timestamp_count_pairs_value.get(&k).is_none()
-							{
-								timestamp_count_pairs.push(v.clone());
-							}
-						}
-
-						timestamp_count_pairs.sort();
-
-						payload.append(&mut timestamp_count_pairs.len().to_be_bytes().to_vec());
-						for j in 0..timestamp_count_pairs.len() {
-							payload.append(
-								&mut timestamp_count_pairs[j].timestamp.to_be_bytes().to_vec(),
-							);
-							payload
-								.append(&mut timestamp_count_pairs[j].count.to_be_bytes().to_vec());
-						}
+						ids.push(u64::from_be_bytes(
+							msg.payload[26 + i as usize * 8..34 + i as usize * 8].try_into()?,
+						));
 					}
+
+					let payload =
+						self.process_get_data(start, end, time_frame, count, ids, &self.config)?;
 
 					Some(WebSocketMessage {
 						payload,
@@ -941,11 +1109,12 @@ mod test {
 			stats_frequency: 10_000,
 			debug_log_queue: false,
 			debug_show_stats: false,
+			debug_db_update: true,
 		};
 
 		let db = HttpData::new(&lmdb_dir)?;
 		let http_stats = HttpStats::new(config, db.clone())?;
-		let http_admin = HttpAdmin::new(db)?;
+		let http_admin = HttpAdmin::new(db, &HttpConfig::default())?;
 
 		let mut payload = vec![WS_ADMIN_CREATE_RULE];
 		let rule1 = Rule::Pattern(Pattern {
@@ -1132,7 +1301,6 @@ mod test {
 
 		let active_cur = http_admin.get_active_rules()?;
 		assert_eq!(active_cur.len(), 1);
-
 		tear_down_test_dir(root_dir)?;
 
 		Ok(())

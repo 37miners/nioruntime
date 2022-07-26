@@ -205,6 +205,13 @@ impl Dictionary {
 				}
 				_ => cur_node.next[check_index],
 			};
+			if index >= self.nodes.len().try_into()? {
+				return Err(ErrorKind::CapacityExceeded(format!(
+					"Dictionary Capacity = {}",
+					self.nodes.len()
+				))
+				.into());
+			}
 			cur_node = &mut self.nodes[index as usize];
 			cur_node.is_multi = is_multi;
 			cur_byte = match regex.next() {

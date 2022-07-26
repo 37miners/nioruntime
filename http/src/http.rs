@@ -162,7 +162,6 @@ where
 		let lmdb_dir = config.lmdb_dir.replace("~", &home_dir);
 
 		let db = HttpData::new(&lmdb_dir)?;
-
 		let stat_handler = StatHandler::new(
 			config.main_log_queue_size,
 			config.evh_config.threads,
@@ -170,6 +169,7 @@ where
 			config.request_log_config.clone(),
 			config.debug_show_stats,
 			config.stats_frequency,
+			config.debug_db_update,
 			db.clone(),
 		)?;
 
@@ -192,7 +192,7 @@ where
 			config.admin_uri = admin_uri;
 		}
 
-		let admin = HttpAdmin::new(db.clone())?;
+		let admin = HttpAdmin::new(db.clone(), &config)?;
 
 		let rule_update = Arc::new(RwLock::new(RuleUpdate {
 			version: 0,
@@ -429,9 +429,7 @@ where
 			};
 			evh.add_listener_handles(handles, tls_config)?;
 		}
-
 		self.run_stats_processor()?;
-
 		self.show_config()?;
 
 		set_config_option!(Settings::Level, true)?;
@@ -848,6 +846,7 @@ where
 		self.debug_flag("--debug_proxy", self.config.debug_proxy)?;
 		self.debug_flag("--debug_log_queue", self.config.debug_log_queue)?;
 		self.debug_flag("--debug_show_stats", self.config.debug_show_stats)?;
+		self.debug_flag("--debug_db_update", self.config.debug_db_update)?;
 		self.debug_flag(
 			"--delete_request_log_rotation",
 			self.config.request_log_config.delete_rotation,
@@ -4281,13 +4280,23 @@ Sec-WebSocket-Accept: {}\r\n\r\n",
 					.into());
 				}
 			};
-			thread_context.matcher = ThreadContext::build_matcher(
+			match ThreadContext::build_matcher(
 				config.max_matches,
 				config.max_header_size,
 				config.dictionary_capacity,
 				config.max_header_size,
 				thread_context.rules.clone(),
-			)?;
+			) {
+				Ok(nmatcher) => {
+					thread_context.matcher = nmatcher;
+				}
+				Err(e) => {
+					error!(
+						"Could not build matcher due to error: {}, reverting to previous matcher",
+						e
+					)?;
+				}
+			}
 		}
 
 		Ok(())

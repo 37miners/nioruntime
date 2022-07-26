@@ -58,6 +58,10 @@ args:
         help: Show debugging information for websocket requests. The debug configuration creates a dummy websocket handler for testing purposes. This flag must NOT be set in a production environment.
         long: debug_websocket
         takes_value: false
+    - debug_db_update:
+        help: Show debugging information for stats and admin db updates. This flag must NOT be set in a production environment.
+        long: debug_db_update
+        takes_value: false
     - debug_log_queue:
         help: Show debugging information related to the log queue. This flag must NOT be set in a production environment.
         long: debug_log_queue

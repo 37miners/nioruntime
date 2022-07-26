@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod admin;
+pub mod admin;
 mod cache;
-mod data;
+pub mod data;
 mod http;
 mod proxy;
-mod stats;
+pub mod stats;
 mod test;
-mod types;
+pub mod types;
 mod websocket;
 
 pub use crate::http::HttpServer;

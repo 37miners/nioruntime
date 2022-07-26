@@ -17,6 +17,11 @@ const WS_ADMIN_DELETE_RULE_RESPONSE              = 13;
 const WS_ADMIN_GET_DATA                          = 14;
 const WS_ADMIN_GET_DATA_RESPONSE                 = 14;
 
+const WS_ADMIN_GET_DATA_REAL_TIME                = 0;
+const WS_ADMIN_GET_DATA_HOURLY                   = 1;
+const WS_ADMIN_GET_DATA_DAILY                    = 2;
+const WS_ADMIN_GET_DATA_MONTHLY                  = 3;
+
 const METHOD_GET     = 0;
 const METHOD_POST    = 1;
 const METHOD_PUT     = 2;
@@ -37,6 +42,8 @@ const MAX_USER_MATCHES = 10;
 const MAX_BAR_CHART_SIZE = 25;
 
 var last_chart_type = 'line';
+var last_chart_timeframe = WS_ADMIN_GET_DATA_REAL_TIME;
+var last_start_timestamp = (1000 * 60 * 60);
 var csv_data_sets;
 var rules = [];
 var rule_labels = [];
@@ -788,7 +795,11 @@ function process_get_most_recent_requests(buffer) {
 	}
 }
 
-function format_date(date) {
+function format_date(timestamp, time_frame) {
+	var date = new Date(timestamp);
+	var day_of_month = date.getDate();
+	var full_year = date.getFullYear();
+	var month = 1 + date.getMonth();
 	var hours = date.getHours();
 	var minutes = date.getMinutes();
 	var seconds = date.getSeconds();
@@ -807,8 +818,26 @@ function format_date(date) {
 		hours -= 12;
 		am_pm = 'PM';
 	}
+	if(hours == 0) {
+		hours = 12;
+	}
 
-	return hours + ':' + minutes + ':' + seconds + ' ' + am_pm;
+	if(time_frame == WS_ADMIN_GET_DATA_REAL_TIME) {
+		return hours + ':' + minutes + ':' + seconds + ' ' + am_pm;
+	} else if(time_frame == WS_ADMIN_GET_DATA_HOURLY) {
+		return hours + ':00 ' + am_pm + ' ' + month + '/' + day_of_month + '/' + full_year;
+	} else if(time_frame == WS_ADMIN_GET_DATA_MONTHLY) {
+		console.log('monthly date of ' + date);
+		var month = 1 + date.getUTCMonth();
+		var full_year = date.getUTCFullYear();
+		return month + '/' + full_year;
+	} else {
+		// days are in UTC.
+		var day_of_month = date.getUTCDate();
+		var full_year = date.getUTCFullYear();
+		var month = 1 + date.getUTCMonth();
+		return month + '/' + day_of_month + '/' + full_year;
+	}
 }
 
 function process_request_chart_response(buffer) {
@@ -837,8 +866,7 @@ function process_request_chart_response(buffer) {
 		var connects = connects / (duration / 1000);
 		var memory_bytes = memory_bytes / (1024 * 1024);
 		data.push(requests);
-		var date = new Date(timestamp);
-		labels.push(format_date(date));
+		labels.push(format_date(timestamp, WS_ADMIN_GET_DATA_REAL_TIME));
 		latencies.push(avg_latency);
 		connects_arr.push(connects);
 		memory_bytes_arr.push(memory_bytes);
@@ -1041,7 +1069,7 @@ function load_charts_niohttpd() {
 
 }
 
-function graph_data(ids, start, end, id_labels, is_full_screen, chart_type) {
+function graph_data(ids, start, end, id_labels, is_full_screen, chart_type, time_frame) {
 	csv_data_sets = '';
         var loc = window.location, new_uri;
 	if (loc.protocol === "https:") {
@@ -1093,7 +1121,7 @@ function graph_data(ids, start, end, id_labels, is_full_screen, chart_type) {
 					offset += 8;
 					var count = to_u64(buffer, offset);
 					offset += 8;
-					labels_inner.push(format_date(new Date(timestamp/1)));
+					labels_inner.push(format_date(timestamp/1, time_frame));
 					data_inner.push(Number(count));
 				}
 
@@ -1252,22 +1280,39 @@ function graph_data(ids, start, end, id_labels, is_full_screen, chart_type) {
 	}
 
 	sock.addEventListener('open', function(event) {
-		console.log('pre send: ' + ids + ',ids.length='+ids.length);
-		var len = 25 + 8 * ids.length;
+                console.log('pre send: ' + ids + ',ids.length='+ids.length);
+		var len = 26 + 8 * ids.length;
 		console.log('len='+len);
 		const buffer = new ArrayBuffer(len);
 		var view = new Uint8Array(buffer);
 		view[0] = WS_ADMIN_GET_DATA;
-		var now = Date.now();
 		u64_tobin(new BigInteger(String(start), 10), view, 1);
-		var now = new BigInteger(String(end), 10);
-		u64_tobin(now, view, 9);
-		u64_tobin(new BigInteger(String(ids.length), 10), view, 17);
+		u64_tobin(new BigInteger(String(end), 10), view, 9);
+		view[17] = time_frame;
+		u64_tobin(new BigInteger(String(ids.length), 10), view, 18);
 		for(var i=0; i<ids.length; i++) {
-			u64_tobin(new BigInteger(String(ids[i]), 10), view, 25 + i * 8);
+			u64_tobin(new BigInteger(String(ids[i]), 10), view, 26 + i * 8);
 		}
 		console.log('send graph req:' + view + ",view.leng="+view.length);
 		sock.send(buffer);
+
+		/*
+		console.log('pre send: ' + ids + ',ids.length='+ids.length);
+		var len = 26 + 8 * ids.length;
+		console.log('len='+len);
+		const buffer = new ArrayBuffer(len);
+		var view = new Uint8Array(buffer);
+		view[0] = WS_ADMIN_GET_DATA;
+		u64_tobin(new BigInteger(String(start), 10), view, 1);
+		u64_tobin(new BigInteger(String(end), 10), view, 9);
+		view[17] = WS_ADMIN_GET_DATA_REAL_TIME;
+		u64_tobin(new BigInteger(String(ids.length), 10), view, 18);
+		for(var i=0; i<ids.length; i++) {
+			u64_tobin(new BigInteger(String(ids[i]), 10), view, 26 + i * 8);
+		}
+		console.log('send graph req:' + view + ",view.leng="+view.length);
+		sock.send(buffer);
+		*/
 	});
 }
 
@@ -1306,14 +1351,7 @@ function set_active_ids(ids) {
                 const buffer = new ArrayBuffer((8*count) + 9);
                 const view = new Uint8Array(buffer);
                 view[0] = WS_ADMIN_SET_ACTIVE_RULES;
-                view[1] = 0;
-                view[2] = 0;
-		view[3] = 0;
-		view[4] = 0;
-		view[5] = 0;
-		view[6] = 0;
-		view[7] = 0;
-		view[8] = count;
+		u64_tobin(new BigInteger(String(count), 10), view, 1);
 
 		for(var i=0; i<count; i++) {
 			u64_tobin(new BigInteger(String(ids[i]), 10), view, 9 + (i*8));
@@ -1560,7 +1598,8 @@ function set_view_rule(label) {
 	viewRule = label;
 
 	last_chart_type = 'line';
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'line');
+	last_start_timestamp = (1000 * 60 * 60);
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, 'line', WS_ADMIN_GET_DATA_REAL_TIME);
 }
 
 function create_expr(label, rules, delete_subs) {
@@ -1602,7 +1641,7 @@ function validateCode(code) {
 	return true;
 }
 
-function create_new(label, regex) {
+function create_new(label, regex, is_multi) {
 	if(regex.length == 0) {
 		var error_text = document.getElementById("pattern_input_error_text");
 		error_text.style.display = 'block';
@@ -1645,7 +1684,7 @@ function create_new(label, regex) {
 			}
 		}
 		if(success) {
-			var rule = new Rule(RULE_TYPE_PATTERN, regex, true);
+			var rule = new Rule(RULE_TYPE_PATTERN, regex, is_multi);
 			create_rule(label, rule);
 			$('#pattern_input_modal').modal('hide');
 		}
@@ -1829,11 +1868,27 @@ function create_dom(label, rule, is_active) {
 			view_rule_ids.push(0);
 			view_rule_labels.push('All Requests');
 			console.log('graph view_rule_ids = ' + view_rule_ids + ' , view_rule_labels = ' + view_rule_labels);
-			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, last_chart_type);
+			graph_data(
+				view_rule_ids,
+				last_start_timestamp,
+				0,
+				view_rule_labels,
+				false,
+				last_chart_type,
+				last_chart_timeframe,
+			);
 		} else {
 			view_rule_ids.push(rule_ids[label]);
 			view_rule_labels.push(label);
-			graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, last_chart_type);
+			graph_data(
+				view_rule_ids,
+				last_start_timestamp,
+				0,
+				view_rule_labels,
+				false,
+				last_chart_type,
+				last_chart_timeframe,
+			);
 		}
 		openMulti();
 	}
@@ -1895,10 +1950,9 @@ function resetAllMenus() {
 }
 
 function full_screen() {
-	console.log("view_rule.style.zIndex=" + document.getElementById('view_rule').style.zIndex + ",graph_full_screen.style.zIndex=" + document.getElementById('graph_full_screen').style.zIndex);
 	document.getElementById('view_rule').style.zIndex = "2000";
 	document.getElementById('graph_full_screen').style.zIndex = "2001";
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, true, last_chart_type);
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, true, last_chart_type, last_chart_timeframe);
 	$("#graph_full_screen").modal({backdrop: 'static', keyboard: false});
 }
 
@@ -1934,16 +1988,40 @@ function download(data, filename, type) {
 
 function to_pie() {
 	last_chart_type = 'pie';
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'pie');
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
 }
 
 function to_bar() {
 	last_chart_type = 'bar';
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'bar');
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
 }
 
 function to_line() {
 	last_chart_type = 'line';
-	graph_data(view_rule_ids, Date.now() - (1000 * 60 * 60), Date.now(), view_rule_labels, false, 'line');
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
+}
+
+function to_realtime() {
+	last_chart_timeframe = WS_ADMIN_GET_DATA_REAL_TIME;
+	last_start_timestamp = (1000 * 60 * 60);
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
+}
+
+function to_hourly() {
+	last_chart_timeframe = WS_ADMIN_GET_DATA_HOURLY;
+	last_start_timestamp = (1000 * 60 * 60) * 24 * 7;
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
+}
+
+function to_daily() {
+	last_chart_timeframe = WS_ADMIN_GET_DATA_DAILY;
+	last_start_timestamp = (1000 * 60 * 60) * 24 * 60;
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
+}
+
+function to_monthly() {
+	last_chart_timeframe = WS_ADMIN_GET_DATA_MONTHLY;
+	last_start_timestamp = (1000 * 60 * 60) * 24 * 30 * 12;
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, last_chart_type, last_chart_timeframe);
 }
 

@@ -2274,7 +2274,7 @@ function MultipleContainers() {
     var now = new Date().getTime();
     var timestamp = lastDragEvent[label];
 
-    if (now - timestamp < 500) {
+    if (now - timestamp < 1000) {
       set_view_rule(label);
       $("#view_rule").modal();
     }

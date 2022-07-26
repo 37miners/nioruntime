@@ -447,6 +447,7 @@ impl StatHandler {
 		request_log_config: LogConfig,
 		debug_show_stats: bool,
 		stats_frequency: u64,
+		debug_db_update: bool,
 		data: HttpData,
 	) -> Result<Self, Error> {
 		Ok(Self {
@@ -457,6 +458,7 @@ impl StatHandler {
 					debug_show_stats,
 					request_log_config,
 					stats_frequency,
+					debug_db_update,
 				},
 				data,
 			)?,
@@ -607,13 +609,28 @@ impl ThreadContext {
 
 		let rules = admin.get_active_rules()?;
 
-		let matcher = Self::build_matcher(
+		let matcher = match ThreadContext::build_matcher(
 			config.max_matches,
 			config.max_header_size,
 			config.dictionary_capacity,
 			config.max_header_size,
 			rules.clone(),
-		)?;
+		) {
+			Ok(nmatcher) => nmatcher,
+			Err(e) => {
+				error!(
+					"Could not build matcher due to error: {}, reverting to default matcher",
+					e
+				)?;
+				ThreadContext::build_matcher(
+					config.max_matches,
+					config.max_header_size,
+					config.dictionary_capacity,
+					config.max_header_size,
+					vec![],
+				)?
+			}
+		};
 
 		let rule_update = rule_update.clone();
 
@@ -1591,6 +1608,7 @@ pub struct HttpConfig {
 	pub debug_websocket: bool,
 	pub debug_proxy: bool,
 	pub debug_log_queue: bool,
+	pub debug_db_update: bool,
 	pub mainlog: String,
 	pub mainlog_max_age: u128,
 	pub mainlog_max_size: u64,
@@ -1678,6 +1696,7 @@ impl Default for HttpConfig {
 			debug_proxy: false, // same as above
 			debug_log_queue: false,
 			debug_show_stats: false,
+			debug_db_update: false,
 			debug: false, // general debugging including log to stdout
 			error_page: "/error.html".as_bytes().to_vec(),
 			main_log_queue_size: 10_000,

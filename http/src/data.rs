@@ -21,6 +21,10 @@ use std::sync::{Arc, RwLock};
 pub const STAT_RECORD_PREFIX: u8 = 1u8;
 pub const RULE_PREFIX: u8 = 2u8;
 pub const USER_RECORD_PREFIX: u8 = 3u8;
+pub const USER_RECORD_HOURLY_PREFIX: u8 = 4u8;
+pub const USER_RECORD_DAILY_PREFIX: u8 = 5u8;
+pub const USER_RECORD_MONTHLY_PREFIX: u8 = 6u8;
+pub const STAT_RECORD_DAILY_PREFIX: u8 = 7u8;
 
 #[derive(Clone)]
 pub struct HttpData {
