@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod admin;
+mod admin;
+mod api;
 mod cache;
-pub mod data;
+mod data;
 mod http;
 mod proxy;
-pub mod stats;
+mod stats;
 mod test;
-pub mod types;
+mod types;
 mod websocket;
 
+pub use crate::admin::{HttpAdmin, Rule};
+pub use crate::data::HttpData;
 pub use crate::http::HttpServer;
 pub use crate::stats::LogItem;
+pub use crate::stats::{HttpStats, HttpStatsConfig, StatRecord};
 pub use crate::types::{
 	ApiContext, HealthCheck, HttpApiConfig, HttpConfig, HttpHeaders, ListenerType, ProxyConfig,
 	ProxyEntry, ProxyRotation, Upstream,

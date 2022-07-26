@@ -14,6 +14,7 @@
 
 use crate::admin::FunctionalRule;
 use crate::admin::HttpAdmin;
+use crate::api::Api;
 use crate::cache::HttpCache;
 use crate::data::HttpData;
 use crate::proxy::{
@@ -111,6 +112,7 @@ pub struct HttpServer<ApiHandler, WsHandler> {
 	evh_params: Option<EvhParams>,
 	internal_files: HashMap<String, Vec<u8>>,
 	rule_update: Arc<RwLock<RuleUpdate>>,
+	data_api: Api,
 }
 
 impl<ApiHandler, WsHandler> HttpServer<ApiHandler, WsHandler>
@@ -162,6 +164,7 @@ where
 		let lmdb_dir = config.lmdb_dir.replace("~", &home_dir);
 
 		let db = HttpData::new(&lmdb_dir)?;
+
 		let stat_handler = StatHandler::new(
 			config.main_log_queue_size,
 			config.evh_config.threads,
@@ -172,6 +175,8 @@ where
 			config.debug_db_update,
 			db.clone(),
 		)?;
+
+		let data_api = Api::new(db.db().clone(), stat_handler.http_stats.clone())?;
 
 		if config.admin_uri.len() == 0 {
 			let mut key = [0u8; 32];
@@ -210,6 +215,7 @@ where
 			admin,
 			internal_files: HashMap::new(),
 			rule_update,
+			data_api,
 		})
 	}
 
@@ -464,6 +470,10 @@ where
 		let mut self_config = lockw!(self.api_config)?;
 		*self_config = api_config;
 		Ok(())
+	}
+
+	pub fn get_api(&self) -> Result<Api, Error> {
+		Ok(self.data_api.clone())
 	}
 
 	fn check_config(config: &HttpConfig) -> Result<(), Error> {

@@ -359,6 +359,18 @@ pub struct HttpStatsConfig {
 	pub debug_db_update: bool,
 }
 
+impl Default for HttpStatsConfig {
+	fn default() -> Self {
+		Self {
+			request_log_config: LogConfig::default(),
+			stats_frequency: 10_000,
+			debug_log_queue: false,
+			debug_show_stats: false,
+			debug_db_update: false,
+		}
+	}
+}
+
 #[derive(Clone, Debug, Serializable)]
 pub struct StatRecord {
 	pub requests: u64,
@@ -606,6 +618,20 @@ impl HttpStats {
 		Ok(())
 	}
 
+	pub fn create_user_record(
+		batch: &Batch,
+		id: u64,
+		timestamp: u128,
+		value: u64,
+	) -> Result<(), Error> {
+		let mut user_record_key = vec![];
+		user_record_key.push(USER_RECORD_PREFIX);
+		user_record_key.append(&mut id.to_be_bytes().to_vec());
+		user_record_key.append(&mut invert_timestamp128(timestamp).to_be_bytes().to_vec());
+		batch.put_ser(&user_record_key, &value)?;
+		Ok(())
+	}
+
 	pub fn process_stats(
 		stat_record_accumulator: &Arc<RwLock<StatRecord>>,
 		user_match_accumulator: &Arc<RwLock<HashMap<u64, u64>>>,
@@ -646,8 +672,8 @@ impl HttpStats {
 
 		let mut stat_record_key = vec![];
 		stat_record_key.push(STAT_RECORD_PREFIX);
-		let timestamp = invert_timestamp128(stat_record_accumulator.timestamp);
-		stat_record_key.append(&mut timestamp.to_be_bytes().to_vec());
+		let timestamp = stat_record_accumulator.timestamp;
+		stat_record_key.append(&mut invert_timestamp128(timestamp).to_be_bytes().to_vec());
 
 		{
 			let db = lockw!(db)?;
@@ -655,11 +681,7 @@ impl HttpStats {
 			batch.put_ser(&stat_record_key, &stat_record_accumulator)?;
 
 			for (k, v) in user_match_accumulator {
-				let mut user_record_key = vec![];
-				user_record_key.push(USER_RECORD_PREFIX);
-				user_record_key.append(&mut k.to_be_bytes().to_vec());
-				user_record_key.append(&mut timestamp.to_be_bytes().to_vec());
-				batch.put_ser(&user_record_key, &v)?;
+				Self::create_user_record(&batch, k, timestamp, v)?;
 			}
 
 			batch.commit()?;
@@ -993,6 +1015,22 @@ impl HttpStats {
 		} else {
 			""
 		}
+	}
+
+	pub fn insert_match(&mut self, id: u64) -> Result<(), Error> {
+		let mut user_match_accumulator = lockw!(self.user_match_accumulator)?;
+		let create_entry = match (*user_match_accumulator).get_mut(&id) {
+			Some(match_count_cur) => {
+				*match_count_cur += 1;
+				false
+			}
+			None => true,
+		};
+
+		if create_entry {
+			(*user_match_accumulator).insert(id, 1);
+		}
+		Ok(())
 	}
 
 	pub fn store_log_items<I, J>(&mut self, log_items: I, log_events: J) -> Result<(), Error>

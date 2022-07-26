@@ -16,15 +16,13 @@ use clap::load_yaml;
 use clap::App;
 use nioruntime_deps::dirs;
 use nioruntime_err::Error;
-use nioruntime_http::admin::HttpAdmin;
-use nioruntime_http::admin::Rule;
-use nioruntime_http::data::HttpData;
-use nioruntime_http::data::STAT_RECORD_PREFIX;
-use nioruntime_http::data::USER_RECORD_PREFIX;
-use nioruntime_http::stats::HttpStats;
-use nioruntime_http::stats::HttpStatsConfig;
-use nioruntime_http::stats::StatRecord;
+use nioruntime_http::HttpAdmin;
 use nioruntime_http::HttpConfig;
+use nioruntime_http::HttpData;
+use nioruntime_http::HttpStats;
+use nioruntime_http::HttpStatsConfig;
+use nioruntime_http::Rule;
+use nioruntime_http::StatRecord;
 use nioruntime_log::*;
 use nioruntime_util::lmdb::Batch;
 use nioruntime_util::lmdb::Store;
@@ -34,6 +32,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const STAT_RECORD_PREFIX: u8 = 1u8;
+const USER_RECORD_PREFIX: u8 = 3u8;
 
 debug!();
 
