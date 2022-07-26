@@ -1599,7 +1599,8 @@ function set_view_rule(label) {
 
 	last_chart_type = 'line';
 	last_start_timestamp = (1000 * 60 * 60);
-	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, 'line', WS_ADMIN_GET_DATA_REAL_TIME);
+	last_chart_timeframe = WS_ADMIN_GET_DATA_REAL_TIME;
+	graph_data(view_rule_ids, last_start_timestamp, 0, view_rule_labels, false, 'line', last_chart_timeframe);
 }
 
 function create_expr(label, rules, delete_subs) {
