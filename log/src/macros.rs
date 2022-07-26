@@ -1013,17 +1013,20 @@ macro_rules! log_all {
 ///     let original_timestamp_setting = get_config_option!(Settings::Timestamp)?;
 ///     let original_log_level_setting = get_config_option!(Settings::Level)?;
 ///     let original_line_num_setting = get_config_option!(Settings::LineNum)?;
+///     let original_colors_setting = get_config_option!(Settings::Colors)?;
 ///
 ///     set_config_option!(Settings::Stdout, true);
 ///     set_config_option!(Settings::Timestamp, true);
 ///     set_config_option!(Settings::Level, true);
 ///     set_config_option!(Settings::LineNum, true);
+///     set_config_option!(Settings::Colors, true);
 ///
 ///     log!(INFO, "some data");
 ///     set_config_option!(Settings::Stdout, original_stdout_setting);
 ///     set_config_option!(Settings::Stdout, original_timestamp_setting);
 ///     set_config_option!(Settings::Stdout, original_log_level_setting);
 ///     set_config_option!(Settings::Stdout, original_line_num_setting);
+///     set_config_option!(Settings::Colors, original_colors_setting);
 ///     log!(INFO, "hi");
 ///
 ///
@@ -1053,6 +1056,7 @@ macro_rules! get_config_option {
 						nioruntime_log::Settings::LineNum => log.get_show_line_num(),
 						nioruntime_log::Settings::Level => log.get_show_log_level(),
 						nioruntime_log::Settings::Timestamp => log.get_show_timestamp(),
+						nioruntime_log::Settings::Colors => log.get_colors(),
 					},
 					None => {
 						let error: nioruntime_err::Error =
@@ -1103,6 +1107,11 @@ macro_rules! get_config_option {
 ///     set_config_option!(Settings::Timestamp, false);
 ///     log!(INFO, "hi");
 ///
+///     set_config_option!(Settings::Colors, true);
+///     log!(INFO, "my value = {}", abc);
+///     set_config_option!(Settings::Colors, false);
+///     log!(INFO, "hi");
+///
 ///     // this macro may also specify a particular logger instead of the default logger. To
 ///     // do that, specify the first parameter as the name of the logger.
 ///
@@ -1130,6 +1139,7 @@ macro_rules! set_config_option {
 						nioruntime_log::Settings::LineNum => log.update_show_line_num($value),
 						nioruntime_log::Settings::Level => log.update_show_log_level($value),
 						nioruntime_log::Settings::Timestamp => log.update_show_timestamp($value),
+						nioruntime_log::Settings::Colors => log.update_colors($value),
 					},
 					None => {
 						let error: nioruntime_err::Error =

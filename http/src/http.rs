@@ -437,7 +437,11 @@ where
 			"Server started in {} ms.",
 			self.config.start.elapsed().as_millis()
 		);
-		info!("{}", server_startup.cyan())?;
+
+		match self.config.nocolors {
+			true => info!("{}", server_startup)?,
+			false => info!("{}", server_startup.cyan())?,
+		}
 		set_config_option!(Settings::LineNum, false)?;
 		if !self.config.debug {
 			set_config_option!(Settings::Stdout, false)?;
@@ -520,19 +524,32 @@ where
 		for _ in 0..MIN_LENGTH_STARTUP_LINE_NAME.saturating_sub(name.len()) {
 			name = format!("{} ", name);
 		}
-		info!("{} '{}'", name.yellow(), value)?;
+		match self.config.nocolors {
+			true => info!("{} '{}'", name, value)?,
+			false => info!("{} '{}'", name.yellow(), value)?,
+		}
 		Ok(())
 	}
 
 	fn debug_flag(&self, name: &str, is_set: bool) -> Result<(), Error> {
 		if is_set {
-			info_no_ts!("{}: '{}' flag is set.", "WARNING:".red(), name.green())?;
+			match self.config.nocolors {
+				true => info_no_ts!("{}: '{}' flag is set.", "WARNING:", name)?,
+				false => info_no_ts!("{}: '{}' flag is set.", "WARNING:".red(), name.green())?,
+			}
 		}
 		Ok(())
 	}
 
 	fn show_config(&self) -> Result<(), Error> {
-		info!("{}", from_utf8(&self.config.server_name)?.green())?;
+		if self.config.nocolors {
+			set_config_option!(Settings::Colors, false)?;
+		}
+
+		match self.config.nocolors {
+			true => info!("{}", from_utf8(&self.config.server_name)?)?,
+			false => info!("{}", from_utf8(&self.config.server_name)?.green())?,
+		}
 		info_no_ts!("{}", SEPARATOR)?;
 
 		self.startup_line(
@@ -831,11 +848,18 @@ where
 		)?;
 
 		info_no_ts!("{}", SEPARATOR)?;
-		info_no_ts!(
-			"{}:\nhttp://127.0.0.1:8080{}",
-			"admin_uri".yellow(),
-			std::str::from_utf8(&self.config.admin_uri)?
-		)?;
+		match self.config.nocolors {
+			true => info_no_ts!(
+				"{}:\nhttp://127.0.0.1:8080{}",
+				"admin_uri",
+				std::str::from_utf8(&self.config.admin_uri)?
+			)?,
+			false => info_no_ts!(
+				"{}:\nhttp://127.0.0.1:8080{}",
+				"admin_uri".yellow(),
+				std::str::from_utf8(&self.config.admin_uri)?
+			)?,
+		}
 		info_no_ts!("{}", SEPARATOR)?;
 
 		self.debug_flag("--show_request_headers", self.config.show_request_headers)?;

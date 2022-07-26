@@ -716,6 +716,11 @@ fn real_main() -> Result<(), Error> {
 		false => file_args.is_present("delete_request_log_rotation"),
 	};
 
+	let nocolors = match args.is_present("nocolors") {
+		true => true,
+		false => file_args.is_present("nocolors"),
+	};
+
 	let debug = match args.is_present("debug") {
 		true => true,
 		false => file_args.is_present("debug"),
@@ -896,6 +901,7 @@ fn real_main() -> Result<(), Error> {
 		stats_frequency,
 		main_log_queue_size,
 		thread_log_queue_size,
+		nocolors,
 		debug,
 		debug_api,
 		debug_proxy,

@@ -305,3 +305,7 @@ args:
         long: lmdb_dir
         takes_value: true
         value_name: lmdb_dir
+    - nocolors:
+        help: Do not display colors to stdout.
+        long: nocolors
+        takes_value: false

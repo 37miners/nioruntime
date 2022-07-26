@@ -1629,6 +1629,7 @@ pub struct HttpConfig {
 	pub debug_show_stats: bool,
 	pub stats_frequency: u64,
 	pub admin_uri: Vec<u8>,
+	pub nocolors: bool,
 }
 
 impl Default for HttpConfig {
@@ -1698,6 +1699,7 @@ impl Default for HttpConfig {
 			debug_show_stats: false,
 			debug_db_update: false,
 			debug: false, // general debugging including log to stdout
+			nocolors: false,
 			error_page: "/error.html".as_bytes().to_vec(),
 			main_log_queue_size: 10_000,
 			thread_log_queue_size: 2_000,

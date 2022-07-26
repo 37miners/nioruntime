@@ -40,6 +40,8 @@ pub enum Settings {
 	Level,
 	/// Setting as to whether the logger will print the line number for each line. (true/false).
 	LineNum,
+	/// Setting as to whether the logger will print in color to standard out. (true/false).
+	Colors,
 }
 
 /// Trace level of logging. Should be used for very frequent logging that is only used to debug.
@@ -610,6 +612,25 @@ impl Log {
 	pub fn get_show_stdout(&mut self) -> Result<bool, Error> {
 		match self.log_impl.as_mut() {
 			Some(log_impl) => Ok(log_impl.config.show_stdout),
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
+		}
+	}
+
+	/// Change the color setting.
+	pub fn update_colors(&mut self, colors: bool) -> Result<(), Error> {
+		match self.log_impl.as_mut() {
+			Some(log_impl) => {
+				log_impl.config.colors = colors;
+				Ok(())
+			}
+			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
+		}
+	}
+
+	/// Get the colors setting value.
+	pub fn get_colors(&self) -> Result<bool, Error> {
+		match self.log_impl.as_ref() {
+			Some(log_impl) => Ok(log_impl.config.colors),
 			None => Err(ErrorKind::LogConfigurationError("log_impl None".to_string()).into()),
 		}
 	}
