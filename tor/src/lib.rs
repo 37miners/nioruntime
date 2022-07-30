@@ -20,6 +20,7 @@ mod directory;
 pub mod ed25519;
 pub mod handshake;
 mod kdf;
+mod process;
 mod rand;
 pub mod reader;
 pub mod rsa;

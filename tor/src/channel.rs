@@ -506,6 +506,7 @@ mod test {
 	use crate::ed25519::XDalekPublicKey as PublicKey;
 	use crate::handshake::ntor::NtorClient;
 	use crate::handshake::ClientHandshake;
+	use crate::process::test::TorProcess;
 	use crate::rsa::RsaIdentity;
 	use crate::types::ChannelContext;
 	use crate::types::ChannelDestination;
@@ -529,73 +530,50 @@ mod test {
 
 	info!();
 
-	//#[test]
-	fn _test_channel() -> Result<(), Error> {
+	#[test]
+	fn test_channel() -> Result<(), Error> {
 		let now = Instant::now();
 		let mut wbuf = vec![];
 
-		/*
-		let ed_bytes = base64::decode("5IpiwC9CSzIYZF8vYfsYGF+DvlTm0jPBATT6jhCu0Nw=")?;
-		let rsa_bytes = nioruntime_deps::hex::decode("90F5CAA5C17C3DB7AC305922DD24E1DC2796E11E")?;
-		let mut ntor_onion_bytes: [u8; 32] = [0u8; 32];
-		let ip = "127.0.0.1";
-		let addr = format!("{}:9001", ip);
-				*/
+		// first launch three tor instances
+		let mut process = TorProcess::new();
+		let torrc_path = "torrc";
+		let tor_dir = "./test/router1";
 
-		/*
-		// http://154.35.175.225/tor/status-vote/current/authority
-		//
-		// r Serge ukSoieZLk/qisRTgLConmoVVxTM q4hCVnq2s5RVEcJp9YwlFtrqxQg 2022-07-28
-		// 17:50:04 66.111.2.131 9001 9030
-		// a [2610:1c0:0:5::131]:9001
-		// s Authority Running Stable V2Dir Valid
-		// v Tor 0.4.7.8
-		// pr Cons=1-2 Desc=1-2 DirCache=2 FlowCtrl=1-2 HSDir=2 HSIntro=4-5 HSRend=1-2
-		// Link=1-5 LinkAuth=1,3 Microdesc=1-2 Padding=2 Relay=1-4
-		// w Bandwidth=102 Measured=41
-		// p reject 1-65535
-		// id ed25519 HymdZCakUvsQMKzuBkx9z1yv80GMifRMXyNG6biXrwA
-		// stats wfu=1.000000 tk=14724748 mtbf=14724748
-		// m 28,29 sha256=PCoPGNB0inD3S1XIUslSxso5coRKw4X7egNCrkBcARM
-		// m 30,31,32 sha256=ixPpwymlWxEoepVy6l8GFvoB8en4VguKliX1hCYmxCg
-		let ed_bytes = base64::decode("HymdZCakUvsQMKzuBkx9z1yv80GMifRMXyNG6biXrwA=")?;
-		let ip = "66.111.2.131";
-		let addr = format!("{}:9001", ip);
-		let rsa_bytes = base64::decode("ukSoieZLk/qisRTgLConmoVVxTM=")?;
+		// note we use 0% because this configuration is a testnet which is never
+		// bootstrapped.
+		let _res1 = process
+			.torrc_path(&torrc_path)
+			.working_dir(&tor_dir)
+			.timeout(200)
+			.completion_percent(0)
+			.launch();
 
-		// http://154.35.175.225/tor/micro/d/PCoPGNB0inD3S1XIUslSxso5coRKw4X7egNCrkBcARM
-		// (see m line in previous paste)
-		// onion-key
-		// -----BEGIN RSA PUBLIC KEY-----
-		// MIGJAoGBAOiyeVp5PW5OLItPC1tZkOAQbQ+zt2h/pmD+DOOgNOQQgAvypwfpSODA
-		// w1E2j0sCJa217ZUEahZlHPaAPcB0J1xm9ysExkoWQe5/9kR3tt2M2IiYUISeOrNa
-		// sKslHen977EYr64kbe6YUw6Qw1ba4S6VnYEdYgPrVWcjA9t1xTUbAgMBAAE=
-		// -----END RSA PUBLIC KEY-----
-		// ntor-onion-key 2E5pgIfV1UTNj7eOpZTzuUCIlTLM1h8jaafrIeIQaiw=
-		// family $3F092986E9B87D3FDA09B71FA3A602378285C77A
-		// $BA44A889E64B93FAA2B114E02C2A279A8555C533
-		// $D317C7889162E9EC4A1DA1A1095C2A0F377536D9
-		// id ed25519 HymdZCakUvsQMKzuBkx9z1yv80GMifRMXyNG6biXrwA
-		let mut ntor_onion_bytes: [u8; 32] = [0u8; 32];
-		ntor_onion_bytes
-			.clone_from_slice(&base64::decode("2E5pgIfV1UTNj7eOpZTzuUCIlTLM1h8jaafrIeIQaiw=")?[..]);
+		let mut process = TorProcess::new();
+		let torrc_path = "torrc";
+		let tor_dir = "./test/router2";
 
-		let ip2 = "45.66.33.45";
-		let addr2 = format!("{}:443", ip2);
-		let ed_bytes2 = base64::decode("g/2ajydWM/x16QePc6QXMVcVsaftXbmH4dZUozDhl5E")?;
-		let rsa_bytes2 = base64::decode("fqbq1v2DCDxTj0QDi7+gd1h911U")?;
-		let mut ntor_onion_bytes2: [u8; 32] = [0u8; 32];
-		ntor_onion_bytes2
-			.clone_from_slice(&base64::decode("z4l44BO46IkwQHF62Owsxh+fMlzF1lMXIy648TyhaQg=")?[..]);
+		// note we use 0% because this configuration is a testnet which is never
+		// bootstrapped.
+		let _res2 = process
+			.torrc_path(&torrc_path)
+			.working_dir(&tor_dir)
+			.timeout(200)
+			.completion_percent(0)
+			.launch();
 
-		let ip3 = "140.78.100.42";
-		let addr3 = format!("{}:8443", ip3);
-		let ed_bytes3 = base64::decode("euqiwTENP+vaxdPjjD1OFH5n0oMaM/o3Me1Q+moi4zo")?;
-		let rsa_bytes3 = base64::decode("AIGW3ESUgsc8+pcSRFIjkX92CSE")?;
-		let mut ntor_onion_bytes3: [u8; 32] = [0u8; 32];
-		ntor_onion_bytes3
-			.clone_from_slice(&base64::decode("9vXnGeOeUWWMCAXkDiRyM4n/z4q9/xojAERivdd+qHE=")?[..]);
-				*/
+		let mut process = TorProcess::new();
+		let torrc_path = "torrc";
+		let tor_dir = "./test/router3";
+
+		// note we use 0% because this configuration is a testnet which is never
+		// bootstrapped.
+		let _res3 = process
+			.torrc_path(&torrc_path)
+			.working_dir(&tor_dir)
+			.timeout(200)
+			.completion_percent(0)
+			.launch();
 
 		// use a local setup for testing
 		let ip = "127.0.0.1";

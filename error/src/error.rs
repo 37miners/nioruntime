@@ -25,6 +25,7 @@ use std::num::ParseFloatError;
 use std::num::ParseIntError;
 use std::num::TryFromIntError;
 use std::str::Utf8Error;
+use std::sync::mpsc::RecvError;
 
 /// Base Error struct which is used throught this crate and other crates
 #[derive(Debug, Fail)]
@@ -231,6 +232,9 @@ pub enum ErrorKind {
 	/// GetRandomError
 	#[fail(display = "Get Random Error: {}", _0)]
 	GetRandomError(String),
+	/// RecvError
+	#[fail(display = "RecvError: {}", _0)]
+	RecvError(String),
 }
 
 impl Display for Error {
@@ -445,6 +449,14 @@ impl From<nioruntime_deps::getrandom::Error> for Error {
 				"GetRandom generated error: {}",
 				e
 			))),
+		}
+	}
+}
+
+impl From<RecvError> for Error {
+	fn from(e: RecvError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::RecvError(format!("RecvError: {}", e))),
 		}
 	}
 }
