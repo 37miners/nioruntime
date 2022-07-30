@@ -653,9 +653,8 @@ mod test {
 
 			let len = stream.read(&mut buffer[..])?;
 			debug!("read len = {} bytes", len)?;
-			if len == 0 {
-				break;
-			}
+			assert!(len != 0); // that's a disconnect and we should terminate by the return statement
+				   // if everything goes right.
 
 			channel.read_tor(&mut &buffer[0..len])?;
 
@@ -794,7 +793,5 @@ mod test {
 				stream.write(&wbuf)?;
 			}
 		}
-
-		Ok(())
 	}
 }
