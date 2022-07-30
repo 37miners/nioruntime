@@ -12,30 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use nioruntime_err::{Error, ErrorKind};
-use secp256k1zkp::rand::thread_rng;
-use std::sync::{Arc, Mutex};
+mod byte_impls;
+pub mod cell;
+pub mod channel;
+pub mod constants;
+mod directory;
+pub mod ed25519;
+pub mod handshake;
+mod kdf;
+mod rand;
+pub mod reader;
+pub mod rsa;
+pub mod types;
+pub mod util;
+pub mod writer;
 
-#[macro_use]
-extern crate serde_derive;
+// public
+pub use crate::directory::TorDirectory;
+pub use crate::ed25519::CertifiedKey;
+pub use crate::rsa::{PrivateKey, PublicKey};
+pub use crate::types::TorState;
 
-pub use secp256k1zkp as secp;
+// private
+use crate::rand::get_rand_u128;
 
-pub mod config;
-pub mod hex;
-pub mod ov3;
-pub mod process;
-
-lazy_static::lazy_static! {
-		/// Static reference to secp instance
-		pub static ref SECP256K1:Arc<Mutex<secp::Secp256k1>>
-				= Arc::new(Mutex::new(secp::Secp256k1::with_caps(secp::ContextFlag::Commit)));
-}
-
-/// Returns the static instance, but calls randomize on it as well
-/// (Recommended to avoid side channel attacks
-pub fn static_secp_instance() -> Arc<Mutex<secp::Secp256k1>> {
-	let mut secp_inst = SECP256K1.lock().unwrap();
-	secp_inst.randomize(&mut thread_rng());
-	SECP256K1.clone()
-}
+/// A vector of bytes that gets cleared when it's dropped.
+type SecretBytes = nioruntime_deps::zeroize::Zeroizing<Vec<u8>>;

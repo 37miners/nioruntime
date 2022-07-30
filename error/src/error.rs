@@ -228,6 +228,9 @@ pub enum ErrorKind {
 	HttpError404(String),
 	#[fail(display = "No more slabs available")]
 	NoMoreSlabs,
+	/// GetRandomError
+	#[fail(display = "Get Random Error: {}", _0)]
+	GetRandomError(String),
 }
 
 impl Display for Error {
@@ -431,6 +434,17 @@ impl From<nioruntime_deps::lmdb_zero::Error> for Error {
 	fn from(e: nioruntime_deps::lmdb_zero::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::LmdbError(format!("Error parsing float: {}", e))),
+		}
+	}
+}
+
+impl From<nioruntime_deps::getrandom::Error> for Error {
+	fn from(e: nioruntime_deps::getrandom::Error) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::GetRandomError(format!(
+				"GetRandom generated error: {}",
+				e
+			))),
 		}
 	}
 }
