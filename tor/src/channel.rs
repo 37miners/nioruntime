@@ -640,7 +640,6 @@ mod test {
 		let mut sent_extend2 = false;
 		let mut sent_extend2_2 = false;
 		let mut sent_create2 = false;
-		let crypt_state = ctx.crypt_state.clone();
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let mut channel_id: u32 = rng.gen();
 		channel_id |= 0x80000000;
@@ -675,7 +674,7 @@ mod test {
 						info!("Got a cell: {:?}", cell)?;
 						match cell.body() {
 							CellBody::Created2(created2) => {
-								let crypt_state_clone = crypt_state.clone();
+								let crypt_state_clone = ctx.crypt_state.clone();
 								let mut crypt_state = lockw!(crypt_state_clone)?;
 								match &crypt_state.hs_state {
 									Some(state) => {
@@ -700,7 +699,7 @@ mod test {
 								match cmd {
 									RELAY_CMD_EXTENDED2 => {
 										info!("got an extended2 cell")?;
-										let crypt_state_clone = crypt_state.clone();
+										let crypt_state_clone = ctx.crypt_state.clone();
 										let mut crypt_state = lockw!(crypt_state_clone)?;
 										match &crypt_state.hs_state {
 											Some(state) => {
@@ -736,7 +735,7 @@ mod test {
 					if !verified {
 						// we don't do anything if we're not verified
 					} else {
-						let layers = lockr!(crypt_state)?.layers();
+						let layers = lockr!(ctx.crypt_state)?.layers();
 						info!("layers={}, elapsed=[{}]", layers, now.elapsed().as_millis())?;
 						if layers == 0 && !sent_create2 {
 							// send a netinfo cell
@@ -750,7 +749,7 @@ mod test {
 
 							channel.send_cell(Cell::new(
 								channel_id,
-								CellBody::Create2(Create2::new(&dest1, &crypt_state)),
+								CellBody::Create2(Create2::new(&dest1, &ctx)),
 							)?)?;
 							sent_create2 = true;
 						} else if layers == 1 && !sent_extend2 {
@@ -758,14 +757,14 @@ mod test {
 							// send an extend2 cell
 							channel.send_cell(Cell::new(
 								channel_id,
-								CellBody::Extend2(Extend2::new(&dest2, &crypt_state)),
+								CellBody::Extend2(Extend2::new(&dest2, &ctx)),
 							)?)?;
 							sent_extend2 = true;
 						} else if layers == 2 && !sent_extend2_2 {
 							// we are ready for the third and final hop
 							channel.send_cell(Cell::new(
 								channel_id,
-								CellBody::Extend2(Extend2::new(&dest3, &crypt_state)),
+								CellBody::Extend2(Extend2::new(&dest3, &ctx)),
 							)?)?;
 							sent_extend2_2 = true;
 						} else if layers == 3 {

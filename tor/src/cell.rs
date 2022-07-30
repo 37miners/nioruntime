@@ -106,13 +106,11 @@ pub struct Extend2 {
 }
 
 impl Extend2 {
-	pub fn new(
-		destination: &ChannelDestination,
-		crypt_state: &Arc<RwLock<ChannelCryptState>>,
-	) -> Self {
+	pub fn new(destination: &ChannelDestination, ctx: &ChannelContext) -> Self {
+		let crypt_state = ctx.crypt_state.clone();
 		Self {
 			destination: destination.clone(),
-			crypt_state: crypt_state.clone(),
+			crypt_state,
 		}
 	}
 
@@ -333,13 +331,11 @@ pub struct Create2 {
 }
 
 impl Create2 {
-	pub fn new(
-		destination: &ChannelDestination,
-		crypt_state: &Arc<RwLock<ChannelCryptState>>,
-	) -> Self {
+	pub fn new(destination: &ChannelDestination, ctx: &ChannelContext) -> Self {
+		let crypt_state = ctx.crypt_state.clone();
 		Self {
 			destination: destination.clone(),
-			crypt_state: crypt_state.clone(),
+			crypt_state,
 		}
 	}
 
