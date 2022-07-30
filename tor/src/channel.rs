@@ -516,11 +516,9 @@ mod test {
 	use crate::util::Tor1RelayCrypto;
 	use nioruntime_deps::base64;
 	use nioruntime_deps::hex;
-	use nioruntime_deps::rand;
 	use nioruntime_deps::rand::Rng;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_log::*;
-	use nioruntime_util::lockr;
 	use std::convert::TryInto;
 	use std::io::Read;
 	use std::io::Write;
@@ -714,7 +712,7 @@ mod test {
 												debug!(
 													"extended2 on circ id = {}, layers = {}",
 													cell.circ_id(),
-													crypt_state.layers(),
+													ctx.layers(),
 												)?;
 											}
 											None => {
@@ -734,7 +732,7 @@ mod test {
 					if !verified {
 						// we don't do anything if we're not verified
 					} else {
-						let layers = lockr!(ctx.crypt_state)?.layers();
+						let layers = ctx.layers();
 						info!("layers={}, elapsed=[{}]", layers, now.elapsed().as_millis())?;
 						if layers == 0 && !sent_create2 {
 							// send a netinfo cell

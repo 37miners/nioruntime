@@ -27,8 +27,12 @@ use nioruntime_deps::rustls::{Certificate, SignatureScheme};
 use nioruntime_deps::x509_signature;
 use nioruntime_deps::x509_signature::X509Certificate;
 use nioruntime_err::{Error, ErrorKind};
+use nioruntime_log::*;
+use nioruntime_util::lockr;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
+
+info!();
 
 #[derive(Debug)]
 pub struct ChannelCryptState {
@@ -70,6 +74,17 @@ impl ChannelContext {
 			in_buf: vec![],
 			offset: 0,
 			crypt_state: Arc::new(RwLock::new(ChannelCryptState::new())),
+		}
+	}
+
+	pub fn layers(&self) -> usize {
+		match lockr!(self.crypt_state) {
+			Ok(crypt_state) => crypt_state.layers(),
+			_ => {
+				let _ = warn!("crypt state lock was not obtained! We can only return 0");
+				// not expected
+				0
+			}
 		}
 	}
 }

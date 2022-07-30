@@ -27,7 +27,6 @@ use nioruntime_err::{Error, ErrorKind};
 
 use crate::lockr;
 use crate::ser;
-use nioruntime_deps::rand;
 use std::sync::RwLock;
 
 info!();

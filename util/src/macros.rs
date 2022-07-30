@@ -132,7 +132,7 @@ macro_rules! lockr {
 	($a:expr) => {{
 		let do_try_lock = if cfg!(debug_assertions) { true } else { false };
 		let mut is_locked = false;
-		let id: u128 = rand::random();
+		let id: u128 = nioruntime_deps::rand::random();
 
 		if do_try_lock {
 			match $a.try_read() {
