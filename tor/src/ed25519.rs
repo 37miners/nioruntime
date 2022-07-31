@@ -589,6 +589,12 @@ impl Ed25519Identity {
 			None
 		}
 	}
+	pub fn from_base64(id: &str) -> Option<Self> {
+		match base64::decode(id) {
+			Ok(b) => Self::from_bytes(&b),
+			Err(_) => None,
+		}
+	}
 	/// Return a reference to the bytes in this key.
 	pub fn as_bytes(&self) -> &[u8] {
 		&self.id[..]

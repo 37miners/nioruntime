@@ -18,7 +18,7 @@ use crate::handshake::ntor::NtorPublicKey;
 use crate::handshake::ClientHandshake;
 use crate::types::ChannelContext;
 use crate::types::ChannelCryptState;
-use crate::types::ChannelDestination;
+use crate::types::Node;
 use crate::types::TorCert;
 use crate::util::tor1::RelayCellBody;
 use crate::util::RngCompatExt;
@@ -28,20 +28,116 @@ use nioruntime_deps::byteorder::WriteBytesExt;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use std::convert::TryInto;
-use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 info!();
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Relay {
 	relay_data: Vec<u8>,
 	relay_cmd: u8,
+	crypt_state: Option<Arc<RwLock<ChannelCryptState>>>,
+	stream_id: u16,
 }
 
 impl Relay {
+	pub fn new_data(
+		relay_data: Vec<u8>,
+		crypt_state: Arc<RwLock<ChannelCryptState>>,
+		stream_id: u16,
+	) -> Result<Self, Error> {
+		if relay_data.len() > 498 {
+			return Err(ErrorKind::Tor("Max relay_data size exceeded".to_string()).into());
+		}
+		Ok(Self {
+			relay_data,
+			relay_cmd: RELAY_CMD_DATA,
+			crypt_state: Some(crypt_state),
+			stream_id,
+		})
+	}
+
+	pub fn new_begin(
+		address_port: &str,
+		crypt_state: Arc<RwLock<ChannelCryptState>>,
+		stream_id: u16,
+	) -> Result<Self, Error> {
+		// limit length to 400.
+		if address_port.len() > 400 {
+			return Err(ErrorKind::Tor(format!(
+				"address_port.len()={}. Maximum is 400.",
+				address_port.len()
+			))
+			.into());
+		}
+
+		let mut relay_data = address_port.as_bytes().to_vec();
+		relay_data.push(0); // null terminated string
+		relay_data.push(0); // 4 byte flags (none for now)
+		relay_data.push(0); // 4 byte flags (none for now)
+		relay_data.push(0); // 4 byte flags (none for now)
+		relay_data.push(0); // 4 byte flags (none for now)
+		debug!("relay_data={:?}", relay_data)?;
+		Ok(Self {
+			relay_cmd: RELAY_CMD_BEGIN,
+			relay_data,
+			crypt_state: Some(crypt_state),
+			stream_id,
+		})
+	}
+
+	pub fn stream_id(&self) -> u16 {
+		self.stream_id
+	}
+
+	fn serialize(&self, circ_id: u32) -> Result<Vec<u8>, Error> {
+		debug!("relay serialize for circ_id={}", circ_id)?;
+		let crypt_state = match &self.crypt_state {
+			Some(c) => c,
+			None => {
+				return Err(ErrorKind::InternalError(
+					"crypt state not found for a relay command and it is needed to serialize"
+						.to_string(),
+				)
+				.into())
+			}
+		};
+		let mut ret = vec![];
+		ret.append(&mut circ_id.to_be_bytes().to_vec());
+		ret.push(CHAN_CMD_RELAY);
+		ret.push(self.relay_cmd);
+		ret.push(0); // recognized
+		ret.push(0); // recognized
+			 // push the two byte streamid
+		ret.append(&mut self.stream_id.to_be_bytes().to_vec());
+		ret.push(0); // digest
+		ret.push(0); // digest
+		ret.push(0); // digest
+		ret.push(0); // digest
+		ret.append(&mut (self.relay_data.len() as u16).to_be_bytes().to_vec()); // length 2 bytes
+		ret.append(&mut self.relay_data.clone());
+
+		let mut padding = vec![];
+		padding.resize(CELL_LEN - ret.len(), 0u8);
+		ret.append(&mut padding);
+
+		debug!("relay serialize pre encrypted cell={:?}", ret)?;
+		let mut relay_cell_body = RelayCellBody(*array_mut_ref![ret, 5, 509]);
+		{
+			let mut crypt_state = lockw!(crypt_state)?;
+			let hop = crypt_state.layers().saturating_sub(1) as u8;
+			crypt_state
+				.cc_out
+				.encrypt(&mut relay_cell_body, hop.into())?;
+			(&mut ret[5..514]).clone_from_slice(relay_cell_body.as_ref());
+		}
+		debug!("relay serialize encrypted cell={:?}", ret)?;
+
+		Ok(ret)
+	}
+
 	fn deserialize(ctx: &mut ChannelContext) -> Result<Option<Cell>, Error> {
 		debug!("in relay")?;
 		// we need at least 514 bytes to decode
@@ -61,6 +157,7 @@ impl Relay {
 
 		// get length
 		let relay_cell_body = relay_cell_body.as_ref();
+		let stream_id = u16::from_be_bytes(relay_cell_body[3..5].try_into()?) as u16;
 		let relay_data_len = u16::from_be_bytes(relay_cell_body[9..11].try_into()?) as usize;
 		debug!("relay cell len = {}", relay_data_len)?;
 		for i in 0..20 {
@@ -75,7 +172,7 @@ impl Relay {
 		relay_data.resize(relay_data_len, 0u8);
 		relay_data.clone_from_slice(&relay_cell_body[11..11 + relay_data_len]);
 
-		debug!("relay data = {:?}", relay_data)?;
+		debug!("circ[{}] relay data = {:?}", circ_id, relay_data)?;
 
 		let end = 514;
 		ctx.in_buf.drain(..end);
@@ -85,6 +182,8 @@ impl Relay {
 			body: CellBody::Relay(Relay {
 				relay_cmd: relay_cell_body[0],
 				relay_data: relay_data,
+				crypt_state: None,
+				stream_id,
 			}),
 			circ_id,
 		}))
@@ -99,14 +198,14 @@ impl Relay {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Extend2 {
-	destination: ChannelDestination,
+	destination: Node,
 	crypt_state: Arc<RwLock<ChannelCryptState>>,
 }
 
 impl Extend2 {
-	pub fn new(destination: &ChannelDestination, ctx: &ChannelContext) -> Self {
+	pub fn new(destination: &Node, ctx: &ChannelContext) -> Self {
 		let crypt_state = ctx.crypt_state.clone();
 		Self {
 			destination: destination.clone(),
@@ -115,14 +214,6 @@ impl Extend2 {
 	}
 
 	pub fn serialize(&self, circ_id: u32) -> Result<Vec<u8>, Error> {
-		if self.destination.sockaddrs.len() != 1 {
-			return Err(ErrorKind::Tor(format!(
-				"Currently exatly 1 sockaddr must be specified and {} were specified.",
-				self.destination.sockaddrs.len()
-			))
-			.into());
-		}
-
 		// try to build our message
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let relay_ntpk = NtorPublicKey {
@@ -151,9 +242,8 @@ impl Extend2 {
 		ret.push(0); // type 0 = tls over ipv4
 		ret.push(6); // len = 6 bytes
 
-		let addr: SocketAddr = self.destination.sockaddrs[0].parse()?;
-		let port: u16 = addr.port();
-		let addr = addr.ip();
+		let port: u16 = self.destination.sockaddr.port();
+		let addr = self.destination.sockaddr.ip();
 
 		let addr = match addr {
 			IpAddr::V4(addr) => addr,
@@ -164,7 +254,7 @@ impl Extend2 {
 		ret.append(&mut addr.octets().to_vec());
 		ret.append(&mut port.to_be_bytes().to_vec());
 		ret.push(2); // rsa link specifier type
-		ret.push(20); // len = 200
+		ret.push(20); // len = 20
 		ret.append(&mut self.destination.rsa_identity.as_bytes().to_vec());
 		ret.append(&mut (2 as u16).to_be_bytes().to_vec()); // ntor handshake type = 0x0002
 		ret.append(&mut (84 as u16).to_be_bytes().to_vec()); // ntor handshake len = 0x0084
@@ -197,7 +287,7 @@ impl Extend2 {
 }
 
 // We don't fully support AuthChallenge because we are only a client
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AuthChallenge {}
 
 impl AuthChallenge {
@@ -326,12 +416,12 @@ impl Created2 {
 
 #[derive(Debug, Clone)]
 pub struct Create2 {
-	destination: ChannelDestination,
+	destination: Node,
 	crypt_state: Arc<RwLock<ChannelCryptState>>,
 }
 
 impl Create2 {
-	pub fn new(destination: &ChannelDestination, ctx: &ChannelContext) -> Self {
+	pub fn new(destination: &Node, ctx: &ChannelContext) -> Self {
 		let crypt_state = ctx.crypt_state.clone();
 		Self {
 			destination: destination.clone(),
@@ -540,7 +630,7 @@ impl NetInfo {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Padding {}
 
 impl Padding {
@@ -570,7 +660,7 @@ impl Padding {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CellBody {
 	NetInfo(NetInfo),
 	Certs(Certs),
@@ -582,7 +672,7 @@ pub enum CellBody {
 	Relay(Relay),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cell {
 	circ_id: u32,
 	body: CellBody,
@@ -618,6 +708,7 @@ impl Cell {
 			CellBody::NetInfo(netinfo) => Ok(netinfo.serialize(self.circ_id)?),
 			CellBody::Create2(create2) => Ok(create2.serialize(self.circ_id)?),
 			CellBody::Extend2(extend2) => Ok(extend2.serialize(self.circ_id)?),
+			CellBody::Relay(relay) => Ok(relay.serialize(self.circ_id)?),
 			_ => {
 				todo!()
 			}

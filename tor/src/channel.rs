@@ -17,7 +17,7 @@ use crate::cell::{Cell, Certs, NetInfo};
 use crate::ed25519;
 use crate::ed25519::Ed25519Identity;
 use crate::rsa::RsaCrosscert;
-use crate::types::{ChannelContext, ChannelDestination, TorState, Verifier};
+use crate::types::{ChannelContext, Node, TorState, Verifier};
 use crate::util::x509_extract_rsa_subject_kludge;
 use crate::util::ExternallySigned;
 use crate::util::Timebound;
@@ -33,11 +33,11 @@ use std::sync::Arc;
 info!();
 
 /// our protocol version
-const VERSIONS_MSG: &[u8] = &[0, 0, 7, 0, 2, 0, 4];
+const VERSIONS_MSG: &[u8] = &[0, 0, 7, 0, 4, 0, 4, 3, 7];
 
 pub struct Channel {
 	tls_conn: ClientConnection,
-	destination: ChannelDestination,
+	destination: Node,
 	verified: bool,
 	versions_confirmed: bool,
 	remote_certs: Option<Certs>,
@@ -45,7 +45,7 @@ pub struct Channel {
 }
 
 impl Channel {
-	pub fn new(destination: ChannelDestination) -> Result<Self, Error> {
+	pub fn new(destination: Node) -> Result<Self, Error> {
 		let config = Self::make_config()?;
 		// tor doesn't use dns so use localhost.
 		let tls_conn = ClientConnection::new(config, "localhost".try_into()?)?;
@@ -73,14 +73,18 @@ impl Channel {
 		Ok(())
 	}
 
-	pub fn writer(&mut self) -> Writer {
-		self.tls_conn.writer()
-	}
-
 	pub fn read_tor(&mut self, rd: &mut dyn Read) -> Result<usize, Error> {
 		self.tls_conn.read_tls(rd).map_err(|e| {
 			let error: Error =
 				ErrorKind::Tor(format!("tls_conn.read_tls generated error: {}", e)).into();
+			error
+		})
+	}
+
+	pub fn write_tor(&mut self, wr: &mut dyn Write) -> Result<usize, Error> {
+		self.tls_conn.write_tls(wr).map_err(|e| {
+			let error: Error =
+				ErrorKind::Tor(format!("tls_conn.write_tls generated error: {}", e)).into();
 			error
 		})
 	}
@@ -98,15 +102,7 @@ impl Channel {
 		Ok(())
 	}
 
-	pub fn write_tor(&mut self, wr: &mut dyn Write) -> Result<usize, Error> {
-		self.tls_conn.write_tls(wr).map_err(|e| {
-			let error: Error =
-				ErrorKind::Tor(format!("tls_conn.write_tls generated error: {}", e)).into();
-			error
-		})
-	}
-
-	pub fn process_packets(&mut self, ctx: &mut ChannelContext) -> Result<TorState, Error> {
+	pub fn process_new_packets(&mut self, ctx: &mut ChannelContext) -> Result<TorState, Error> {
 		let io_state = self.tls_conn.process_new_packets().map_err(|e| {
 			let error: Error =
 				ErrorKind::Tor(format!("process_new_packets generated error: {}", e)).into();
@@ -129,6 +125,10 @@ impl Channel {
 		}
 	}
 
+	fn writer(&mut self) -> Writer {
+		self.tls_conn.writer()
+	}
+
 	fn reader(&mut self) -> Reader {
 		self.tls_conn.reader()
 	}
@@ -139,7 +139,6 @@ impl Channel {
 		ctx: &mut ChannelContext,
 	) -> Result<Vec<Cell>, Error> {
 		let mut ret = vec![];
-		debug!("process unverified with bytes to read: {}", len)?;
 		if len > 0 {
 			let mut reader = self.reader();
 			let buf = &mut ctx.in_buf;
@@ -458,12 +457,16 @@ impl Channel {
 				_ => {}
 			}
 		}
+
+		// our version is not supported
 		if !found {
 			return Err(ErrorKind::Tor("Protocol version 4 not supported".to_string()).into());
 		}
 
 		self.versions_confirmed = true;
 		debug!("versions confirmed!")?;
+
+		// drain data from the context and reset offset
 		let dr_len: usize = (len + 5).into();
 		ctx.in_buf.drain(..dr_len);
 		ctx.offset = ctx.offset.saturating_sub(dr_len);
@@ -509,7 +512,7 @@ mod test {
 	use crate::process::test::TorProcess;
 	use crate::rsa::RsaIdentity;
 	use crate::types::ChannelContext;
-	use crate::types::ChannelDestination;
+	use crate::types::Node;
 	use crate::util::tor1::ClientLayer;
 	use crate::util::tor1::CryptInit;
 	use crate::util::RngCompatExt;
@@ -599,22 +602,22 @@ mod test {
 		ntor_onion_bytes3
 			.clone_from_slice(&base64::decode("zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=")?[..]);
 
-		let dest1 = ChannelDestination {
-			sockaddrs: vec![addr.clone()],
+		let dest1 = Node {
+			sockaddr: addr.parse()?,
 			ed_identity: Ed25519Identity::from_bytes(&ed_bytes).unwrap(),
 			rsa_identity: RsaIdentity::from_bytes(&rsa_bytes).unwrap(),
 			ntor_onion_pubkey: PublicKey::from(ntor_onion_bytes),
 		};
 
-		let dest2 = ChannelDestination {
-			sockaddrs: vec![addr2.clone()],
+		let dest2 = Node {
+			sockaddr: addr2.parse()?,
 			ed_identity: Ed25519Identity::from_bytes(&ed_bytes2).unwrap(),
 			rsa_identity: RsaIdentity::from_bytes(&rsa_bytes2).unwrap(),
 			ntor_onion_pubkey: PublicKey::from(ntor_onion_bytes2),
 		};
 
-		let dest3 = ChannelDestination {
-			sockaddrs: vec![addr3.clone()],
+		let dest3 = Node {
+			sockaddr: addr3.parse()?,
 			ed_identity: Ed25519Identity::from_bytes(&ed_bytes3).unwrap(),
 			rsa_identity: RsaIdentity::from_bytes(&rsa_bytes3).unwrap(),
 			ntor_onion_pubkey: PublicKey::from(ntor_onion_bytes3),
@@ -657,7 +660,7 @@ mod test {
 			channel.read_tor(&mut &buffer[0..len])?;
 
 			debug!("about to process packets")?;
-			match channel.process_packets(&mut ctx) {
+			match channel.process_new_packets(&mut ctx) {
 				Ok(tor_state) => {
 					let cells = tor_state.cells();
 					let verified = channel.is_verified();

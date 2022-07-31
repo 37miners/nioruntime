@@ -15,6 +15,7 @@
 mod byte_impls;
 pub mod cell;
 pub mod channel;
+mod circuit;
 pub mod constants;
 mod directory;
 pub mod ed25519;

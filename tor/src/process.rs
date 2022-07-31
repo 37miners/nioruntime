@@ -63,7 +63,7 @@ pub(crate) mod test {
 	use std::time::SystemTime;
 	use std::time::UNIX_EPOCH;
 
-	trace!();
+	info!();
 
 	#[cfg(windows)]
 	const TOR_EXE_NAME: &str = "tor.exe";

@@ -57,6 +57,9 @@ pub const CHAN_CMD_AUTHENTICATE: u8 = 131;
 pub const CHAN_CMD_AUTHORIZE: u8 = 132;
 
 /// Relay command for extended2
+pub const RELAY_CMD_BEGIN: u8 = 1;
+pub const RELAY_CMD_DATA: u8 = 2;
+pub const RELAY_CMD_END: u8 = 3;
 pub const RELAY_CMD_EXTEND2: u8 = 14;
 pub const RELAY_CMD_EXTENDED2: u8 = 15;
 

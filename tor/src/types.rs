@@ -16,6 +16,7 @@ use crate::cell::Cell;
 use crate::ed25519::Ed25519Identity;
 use crate::ed25519::XDalekPublicKey as PublicKey;
 use crate::handshake::ntor::NtorHandshakeState;
+use crate::handshake::ntor::NtorPublicKey;
 use crate::rsa::RsaIdentity;
 use crate::util::InboundClientCrypt;
 use crate::util::OutboundClientCrypt;
@@ -29,10 +30,36 @@ use nioruntime_deps::x509_signature::X509Certificate;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::lockr;
+use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 info!();
+
+pub struct CircuitContext {
+	pub channel_context: ChannelContext,
+}
+
+impl CircuitContext {
+	pub fn new() -> Self {
+		let channel_context = ChannelContext::new();
+		Self { channel_context }
+	}
+}
+
+pub struct CircuitPlan {
+	hops: Vec<Node>,
+}
+
+impl CircuitPlan {
+	pub fn new(hops: Vec<Node>) -> Self {
+		Self { hops }
+	}
+
+	pub fn hops(&self) -> &Vec<Node> {
+		&self.hops
+	}
+}
 
 #[derive(Debug)]
 pub struct ChannelCryptState {
@@ -89,7 +116,7 @@ impl ChannelContext {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TorState {
 	tls_bytes_to_write: usize,
 	cells: Vec<Cell>,
@@ -113,6 +140,10 @@ impl TorState {
 		&self.cells
 	}
 
+	pub fn clear(&mut self) {
+		self.cells.clear();
+	}
+
 	pub fn peer_has_closed(&self) -> bool {
 		self.peer_has_closed
 	}
@@ -129,11 +160,43 @@ impl From<nioruntime_deps::rustls::IoState> for TorState {
 }
 
 #[derive(Debug, Clone)]
-pub struct ChannelDestination {
-	pub sockaddrs: Vec<String>,
+pub struct Node {
+	pub sockaddr: SocketAddr,
 	pub ed_identity: Ed25519Identity,
 	pub rsa_identity: RsaIdentity,
 	pub ntor_onion_pubkey: PublicKey,
+}
+
+impl Node {
+	pub fn new(
+		sockaddr: &str,
+		ed_identity_b64: &str,
+		ntor_onion_pubkey_b64: &str,
+		rsa_identity_b64: &str,
+	) -> Result<Self, Error> {
+		let sockaddr: SocketAddr = sockaddr.parse()?;
+		let ed_identity = match Ed25519Identity::from_base64(ed_identity_b64) {
+			Some(id) => id,
+			None => {
+				return Err(ErrorKind::Tor("invalid ed25519 identity base64".to_string()).into())
+			}
+		};
+		let ntor_onion_pubkey = match NtorPublicKey::from_base64(ntor_onion_pubkey_b64) {
+			Some(id) => id,
+			None => return Err(ErrorKind::Tor("invalid ntor pubkey base64".to_string()).into()),
+		};
+
+		let rsa_identity = match RsaIdentity::from_base64(rsa_identity_b64) {
+			Some(id) => id,
+			None => return Err(ErrorKind::Tor("invalid rsa identity base64".to_string()).into()),
+		};
+		Ok(Self {
+			sockaddr,
+			ed_identity,
+			ntor_onion_pubkey,
+			rsa_identity,
+		})
+	}
 }
 
 pub struct Verifier {}

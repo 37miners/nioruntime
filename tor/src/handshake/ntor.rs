@@ -7,6 +7,7 @@ use crate::util::RngCompatExt;
 use crate::util::{bool_to_choice, lookup};
 use crate::writer::Writer;
 use crate::SecretBytes;
+use nioruntime_deps::base64;
 use nioruntime_deps::digest::Mac;
 use nioruntime_deps::rand_core::{CryptoRng, RngCore};
 use nioruntime_deps::sha2::Sha256;
@@ -61,6 +62,23 @@ pub struct NtorPublicKey {
 	pub(crate) id: RsaIdentity,
 	/// Public curve25519 ntor key for the relay.
 	pub(crate) pk: PublicKey,
+}
+
+impl NtorPublicKey {
+	pub fn from_base64(b64: &str) -> Option<PublicKey> {
+		match base64::decode(b64) {
+			Ok(b) => {
+				let mut bytes: [u8; 32] = [0u8; 32];
+				if b.len() == 32 {
+					bytes.clone_from_slice(&b[0..32]);
+					Some(PublicKey::from(bytes))
+				} else {
+					None
+				}
+			}
+			Err(_) => None,
+		}
+	}
 }
 
 /// A secret key used by a relay to answer an ntor request

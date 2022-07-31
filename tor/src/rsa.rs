@@ -258,6 +258,20 @@ impl RsaIdentity {
 		}
 	}
 
+	pub fn from_hex(id: &str) -> Option<Self> {
+		match hex::decode(id) {
+			Ok(b) => Self::from_bytes(&b),
+			Err(_) => None,
+		}
+	}
+
+	pub fn from_base64(id: &str) -> Option<Self> {
+		match base64::decode(id) {
+			Ok(b) => Self::from_bytes(&b),
+			Err(_) => None,
+		}
+	}
+
 	/// Return a base64 representation of this rsa id
 	pub fn to_stripped_base64(&self) -> String {
 		let mut res = &base64::encode(self.id)[..];

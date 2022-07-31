@@ -3,3 +3,4 @@ DataDirectory ./data
 OrPort 0.0.0.0:39002
 TestingTorNetwork 1
 DirAuthority 127.0.0.1:39001 BF6F607DB0E5AD64ADBC18D6467AB028D521A6FE
+ExitPolicy accept *:*
