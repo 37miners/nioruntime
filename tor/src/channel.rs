@@ -531,50 +531,96 @@ mod test {
 
 	info!();
 
+	fn setup_test_dir(name: &str) -> Result<(), Error> {
+		let _ = std::fs::remove_dir_all(name);
+		std::fs::create_dir_all(name)?;
+		std::fs::create_dir_all(format!("{}/router1/data/keys", name))?;
+		std::fs::create_dir_all(format!("{}/router2/data/keys", name))?;
+		std::fs::create_dir_all(format!("{}/router3/data/keys", name))?;
+
+		std::fs::copy(
+			"./test/router1/torrc.channel",
+			format!("{}/router1/torrc", name),
+		)?;
+		std::fs::copy(
+			"./test/router2/torrc.channel",
+			format!("{}/router2/torrc", name),
+		)?;
+		std::fs::copy(
+			"./test/router3/torrc.channel",
+			format!("{}/router3/torrc", name),
+		)?;
+
+		for file in std::fs::read_dir("./test/router1/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router1/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+
+		for file in std::fs::read_dir("./test/router2/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router2/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+
+		for file in std::fs::read_dir("./test/router3/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router3/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+		Ok(())
+	}
+
+	fn tear_down_test_dir(name: &str) -> Result<(), Error> {
+		std::fs::remove_dir_all(name)?;
+		Ok(())
+	}
+
+	fn launch_tor(working_dir: &str, process: &mut TorProcess) {
+		// note we use 0% because this configuration is a testnet which is never
+		// bootstrapped.
+		process
+			.torrc_path(&"torrc")
+			.working_dir(working_dir)
+			.timeout(200)
+			.completion_percent(0)
+			.launch()
+			.unwrap();
+	}
+
 	#[test]
 	fn test_channel() -> Result<(), Error> {
 		let now = Instant::now();
 		let mut wbuf = vec![];
 
+		let test_dir = ".test_channel.nio";
+		setup_test_dir(test_dir)?;
+
 		// first launch three tor instances
-		let mut process = TorProcess::new();
-		let torrc_path = "torrc";
-		let tor_dir = "./test/router1";
-
-		// note we use 0% because this configuration is a testnet which is never
-		// bootstrapped.
-		let _res1 = process
-			.torrc_path(&torrc_path)
-			.working_dir(&tor_dir)
-			.timeout(200)
-			.completion_percent(0)
-			.launch();
-
-		let mut process = TorProcess::new();
-		let torrc_path = "torrc";
-		let tor_dir = "./test/router2";
-
-		// note we use 0% because this configuration is a testnet which is never
-		// bootstrapped.
-		let _res2 = process
-			.torrc_path(&torrc_path)
-			.working_dir(&tor_dir)
-			.timeout(200)
-			.completion_percent(0)
-			.launch();
-
-		let mut process = TorProcess::new();
-		let torrc_path = "torrc";
-		let tor_dir = "./test/router3";
-
-		// note we use 0% because this configuration is a testnet which is never
-		// bootstrapped.
-		let _res3 = process
-			.torrc_path(&torrc_path)
-			.working_dir(&tor_dir)
-			.timeout(200)
-			.completion_percent(0)
-			.launch();
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router1", test_dir)[..], &mut _p);
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router2", test_dir)[..], &mut _p);
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router3", test_dir)[..], &mut _p);
 
 		// use a local setup for testing
 		let ip = "127.0.0.1";
@@ -646,6 +692,7 @@ mod test {
 		channel_id |= 0x80000000;
 
 		debug!("about to start channel {}", channel_id)?;
+		let mut success = false;
 		loop {
 			let mut wbuf = vec![];
 			if buffer.len() != 1024 * 1024 {
@@ -769,7 +816,10 @@ mod test {
 							sent_extend2_2 = true;
 						} else if layers == 3 {
 							// test complete, circuit built
-							return Ok(());
+							success = true;
+							if success {
+								break;
+							}
 						}
 					}
 				}
@@ -793,6 +843,13 @@ mod test {
 				)?;
 				stream.write(&wbuf)?;
 			}
+
+			if success {
+				break;
+			}
 		}
+
+		tear_down_test_dir(test_dir)?;
+		Ok(())
 	}
 }

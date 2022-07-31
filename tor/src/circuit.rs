@@ -36,7 +36,7 @@ use std::net::IpAddr;
 
 info!();
 
-struct Circuit {
+pub struct Circuit {
 	plan: CircuitPlan,
 	channel: Channel,
 	create2: bool,
@@ -294,7 +294,72 @@ mod test {
 
 	info!();
 
+	fn setup_test_dir(name: &str) -> Result<(), Error> {
+		let _ = std::fs::remove_dir_all(name);
+		std::fs::create_dir_all(name)?;
+		std::fs::create_dir_all(format!("{}/router1/data/keys", name))?;
+		std::fs::create_dir_all(format!("{}/router2/data/keys", name))?;
+		std::fs::create_dir_all(format!("{}/router3/data/keys", name))?;
+
+		std::fs::copy(
+			"./test/router1/torrc.circuit",
+			format!("{}/router1/torrc", name),
+		)?;
+		std::fs::copy(
+			"./test/router2/torrc.circuit",
+			format!("{}/router2/torrc", name),
+		)?;
+		std::fs::copy(
+			"./test/router3/torrc.circuit",
+			format!("{}/router3/torrc", name),
+		)?;
+
+		for file in std::fs::read_dir("./test/router1/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router1/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+
+		for file in std::fs::read_dir("./test/router2/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router2/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+
+		for file in std::fs::read_dir("./test/router3/data/keys").unwrap() {
+			let file = file.unwrap();
+			std::fs::copy(
+				format!("{}", file.path().display()),
+				format!(
+					"{}/router3/data/keys/{}",
+					name,
+					file.file_name().into_string()?
+				),
+			)?;
+		}
+		Ok(())
+	}
+
+	fn tear_down_test_dir(name: &str) -> Result<(), Error> {
+		std::fs::remove_dir_all(name)?;
+		Ok(())
+	}
+
 	fn launch_tor(working_dir: &str, process: &mut TorProcess) {
+		// note we use 0% because this configuration is a testnet which is never
+		// bootstrapped.
 		process
 			.torrc_path(&"torrc")
 			.working_dir(working_dir)
@@ -306,36 +371,38 @@ mod test {
 
 	#[test]
 	fn test_circuit() -> Result<(), Error> {
+		let test_dir = ".test_circuit.nio";
+		setup_test_dir(test_dir)?;
+
 		let mut wbuf = vec![];
 		let mut sent_begin = false;
 
 		// first launch three tor instances
-		// note we use 0% because this configuration is a testnet which is never
-		// bootstrapped.
-		let mut _p = TorProcess::new();
-		launch_tor("./test/router1", &mut _p);
-		let mut _p = TorProcess::new();
-		launch_tor("./test/router2", &mut _p);
-		let mut _p = TorProcess::new();
-		launch_tor("./test/router3", &mut _p);
 
-		let mut stream = TcpStream::connect("127.0.0.1:39001")?;
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router1", test_dir)[..], &mut _p);
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router2", test_dir)[..], &mut _p);
+		let mut _p = TorProcess::new();
+		launch_tor(&format!("{}/router3", test_dir)[..], &mut _p);
+
+		let mut stream = TcpStream::connect("127.0.0.1:39101")?;
 		let node1 = Node::new(
-			"127.0.0.1:39001",                              // router1
+			"127.0.0.1:39101",                              // router1
 			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
 			"PtfQsnnCPPA93X3BcbFeCxGMLDfVfIG4XbzVCIlOsgU=", // ntor pubkey
 			"v29gfbDlrWStvBjWRnqwKNUhpv4=",                 // rsa identity
 		)?;
 
 		let node2 = Node::new(
-			"127.0.0.1:39002",                              // router2
+			"127.0.0.1:39102",                              // router2
 			"8nf9qPZ9gixbks0KrZEiLsKJYyVmmAgZUAW/iYvGnKI=", // ed25519Identity
 			"l7BJm4Cq3c8YJlq/H+vaUtdaJ4K7lsDEmqv8ZI3HUjo=", // ntor pubkey
 			"kJP6GBtWIPDGzQWJLpLA7qW2M9o",                  // rsa identity
 		)?;
 
 		let node3 = Node::new(
-			"127.0.0.1:39003",                              // router3
+			"127.0.0.1:39103",                              // router3
 			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
 			"zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=", // ntor pubkey
 			"x06BlN36ChTqd9Nqeb25o0byc0I=",                 // rsa identity
@@ -394,6 +461,7 @@ mod test {
 						sent_begin = true;
 					}
 
+					let mut success = false;
 					for cell in tor_state.cells() {
 						if circuit.is_built() {
 							match cell.body() {
@@ -407,7 +475,7 @@ mod test {
 									assert_eq!(relay.stream_id(), 12);
 									assert_eq!(relay.get_relay_data(), &vec![1]);
 									// success return so test passes.
-									return Ok(());
+									success = true;
 								}
 								_ => {
 									return Err(ErrorKind::ApplicationError(format!(
@@ -418,6 +486,9 @@ mod test {
 								}
 							}
 						}
+					}
+					if success {
+						break;
 					}
 				}
 				Err(e) => {
@@ -441,5 +512,8 @@ mod test {
 				stream.write(&wbuf)?;
 			}
 		}
+
+		tear_down_test_dir(test_dir)?;
+		Ok(())
 	}
 }

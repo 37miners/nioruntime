@@ -48,7 +48,6 @@ use nioruntime_deps::nix::sys::socket::{
 };
 use nioruntime_deps::num_format::{Locale, ToFormattedString};
 use nioruntime_deps::path_clean::clean as path_clean;
-use nioruntime_deps::rand;
 use nioruntime_deps::rand_core::{OsRng, RngCore};
 use nioruntime_deps::sha1::Sha1;
 use nioruntime_deps::sha2::{Digest, Sha256};
@@ -4601,7 +4600,6 @@ mod test {
 	use crate::HttpApiConfig;
 	use crate::HttpHeaders;
 	use nioruntime_deps::flate2::read::GzDecoder;
-	use nioruntime_deps::rand;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_evh::EventHandlerConfig;
 	use nioruntime_log::*;
