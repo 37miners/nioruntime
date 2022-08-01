@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::cell::Cell;
+use crate::circuit::Circuit;
 use crate::ed25519::Ed25519Identity;
 use crate::ed25519::XDalekPublicKey as PublicKey;
 use crate::handshake::ntor::NtorHandshakeState;
@@ -36,15 +37,21 @@ use std::time::SystemTime;
 
 info!();
 
-pub struct CircuitContext {
-	pub channel_context: ChannelContext,
+pub trait Stream {
+	fn event_type(&self) -> StreamEventType;
+	fn write(&mut self, _: &mut Circuit, _: &[u8]) -> Result<(), Error>;
+	fn get_data(&self) -> Result<&Vec<u8>, Error>;
+	fn available(&self) -> Result<usize, Error>;
+	fn close(&mut self) -> Result<(), Error>;
+	fn id(&self) -> u16;
 }
 
-impl CircuitContext {
-	pub fn new() -> Self {
-		let channel_context = ChannelContext::new();
-		Self { channel_context }
-	}
+#[derive(Clone, Copy)]
+pub enum StreamEventType {
+	Created,
+	Readable,
+	Connected,
+	Close(u8),
 }
 
 pub struct CircuitPlan {

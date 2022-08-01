@@ -17,12 +17,16 @@ use crate::cell::CellBody;
 use crate::cell::Create2;
 use crate::cell::Extend2;
 use crate::cell::NetInfo;
+use crate::cell::Relay;
 use crate::channel::Channel;
 use crate::constants::*;
 use crate::handshake::ntor::NtorClient;
 use crate::handshake::ClientHandshake;
-use crate::types::CircuitContext;
+use crate::stream::StreamImpl;
+use crate::types::ChannelContext;
 use crate::types::CircuitPlan;
+use crate::types::Stream;
+use crate::types::StreamEventType;
 use crate::util::tor1::ClientLayer;
 use crate::util::tor1::CryptInit;
 use crate::util::RngCompatExt;
@@ -31,10 +35,37 @@ use crate::TorState;
 use nioruntime_deps::rand::Rng;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::IpAddr;
 
 info!();
+
+pub struct CircuitState<'a> {
+	built: bool,
+	is_closed: bool,
+	circuit: &'a mut Circuit,
+}
+
+impl<'a> CircuitState<'a> {
+	fn ready(&mut self) -> Vec<StreamImpl> {
+		self.circuit.ready()
+	}
+	pub fn built(&self) -> bool {
+		self.built
+	}
+	pub fn is_closed(&self) -> bool {
+		self.is_closed
+	}
+
+	fn new(built: bool, is_closed: bool, circuit: &'a mut Circuit) -> Self {
+		Self {
+			built,
+			is_closed,
+			circuit,
+		}
+	}
+}
 
 pub struct Circuit {
 	plan: CircuitPlan,
@@ -44,6 +75,9 @@ pub struct Circuit {
 	extension_count: usize,
 	built: bool,
 	circuit_id: u32,
+	sendme_state: HashMap<u64, u64>,
+	channel_context: ChannelContext,
+	tor_state: Option<TorState>,
 }
 
 impl Circuit {
@@ -65,7 +99,90 @@ impl Circuit {
 			create2: false,
 			created2: false,
 			extension_count: 0,
+			sendme_state: HashMap::new(),
+			channel_context: ChannelContext::new(),
+			tor_state: None,
 		})
+	}
+
+	pub(crate) fn channel_context(&self) -> &ChannelContext {
+		&self.channel_context
+	}
+
+	fn ready<'a>(&'a mut self) -> Vec<StreamImpl> {
+		let circ_id = self.id();
+		if !self.built {
+			return vec![];
+		}
+
+		let mut map: HashMap<u16, StreamImpl> = HashMap::new();
+
+		match &self.tor_state {
+			Some(tor_state) => {
+				let mut ret = vec![];
+				for cell in tor_state.cells() {
+					match cell.body() {
+						CellBody::Relay(relay) => {
+							if relay.get_relay_cmd() == RELAY_CMD_DATA {
+								let sid = relay.stream_id();
+								let found = match map.get_mut(&sid) {
+									Some(se) => {
+										se.data().append(&mut relay.get_relay_data().to_vec());
+										true
+									}
+									None => false,
+								};
+								if !found {
+									let se = StreamImpl::new(
+										relay.stream_id(),
+										circ_id,
+										StreamEventType::Readable,
+										relay.get_relay_data().to_vec(),
+									);
+									map.insert(sid, se);
+								}
+							}
+						}
+						_ => {}
+					}
+				}
+				for (_k, v) in map {
+					ret.push(v);
+				}
+				ret
+			}
+			None => vec![],
+		}
+	}
+
+	pub fn open_stream_dir(&mut self) -> Result<Box<dyn Stream>, Error> {
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
+		let stream_id: u16 = rng.gen();
+		let body = CellBody::Relay(Relay::new_begin_dir(
+			self.channel_context.crypt_state.clone(),
+			stream_id,
+		)?);
+		self.send_cell(body)?;
+
+		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![]);
+
+		Ok(Box::new(stream))
+	}
+
+	pub fn open_stream(&mut self, address_port: &str) -> Result<Box<dyn Stream>, Error> {
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
+		let stream_id: u16 = rng.gen();
+		debug!("address port = {}", address_port)?;
+		let body = CellBody::Relay(Relay::new_begin(
+			address_port,
+			self.channel_context.crypt_state.clone(),
+			stream_id,
+		)?);
+		self.send_cell(body)?;
+
+		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![]);
+
+		Ok(Box::new(stream))
 	}
 
 	pub fn id(&self) -> u32 {
@@ -90,15 +207,17 @@ impl Circuit {
 	}
 
 	pub fn send_cell(&mut self, cell_body: CellBody) -> Result<(), Error> {
-		self.channel
-			.send_cell(Cell::new(self.circuit_id, cell_body)?)
+		let cell = Cell::new(self.circuit_id, cell_body)?;
+		info!("sending cell = {:?}", cell)?;
+		self.channel.send_cell(cell)
 	}
 
-	pub fn process_new_packets(&mut self, ctx: &mut CircuitContext) -> Result<TorState, Error> {
-		let tor_state = self.channel.process_new_packets(&mut ctx.channel_context)?;
-		let mut ret_state = tor_state.clone();
+	pub fn process_new_packets<'a>(&'a mut self) -> Result<CircuitState<'a>, Error> {
+		let tor_state = self
+			.channel
+			.process_new_packets(&mut self.channel_context)?;
+		self.tor_state = Some(tor_state.clone());
 		let verified = self.channel.is_verified();
-		debug!("channel verified = {}", self.channel.is_verified())?;
 
 		if !verified {
 			// protect so we don't do anything unverified
@@ -108,7 +227,11 @@ impl Circuit {
 				)
 				.into());
 			}
-			return Ok(ret_state);
+			return Ok(CircuitState::new(
+				self.built,
+				tor_state.peer_has_closed(),
+				self,
+			));
 		} else if !self.create2 {
 			// we haven't sent the create2 cell yet. Do so.
 			let hop = &self.plan.hops()[0];
@@ -128,10 +251,7 @@ impl Circuit {
 				)?),
 			)?)?;
 
-			self.channel.send_cell(Cell::new(
-				self.circuit_id,
-				CellBody::Create2(Create2::new(&hop, &ctx.channel_context)),
-			)?)?;
+			self.send_cell(CellBody::Create2(Create2::new(&hop, &self.channel_context)))?;
 			self.create2 = true;
 		} else if !self.created2 {
 			// we should have a created cell here
@@ -145,7 +265,7 @@ impl Circuit {
 							.into());
 						}
 						// update our crypt_state
-						let crypt_state_clone = ctx.channel_context.crypt_state.clone();
+						let crypt_state_clone = self.channel_context.crypt_state.clone();
 						let mut crypt_state = lockw!(crypt_state_clone)?;
 						match &crypt_state.hs_state {
 							Some(state) => {
@@ -177,9 +297,6 @@ impl Circuit {
 						.into());
 					}
 				}
-
-				// we handle the create2 cell so do not pass onto user
-				ret_state.clear();
 			}
 		} else if !self.built {
 			// the only thing we should get here are relay cells that have extended2's
@@ -194,7 +311,7 @@ impl Circuit {
 						let cmd = relay.get_relay_cmd();
 						match cmd {
 							RELAY_CMD_EXTENDED2 => {
-								let crypt_state_clone = ctx.channel_context.crypt_state.clone();
+								let crypt_state_clone = self.channel_context.crypt_state.clone();
 								let mut crypt_state = lockw!(crypt_state_clone)?;
 								match &crypt_state.hs_state {
 									Some(state) => {
@@ -251,9 +368,6 @@ impl Circuit {
 				)
 				.into());
 			}
-
-			// since we handle the extended2 we don't pass it along.
-			ret_state.clear();
 		}
 
 		if self.created2 && !self.built {
@@ -265,27 +379,87 @@ impl Circuit {
 				// we need to extend
 				let hop = self.extension_count;
 				debug!("impl extend2")?;
-				self.channel.send_cell(Cell::new(
-					self.circuit_id,
-					CellBody::Extend2(Extend2::new(&hops[hop], &ctx.channel_context)),
-				)?)?;
+				self.send_cell(CellBody::Extend2(Extend2::new(
+					&hops[hop],
+					&self.channel_context,
+				)))?;
 			}
 		}
 
-		Ok(ret_state)
+		if self.built {
+			self.check_sendme(&tor_state)?;
+		}
+
+		Ok(CircuitState::new(
+			self.built,
+			tor_state.peer_has_closed(),
+			self,
+		))
+	}
+
+	fn check_sendme(&mut self, state: &TorState) -> Result<(), Error> {
+		for cell in state.cells() {
+			match cell.body() {
+				CellBody::Relay(relay) => {
+					let circ_id = cell.circ_id();
+					let stream_id = relay.stream_id();
+					let id: u64 = (stream_id as u64) << 32 | (circ_id as u64);
+					let v_stream = match self.sendme_state.get_mut(&id) {
+						Some(cur) => {
+							let ret = *cur;
+							*cur += 1;
+							ret
+						}
+						None => 0,
+					};
+
+					if v_stream == 0 {
+						self.sendme_state.insert(id, 1);
+					}
+
+					let v_circ = match self.sendme_state.get_mut(&(circ_id as u64)) {
+						Some(cur) => {
+							let ret = *cur;
+							*cur += 1;
+							ret
+						}
+						None => 0,
+					};
+
+					if v_circ == 0 {
+						self.sendme_state.insert(circ_id as u64, 1);
+					}
+
+					// flow control stream level at every 50
+					if (1 + v_stream) % 50 == 0 {
+						self.send_cell(CellBody::Relay(Relay::new_sendme(
+							self.channel_context.crypt_state.clone(),
+							stream_id,
+						)?))?;
+					}
+
+					// flow control circuit level at every 100
+					if (1 + v_circ) % 100 == 0 {
+						self.send_cell(CellBody::Relay(Relay::new_sendme(
+							self.channel_context.crypt_state.clone(),
+							0,
+						)?))?;
+					}
+				}
+				_ => {}
+			}
+		}
+		Ok(())
 	}
 }
 
 #[cfg(test)]
 mod test {
-	use crate::cell::CellBody;
-	use crate::cell::Relay;
 	use crate::circuit::Circuit;
-	use crate::constants::*;
 	use crate::process::test::TorProcess;
-	use crate::types::CircuitContext;
 	use crate::types::CircuitPlan;
 	use crate::types::Node;
+	use crate::types::Stream;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_log::*;
 	use std::io::{Read, Write};
@@ -374,6 +548,7 @@ mod test {
 		let test_dir = ".test_circuit.nio";
 		setup_test_dir(test_dir)?;
 
+		let mut success = false;
 		let mut wbuf = vec![];
 		let mut sent_begin = false;
 
@@ -385,6 +560,30 @@ mod test {
 		launch_tor(&format!("{}/router2", test_dir)[..], &mut _p);
 		let mut _p = TorProcess::new();
 		launch_tor(&format!("{}/router3", test_dir)[..], &mut _p);
+
+		/*
+		let mut stream = TcpStream::connect("195.15.242.99:9001")?;
+		let node1 = Node::new(
+			"195.15.242.99:9001",                           // router1
+			"+SHwimxgO9wC2G5WQND6ZpaOGTe5dn8+JK2560mIfC4=", // ed25519Identity
+			"BNvYeW/58WpkpUU02aGLEAJJEVw7fLUj8akrXUGih14=", // ntor pubkey
+			"ACg7VWTjBy3N2rMdbvYi3Um/Uk8=",                 // rsa identity
+		)?;
+
+		let node2 = Node::new(
+			"154.35.175.225:443",                           // router2
+			"r/mzLbFVinqX14PW091o3jM14ifPiEO4zdVxr8BQrsI=", // ed25519Identity
+			"SVcLOUxfauyHtZ08gp1SbxKPlGyhbO6oUBZBv0bYpDw=", // ntor pubkey
+			"z20Kr7OFvnG44RH8XP9LR5I3M7w=",                 // rsa identity
+		)?;
+
+		let node3 = Node::new(
+			"185.220.101.33:10133",                         // router3
+			"WsqCZFG6ZLmArfHDehyx4620Hk2992P17WjIyza8nqo=", // ed25519Identity
+			"IKfvGfoUkEya1uVfV4+6Qy5h2kjb4g7lIJfbYI08bhk=", // ntor pubkey
+			"ADb6NqtDX9XQ9kBiZjaGfr+3LGg=",                 // rsa identity
+		)?;
+				*/
 
 		let mut stream = TcpStream::connect("127.0.0.1:39101")?;
 		let node1 = Node::new(
@@ -416,88 +615,59 @@ mod test {
 		circuit.write_tor(&mut wbuf)?;
 		stream.write(&wbuf)?;
 
-		let mut buffer: Vec<u8> = vec![];
-		buffer.resize(1024 * 1024, 0u8);
-		let mut ctx = CircuitContext::new();
 		let now = Instant::now();
 
 		info!("Begin tor loop")?;
+		let mut buffer = vec![];
+		const BUFFER_SIZE: usize = 8 * 1024;
+		buffer.resize(BUFFER_SIZE, 0u8);
+
+		let mut local_id = 0;
 
 		loop {
 			wbuf.clear();
-			if buffer.len() != 1024 * 1024 {
-				buffer.resize(1024 * 1024, 0u8);
-			}
 
-			let len = stream.read(&mut buffer[..])?;
+			let len = stream.read(&mut buffer[0..BUFFER_SIZE])?;
 
-			debug!("read len = {} bytes", len)?;
+			info!("read len = {} bytes", len)?;
 			// returning 0 means disconnect. Error occurred.
 			assert!(len != 0);
 
 			circuit.read_tor(&mut &buffer[0..len])?;
-
-			match circuit.process_new_packets(&mut ctx) {
-				Ok(tor_state) => {
-					info!(
-						"[{}]: circuit.is_built = {} got tor state = {:?}",
-						now.elapsed().as_millis(),
-						circuit.is_built(),
-						tor_state,
-					)?;
-					if circuit.is_built() && !sent_begin {
-						// send cells
-						circuit.send_cell(CellBody::Relay(Relay::new_begin(
-							"example.com:80",
-							ctx.channel_context.crypt_state.clone(),
-							12,
-						)?))?;
-						circuit.send_cell(CellBody::Relay(Relay::new_data(
-							b"GET / HTTP/1.0\r\n\r\n".to_vec(),
-							ctx.channel_context.crypt_state.clone(),
-							12,
-						)?))?;
-
-						sent_begin = true;
-					}
-
-					let mut success = false;
-					for cell in tor_state.cells() {
-						if circuit.is_built() {
-							match cell.body() {
-								CellBody::Relay(relay) => {
-									// relays have a policy not to allow exits if they don't
-									// know the previous host.  Since our testnet is not
-									// fully setup it follows this policy and closes the
-									// connection. It's ok we just assert these values below.
-									assert_eq!(relay.get_relay_cmd(), RELAY_CMD_END);
-									assert_eq!(cell.circ_id(), circuit.id());
-									assert_eq!(relay.stream_id(), 12);
-									assert_eq!(relay.get_relay_data(), &vec![1]);
-									// success return so test passes.
-									success = true;
-								}
-								_ => {
-									return Err(ErrorKind::ApplicationError(format!(
-										"Unexpected cell: {:?}",
-										cell
-									))
-									.into());
-								}
+			{
+				{
+					match circuit.process_new_packets() {
+						Ok(mut state) => {
+							for stream in state.ready() {
+								info!(
+									"read data on stream id = {}: {}",
+									stream.sid(),
+									std::str::from_utf8(stream.get_data()?).unwrap_or("non-utf8")
+								)?;
+								assert!(local_id != 0);
+								assert_eq!(local_id, stream.sid());
+								success = true;
+								break;
 							}
 						}
-					}
-					if success {
-						break;
+						Err(e) => {
+							error!("Error processing packets: {}", e)?;
+							return Err(ErrorKind::ApplicationError(format!(
+								"Error processing packets: {}",
+								e
+							))
+							.into());
+						}
 					}
 				}
-				Err(e) => {
-					error!("Error processing packets: {}", e)?;
-					return Err(ErrorKind::ApplicationError(format!(
-						"Error processing packets: {}",
-						e
-					))
-					.into());
+
+				{
+					if circuit.is_built() && !sent_begin {
+						let mut stream = circuit.open_stream_dir()?;
+						local_id = stream.id();
+						stream.write(&mut circuit, b"GET / HTTP/1.0\r\n\r\n")?;
+						sent_begin = true;
+					}
 				}
 			}
 
@@ -510,6 +680,10 @@ mod test {
 					now.elapsed().as_millis()
 				)?;
 				stream.write(&wbuf)?;
+			}
+
+			if success {
+				break;
 			}
 		}
 

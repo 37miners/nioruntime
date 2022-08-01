@@ -145,7 +145,7 @@ impl Channel {
 			if buf.len() < len + ctx.offset {
 				buf.resize(len + ctx.offset, 0u8);
 			}
-			reader.read_exact(&mut buf[ctx.offset..])?;
+			reader.read_exact(&mut buf[ctx.offset..ctx.offset + len])?;
 
 			debug!(
 				"process_next_cell (len={}): '{:?}'",

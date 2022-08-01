@@ -59,6 +59,30 @@ impl Relay {
 		})
 	}
 
+	pub fn new_begin_dir(
+		crypt_state: Arc<RwLock<ChannelCryptState>>,
+		stream_id: u16,
+	) -> Result<Self, Error> {
+		Ok(Self {
+			relay_cmd: RELAY_CMD_BEGIN_DIR,
+			relay_data: vec![],
+			crypt_state: Some(crypt_state),
+			stream_id,
+		})
+	}
+
+	pub fn new_sendme(
+		crypt_state: Arc<RwLock<ChannelCryptState>>,
+		stream_id: u16,
+	) -> Result<Self, Error> {
+		Ok(Self {
+			relay_cmd: RELAY_CMD_SENDME,
+			relay_data: vec![],
+			crypt_state: Some(crypt_state),
+			stream_id,
+		})
+	}
+
 	pub fn new_begin(
 		address_port: &str,
 		crypt_state: Arc<RwLock<ChannelCryptState>>,
@@ -75,11 +99,11 @@ impl Relay {
 
 		let mut relay_data = address_port.as_bytes().to_vec();
 		relay_data.push(0); // null terminated string
-		relay_data.push(0); // 4 byte flags (none for now)
-		relay_data.push(0); // 4 byte flags (none for now)
-		relay_data.push(0); // 4 byte flags (none for now)
-		relay_data.push(0); // 4 byte flags (none for now)
-		debug!("relay_data={:?}", relay_data)?;
+					//relay_data.push(0); // 4 byte flags (none for now)
+					//relay_data.push(0); // 4 byte flags (none for now)
+					//relay_data.push(0); // 4 byte flags (none for now)
+					//relay_data.push(0); // 4 byte flags (none for now)
+		info!("relay_data={:?}", relay_data)?;
 		Ok(Self {
 			relay_cmd: RELAY_CMD_BEGIN,
 			relay_data,
@@ -123,7 +147,7 @@ impl Relay {
 		padding.resize(CELL_LEN - ret.len(), 0u8);
 		ret.append(&mut padding);
 
-		debug!("relay serialize pre encrypted cell={:?}", ret)?;
+		info!("relay serialize pre encrypted cell={:?}", ret)?;
 		let mut relay_cell_body = RelayCellBody(*array_mut_ref![ret, 5, 509]);
 		{
 			let mut crypt_state = lockw!(crypt_state)?;

@@ -60,6 +60,8 @@ pub const CHAN_CMD_AUTHORIZE: u8 = 132;
 pub const RELAY_CMD_BEGIN: u8 = 1;
 pub const RELAY_CMD_DATA: u8 = 2;
 pub const RELAY_CMD_END: u8 = 3;
+pub const RELAY_CMD_SENDME: u8 = 5;
+pub const RELAY_CMD_BEGIN_DIR: u8 = 13;
 pub const RELAY_CMD_EXTEND2: u8 = 14;
 pub const RELAY_CMD_EXTENDED2: u8 = 15;
 

@@ -25,6 +25,7 @@ mod process;
 mod rand;
 pub mod reader;
 pub mod rsa;
+pub mod stream;
 pub mod types;
 pub mod util;
 pub mod writer;
