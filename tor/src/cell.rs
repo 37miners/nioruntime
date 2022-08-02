@@ -43,6 +43,18 @@ pub struct Relay {
 }
 
 impl Relay {
+	pub fn new_end(
+		reason: u8,
+		crypt_state: Arc<RwLock<ChannelCryptState>>,
+		stream_id: u16,
+	) -> Result<Self, Error> {
+		Ok(Self {
+			relay_data: vec![reason],
+			relay_cmd: RELAY_CMD_END,
+			crypt_state: Some(crypt_state),
+			stream_id,
+		})
+	}
 	pub fn new_data(
 		relay_data: Vec<u8>,
 		crypt_state: Arc<RwLock<ChannelCryptState>>,
@@ -103,7 +115,7 @@ impl Relay {
 					//relay_data.push(0); // 4 byte flags (none for now)
 					//relay_data.push(0); // 4 byte flags (none for now)
 					//relay_data.push(0); // 4 byte flags (none for now)
-		info!("relay_data={:?}", relay_data)?;
+		debug!("relay_data={:?}", relay_data)?;
 		Ok(Self {
 			relay_cmd: RELAY_CMD_BEGIN,
 			relay_data,
@@ -147,7 +159,7 @@ impl Relay {
 		padding.resize(CELL_LEN - ret.len(), 0u8);
 		ret.append(&mut padding);
 
-		info!("relay serialize pre encrypted cell={:?}", ret)?;
+		debug!("relay serialize pre encrypted cell={:?}", ret)?;
 		let mut relay_cell_body = RelayCellBody(*array_mut_ref![ret, 5, 509]);
 		{
 			let mut crypt_state = lockw!(crypt_state)?;

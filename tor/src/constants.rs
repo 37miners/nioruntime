@@ -60,6 +60,7 @@ pub const CHAN_CMD_AUTHORIZE: u8 = 132;
 pub const RELAY_CMD_BEGIN: u8 = 1;
 pub const RELAY_CMD_DATA: u8 = 2;
 pub const RELAY_CMD_END: u8 = 3;
+pub const RELAY_CMD_CONNECTED: u8 = 4;
 pub const RELAY_CMD_SENDME: u8 = 5;
 pub const RELAY_CMD_BEGIN_DIR: u8 = 13;
 pub const RELAY_CMD_EXTEND2: u8 = 14;
@@ -74,3 +75,18 @@ pub const RSA_ID_LEN: usize = 20;
 pub const ED25519_LEN: usize = 32;
 
 pub const HANDSHAKE_TYPE_NTOR: [u8; 2] = [0, 2];
+
+pub const REASON_MISC: u8 = 1;
+pub const REASON_RESOLVEFAILED: u8 = 2;
+pub const REASON_CONNECTREFUSED: u8 = 3;
+pub const REASON_EXITPOLICY: u8 = 4;
+pub const REASON_DESTROY: u8 = 5;
+pub const REASON_DONE: u8 = 6;
+pub const REASON_TIMEOUT: u8 = 7;
+pub const REASON_NOROUTE: u8 = 8;
+pub const REASON_HIBERNATING: u8 = 9;
+pub const REASON_INTERNAL: u8 = 10;
+pub const REASON_RESOURCELIMIT: u8 = 11;
+pub const REASON_CONNRESET: u8 = 12;
+pub const REASON_TORPROTOCOL: u8 = 13;
+pub const REASON_NOTDIRECTORY: u8 = 14;

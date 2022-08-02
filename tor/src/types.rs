@@ -39,14 +39,14 @@ info!();
 
 pub trait Stream {
 	fn event_type(&self) -> StreamEventType;
-	fn write(&mut self, _: &mut Circuit, _: &[u8]) -> Result<(), Error>;
+	fn write(&mut self, circuit: &mut Circuit, _: &[u8]) -> Result<(), Error>;
 	fn get_data(&self) -> Result<&Vec<u8>, Error>;
 	fn available(&self) -> Result<usize, Error>;
-	fn close(&mut self) -> Result<(), Error>;
+	fn close(&mut self, circuit: &mut Circuit, reason: u8) -> Result<(), Error>;
 	fn id(&self) -> u16;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum StreamEventType {
 	Created,
 	Readable,

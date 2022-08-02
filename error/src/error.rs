@@ -532,7 +532,7 @@ mod test {
 		check_error(
 			SocketAddr::from_str(&format!("127.0.0.1:x")),
 			ErrorKind::AddrParseError(
-				"Error parsing address: invalid IP address syntax".to_string(),
+				"Error parsing address: invalid socket address syntax".to_string(),
 			)
 			.into(),
 		)?;

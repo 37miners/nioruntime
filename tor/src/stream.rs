@@ -70,7 +70,9 @@ impl Stream for StreamImpl {
 	fn available(&self) -> Result<usize, Error> {
 		Ok(self.data.len())
 	}
-	fn close(&mut self) -> Result<(), Error> {
+	fn close(&mut self, circuit: &mut Circuit, reason: u8) -> Result<(), Error> {
+		circuit.close(self.sid, reason)?;
+
 		Ok(())
 	}
 
