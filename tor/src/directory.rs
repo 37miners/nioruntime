@@ -12,237 +12,273 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::get_rand_u128;
+use crate::ed25519::Ed25519Identity;
+use crate::ed25519::PublicKey;
+use crate::rsa::RsaIdentity;
+use crate::util::RngCompatExt;
+use nioruntime_deps::rand::Rng;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use nioruntime_util::bytes_eq;
+use nioruntime_util::bytes_find;
+use std::collections::HashMap;
+use std::fs;
+
+const BACK_N: &[u8] = &['\n' as u8];
+const R_LINE: &[u8] = &['r' as u8, ' ' as u8];
+const M_LINE: &[u8] = &['m' as u8, ' ' as u8, '2' as u8];
+const ID_LINE: &[u8] = &['i' as u8, 'd' as u8, ' ' as u8];
+const PR_LINE: &[u8] = &['p' as u8, 'r' as u8, ' ' as u8];
+const S_LINE: &[u8] = &['s' as u8, ' ' as u8];
+const HSDIR: &[u8] = "HSDir=".as_bytes();
+const DIRCACHE: &[u8] = "DirCache=2".as_bytes();
+const GUARD: &[u8] = "Guard".as_bytes();
+const EXIT: &[u8] = "Exit".as_bytes();
+const BADEXIT: &[u8] = "BadExit".as_bytes();
 
 debug!();
 
-/// Tor Host. Holds information about a tor host.
+/// Tor Host. Holds information about a tor relay.
 #[derive(Debug, Clone)]
-pub struct TorHost {
-	pub addr: String,
+pub struct TorRelay {
+	pub microdesc: String,
+	pub socket_addr: String,
+	pub ntor_onion: Option<PublicKey>,
+	pub ed25519_identity: Ed25519Identity,
+	pub rsa_identity: RsaIdentity,
+	pub is_exit: bool,
+	pub is_guard: bool,
+	pub is_hsdir: bool,
+	pub is_dir_cache: bool,
 }
 
 /// Tor directory. Holds information about the tor directory.
 pub struct TorDirectory {
-	directory_servers: Vec<String>,
-	guards: Vec<TorHost>,
-	relays: Vec<TorHost>,
+	guards: Vec<TorRelay>,
+	relays: Vec<TorRelay>,
+	exits: Vec<TorRelay>,
+	hs_dirs: Vec<TorRelay>,
+	micro_map: HashMap<String, TorRelay>,
 }
 
 impl TorDirectory {
-	pub fn new(directory_servers: Vec<String>) -> Self {
-		Self {
-			directory_servers,
-			relays: vec![],
-			guards: vec![],
-		}
+	pub fn from_file(filename: String) -> Result<Self, Error> {
+		let file_as_string = fs::read_to_string(filename)?;
+		Self::from_bytes(file_as_string.as_bytes())
 	}
 
-	pub fn random_guard(&self) -> Result<&TorHost, Error> {
-		let r = get_rand_u128()? as usize;
-		Ok(&self.guards[r % self.guards.len()])
-	}
-
-	pub fn random_relay(&self) -> Result<&TorHost, Error> {
-		let r = get_rand_u128()? as usize;
-		Ok(&self.relays[r % self.relays.len()])
-	}
-
-	pub fn guards(&self) -> &Vec<TorHost> {
-		&self.guards
-	}
-
-	pub fn relays(&self) -> &Vec<TorHost> {
-		&self.relays
-	}
-
-	// load the guard/relay nodes from the tor directory servers. Try in order specified in [`TorDirectory::new`].
-	pub fn load(&mut self) -> Result<(), Error> {
+	pub fn from_bytes(b: &[u8]) -> Result<Self, Error> {
+		let len = b.len();
 		let mut i = 0;
-		let res = loop {
-			match self.load_from_server(&self.directory_servers[i]) {
-				Ok(info) => break info,
-				Err(e) => warn!(
-					"Error connecting to directory server [{}]: {}",
-					self.directory_servers[i], e
-				)?,
+		let mut rsa_identity = "".to_string();
+		let mut socket_addr = "".to_string();
+		let mut r_line_valid = false;
+		let mut m_line_valid = false;
+		let mut is_dir_cache = false;
+		let mut is_hsdir = false;
+		let mut is_exit = false;
+		let mut is_guard = false;
+		let mut is_bad_exit = false;
+		let mut ed25519_identity = "".to_string();
+		let mut relays = vec![];
+		let mut exits = vec![];
+		let mut guards = vec![];
+		let mut hs_dirs = vec![];
+		let mut micro_map = HashMap::new();
+
+		loop {
+			if i >= len {
+				break;
+			}
+
+			let x = match bytes_find(&b[i..], BACK_N) {
+				Some(x) => x,
+				None => len,
+			};
+
+			if x != len {
+				// r line
+				if i + 2 < len && bytes_eq(&b[i..i + 2], R_LINE) {
+					let line = std::str::from_utf8(&b[i..i + x])?;
+					let arr: Vec<&str> = line.trim().split_whitespace().collect();
+					if arr.len() > 7 {
+						rsa_identity = arr[2].to_string();
+						socket_addr = format!("{}:{}", arr[6], arr[7]);
+						r_line_valid = true;
+					} else {
+						r_line_valid = false;
+					}
+				} else if i + 2 < len && bytes_eq(&b[i..i + 2], S_LINE) {
+					is_exit = bytes_find(&b[i..i + x], EXIT).is_some();
+					is_guard = bytes_find(&b[i..i + x], GUARD).is_some();
+					is_bad_exit = bytes_find(&b[i..i + x], BADEXIT).is_some();
+				} else if i + 3 < len && bytes_eq(&b[i..i + 3], ID_LINE) {
+					let line = std::str::from_utf8(&b[i..i + x])?;
+					let arr: Vec<&str> = line.trim().split_whitespace().collect();
+					if arr.len() > 2 {
+						ed25519_identity = arr[2].to_string();
+						m_line_valid = true;
+					} else {
+						m_line_valid = false;
+					}
+				} else if i + 3 < len && bytes_eq(&b[i..i + 3], PR_LINE) {
+					is_hsdir = bytes_find(&b[i..i + x], HSDIR).is_some();
+					is_dir_cache = bytes_find(&b[i..i + x], DIRCACHE).is_some();
+				} else if i + 3 < len && bytes_eq(&b[i..i + 3], M_LINE) {
+					let line = std::str::from_utf8(&b[i..i + x])?;
+					let arr: Vec<&str> = line.trim().split_whitespace().collect();
+					if arr.len() > 2 {
+						match arr[2].split('=').last() {
+							Some(microdesc_value) => {
+								let microdesc = microdesc_value.to_string();
+								if r_line_valid && m_line_valid {
+									match Ed25519Identity::from_base64(&ed25519_identity) {
+										Some(ed25519_identity) => {
+											match RsaIdentity::from_base64(&rsa_identity) {
+												Some(rsa_identity) => {
+													let socket_addr = socket_addr.clone();
+													let tor_relay = TorRelay {
+														microdesc: microdesc.clone(),
+														socket_addr,
+														ntor_onion: None,
+														ed25519_identity,
+														rsa_identity,
+														is_exit,
+														is_guard,
+														is_hsdir,
+														is_dir_cache,
+													};
+
+													if !is_bad_exit {
+														relays.push(tor_relay.clone());
+													}
+													if is_exit && !is_bad_exit {
+														exits.push(tor_relay.clone());
+													}
+													if is_guard && !is_bad_exit {
+														guards.push(tor_relay.clone());
+													}
+													if is_hsdir {
+														hs_dirs.push(tor_relay.clone());
+													}
+													micro_map.insert(microdesc, tor_relay);
+													is_hsdir = false; // reset
+													is_dir_cache = false; // reset
+													is_exit = false; // reset
+													is_guard = false; // reset
+												}
+												None => {}
+											}
+										}
+										None => {}
+									}
+								}
+							}
+							None => {
+								// something wrong look for the next r line.
+							}
+						}
+					} else {
+						// something wrong look for the next r line.
+					}
+				}
+				i += x;
 			}
 
 			i += 1;
+		}
+		Ok(Self {
+			guards,
+			relays,
+			exits,
+			hs_dirs,
+			micro_map,
+		})
+	}
 
-			if i >= self.directory_servers.len() {
-				return Err(ErrorKind::ApplicationError(
-					"Not able to contact any directory servers".to_string(),
-				)
-				.into());
+	pub fn add_ntor(&mut self, microdesc: String, ntor_onion: PublicKey) -> Result<(), Error> {
+		match self.micro_map.get_mut(&microdesc) {
+			Some(relay) => {
+				relay.ntor_onion = Some(ntor_onion);
 			}
-		};
-		self.guards = res.0;
-		self.relays = res.1;
-
-		debug!("Returned guards:")?;
-		let mut count = 0;
-		for guard in &self.guards {
-			debug!("guard[{}]={:?}", count, guard)?;
-			count += 1;
+			None => {
+				return Err(ErrorKind::Tor(format!(
+					"microdesc: {} not found in directory",
+					microdesc
+				))
+				.into())
+			}
 		}
-
-		debug!("Returned relays:")?;
-		let mut count = 0;
-		for relay in &self.relays {
-			debug!("relay[{}]={:?}", count, relay)?;
-			count += 1;
-		}
-
 		Ok(())
 	}
 
-	fn load_from_server(
-		&self,
-		directory_server: &String,
-	) -> Result<(Vec<TorHost>, Vec<TorHost>), Error> {
-		let mut relays = vec![];
-		let mut guards = vec![];
-		let mut stream = TcpStream::connect(directory_server)?;
-		stream.write(b"GET /tor/status-vote/current/consensus-Microdesc HTTP/1.0\r\n\r\n")?;
-		let mut reader = BufReader::new(stream);
-		let mut next_host: Option<TorHost> = None;
-
-		loop {
-			let mut line = String::new();
-			let count = reader.read_line(&mut line)?;
-			if count == 0 {
-				break;
-			}
-			if &line[..2] == "r " {
-				let split: Vec<&str> = line.split(" ").collect();
-				let addr = format!("{}:{}", split[6], split[7]);
-				next_host = Some(TorHost { addr });
-			}
-			if &line[..2] == "s " {
-				match next_host.clone() {
-					Some(last_host) => match line.find(" Guard") {
-						Some(_) => {
-							guards.push(last_host.clone());
-							relays.push(last_host);
-						}
-						None => relays.push(last_host),
-					},
-					None => {
-						return Err(ErrorKind::ApplicationError(
-							"Invalid format for directory data. 'r' must be followed by 's'."
-								.to_string(),
-						)
-						.into())
-					}
-				}
-			}
+	pub fn random_guard(&self) -> Option<&TorRelay> {
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
+		let len = self.guards.len();
+		if len == 0 {
+			return None;
 		}
+		let r: usize = rng.gen();
+		Some(&self.guards[r % len])
+	}
 
-		Ok((guards, relays))
+	pub fn random_relay(&self) -> Option<&TorRelay> {
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
+		let len = self.relays.len();
+		if len == 0 {
+			return None;
+		}
+		let r: usize = rng.gen();
+		Some(&self.relays[r % len])
+	}
+
+	pub fn random_exit(&self) -> Option<&TorRelay> {
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
+		let len = self.exits.len();
+		if len == 0 {
+			return None;
+		}
+		let r: usize = rng.gen();
+		Some(&self.exits[r % len])
+	}
+
+	pub fn guards(&self) -> &Vec<TorRelay> {
+		&self.guards
+	}
+
+	pub fn relays(&self) -> &Vec<TorRelay> {
+		&self.relays
+	}
+
+	pub fn exits(&self) -> &Vec<TorRelay> {
+		&self.exits
+	}
+
+	pub fn hsdirs(&self) -> &Vec<TorRelay> {
+		&self.hs_dirs
 	}
 }
 
 #[cfg(test)]
 mod test {
-	use crate::directory::TorDirectory;
+	use crate::TorDirectory;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
-	use std::io::{Read, Write};
-	use std::net::TcpListener;
 
 	debug!();
 
-	//#[test]
-	fn _test_directory_load() -> Result<(), Error> {
-		let listener = TcpListener::bind("127.0.0.1:8093")?;
-
-		info!("starting new thread to process requests")?;
-		// make a mock directory server that returns two entries.
-		std::thread::spawn(move || {
-			for stream in listener.incoming() {
-				let mut stream = stream.unwrap();
-				let buf = &mut [0u8; 100];
-				stream.read(&mut buf[..]).unwrap();
-				stream.write(
-b"r plithismos GRdTUVgUe1VLSfpLIkV1HB7yHS4 uf5xsxMQy/gJxTNnCtlBtnXOzCg 2022-02-22 14:02:49 45.61.184.239 9001 9030\r\n\
-s Fast Guard Running Stable V2Dir Valid\r\n\
-r emandeman44678gudno GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 82.220.109.130 9001 0\r\n\
-s Fast HSDir Running Stable V2Dir Valid\r\n\
-r emandeman44678gudno2 GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 83.220.109.130 9002 0\r\n\
-p something\r\n\
-s Fast HSDir V2Dir Valid\r\n\
-").unwrap();
-			}
-		});
-
-		let directories = vec![
-			"127.0.0.1:8094".to_string(), // test failing
-			"127.0.0.1:8093".to_string(),
-		];
-
-		let mut tor_dir = TorDirectory::new(directories);
-
-		tor_dir.load()?;
-
-		let relays = tor_dir.relays();
-		assert_eq!(relays.len(), 2);
-		let guards = tor_dir.guards();
-		assert_eq!(guards.len(), 1);
-
-		assert_eq!(relays[0].addr, "82.220.109.130:9001");
-		assert_eq!(relays[1].addr, "83.220.109.130:9002");
-		assert_eq!(guards[0].addr, "45.61.184.239:9001");
-
-		Ok(())
-	}
-
 	#[test]
-	fn test_all_dirs_fail() -> Result<(), Error> {
-		let directories = vec![
-			"127.0.0.1:8094".to_string(), // test failing
-			"127.0.0.1:8095".to_string(),
-		];
+	fn test_dir_file() -> Result<(), Error> {
+		let directory = TorDirectory::from_file("./test/resources/authority".to_string())?;
+		let guard = directory.random_guard().unwrap();
+		let relay = directory.random_relay().unwrap();
+		let exit = directory.random_exit().unwrap();
+		info!("g={:?},r={:?},e={:?}", guard, relay, exit)?;
 
-		let mut tor_dir = TorDirectory::new(directories);
-		assert!(tor_dir.load().is_err());
-		Ok(())
-	}
-
-	#[test]
-	fn test_invalid_file() -> Result<(), Error> {
-		let listener = TcpListener::bind("127.0.0.1:8099")?;
-
-		info!("starting new thread to process requests")?;
-		// make a mock directory server that returns two entries.
-		std::thread::spawn(move || {
-			for stream in listener.incoming() {
-				let mut stream = stream.unwrap();
-				let buf = &mut [0u8; 100];
-				stream.read(&mut buf[..]).unwrap();
-				stream.write(
-b"x plithismos GRdTUVgUe1VLSfpLIkV1HB7yHS4 uf5xsxMQy/gJxTNnCtlBtnXOzCg 2022-02-22 14:02:49 45.61.184.239 9001 9030\r\n\
-s Fast Guard Running Stable V2Dir Valid\r\n\
-r emandeman44678gudno GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 82.220.109.130 9001 0\r\n\
-s Fast HSDir Running Stable V2Dir Valid\r\n\
-r emandeman44678gudno2 GTlGnR6Jj3Z0pV8Jvkbul0LDP6Q QUKIW/cbXHxGNhzA4BN2b0Shmss 2022-02-22 13:00:31 83.220.109.130 9002 0\r\n\
-s Fast HSDir V2Dir Valid\r\n\
-").unwrap();
-			}
-		});
-
-		let directories = vec![
-			"127.0.0.1:8094".to_string(), // test failing
-			"127.0.0.1:8099".to_string(),
-		];
-
-		let mut tor_dir = TorDirectory::new(directories);
-
-		assert!(tor_dir.load().is_err());
+		assert_eq!(directory.exits().len(), 1657);
+		assert_eq!(directory.guards().len(), 3444);
+		assert_eq!(directory.relays().len(), 7038);
+		assert_eq!(directory.hsdirs().len(), 7051);
 
 		Ok(())
 	}

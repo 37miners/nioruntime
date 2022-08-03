@@ -43,6 +43,8 @@ pub use caret;
 pub use chrono;
 pub use cipher;
 pub use colored;
+pub use curve25519_dalek;
+pub use data_encoding;
 pub use digest;
 pub use dirs;
 pub use ed25519_dalek;

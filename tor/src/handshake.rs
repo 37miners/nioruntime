@@ -8,7 +8,6 @@
 //! client knows that nobody _else_ shares those keys unless they
 //! relay's private onion key.
 
-#[cfg(feature = "hs")]
 pub(crate) mod hs_ntor;
 pub mod ntor;
 #[cfg(feature = "v3")]

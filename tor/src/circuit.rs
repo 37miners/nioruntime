@@ -223,6 +223,11 @@ impl Circuit {
 	pub fn open_stream_dir(&mut self) -> Result<Box<dyn Stream>, Error> {
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let stream_id: u16 = rng.gen();
+
+		let circ_id = self.id();
+		let id: u64 = (stream_id as u64) << 32 | (circ_id as u64);
+		self.sendme_state.insert(id as u64, 0);
+
 		let body = CellBody::Relay(Relay::new_begin_dir(
 			self.channel_context.crypt_state.clone(),
 			stream_id,
@@ -237,6 +242,11 @@ impl Circuit {
 	pub fn open_stream(&mut self, address_port: &str) -> Result<Box<dyn Stream>, Error> {
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let stream_id: u16 = rng.gen();
+
+		let circ_id = self.id();
+		let id: u64 = (stream_id as u64) << 32 | (circ_id as u64);
+		self.sendme_state.insert(id as u64, 0);
+
 		debug!("address port = {}", address_port)?;
 		let body = CellBody::Relay(Relay::new_begin(
 			address_port,
@@ -283,7 +293,6 @@ impl Circuit {
 			.process_new_packets(&mut self.channel_context)?;
 		self.tor_state = Some(tor_state.clone());
 		let verified = self.channel.is_verified();
-
 		if !verified {
 			// protect so we don't do anything unverified
 			if tor_state.cells().len() > 0 {
@@ -649,8 +658,7 @@ mod test {
 		let mut _p = TorProcess::new();
 		launch_tor(&format!("{}/router3", test_dir)[..], &mut _p);
 
-		/*
-				let mut stream = TcpStream::connect("195.15.242.99:9001")?;
+		let mut stream = TcpStream::connect("195.15.242.99:9001")?;
 		let node1 = Node::new(
 			"195.15.242.99:9001",                           // router1
 			"+SHwimxgO9wC2G5WQND6ZpaOGTe5dn8+JK2560mIfC4=", // ed25519Identity
@@ -666,34 +674,34 @@ mod test {
 		)?;
 
 		let node3 = Node::new(
-			"185.220.101.33:10133",                         // router3
-			"WsqCZFG6ZLmArfHDehyx4620Hk2992P17WjIyza8nqo=", // ed25519Identity
-			"IKfvGfoUkEya1uVfV4+6Qy5h2kjb4g7lIJfbYI08bhk=", // ntor pubkey
-			"ADb6NqtDX9XQ9kBiZjaGfr+3LGg=",                 // rsa identity
+			"179.43.134.188:443",                           // router3
+			"7LMXlb4y8stmPtP5B0GWJ59F5jLLQD6a3Zc7Qb9pbKc=", //ed25519Identity
+			"qIlUTAqAtLgus27ctiJfxEmSfU/LOkCvZ1cbi3jTvWM=", // ntor pubkey
+			"/RJ9EBTtPTav5QVYqIvV6Ns0pkU=",                 // rsa identity
 		)?;
-				*/
+		/*
+				let mut stream = TcpStream::connect("127.0.0.1:39101")?;
+				let node1 = Node::new(
+					"127.0.0.1:39101",                              // router1
+					"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
+					"PtfQsnnCPPA93X3BcbFeCxGMLDfVfIG4XbzVCIlOsgU=", // ntor pubkey
+					"v29gfbDlrWStvBjWRnqwKNUhpv4=",                 // rsa identity
+				)?;
 
-		let mut stream = TcpStream::connect("127.0.0.1:39101")?;
-		let node1 = Node::new(
-			"127.0.0.1:39101",                              // router1
-			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
-			"PtfQsnnCPPA93X3BcbFeCxGMLDfVfIG4XbzVCIlOsgU=", // ntor pubkey
-			"v29gfbDlrWStvBjWRnqwKNUhpv4=",                 // rsa identity
-		)?;
+				let node2 = Node::new(
+					"127.0.0.1:39102",                              // router2
+					"8nf9qPZ9gixbks0KrZEiLsKJYyVmmAgZUAW/iYvGnKI=", // ed25519Identity
+					"l7BJm4Cq3c8YJlq/H+vaUtdaJ4K7lsDEmqv8ZI3HUjo=", // ntor pubkey
+					"kJP6GBtWIPDGzQWJLpLA7qW2M9o",                  // rsa identity
+				)?;
 
-		let node2 = Node::new(
-			"127.0.0.1:39102",                              // router2
-			"8nf9qPZ9gixbks0KrZEiLsKJYyVmmAgZUAW/iYvGnKI=", // ed25519Identity
-			"l7BJm4Cq3c8YJlq/H+vaUtdaJ4K7lsDEmqv8ZI3HUjo=", // ntor pubkey
-			"kJP6GBtWIPDGzQWJLpLA7qW2M9o",                  // rsa identity
-		)?;
-
-		let node3 = Node::new(
-			"127.0.0.1:39103",                              // router3
-			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
-			"zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=", // ntor pubkey
-			"x06BlN36ChTqd9Nqeb25o0byc0I=",                 // rsa identity
-		)?;
+				let node3 = Node::new(
+					"127.0.0.1:39103",                              // router3
+					"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
+					"zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=", // ntor pubkey
+					"x06BlN36ChTqd9Nqeb25o0byc0I=",                 // rsa identity
+				)?;
+		*/
 
 		let now = Instant::now();
 		let plan = CircuitPlan::new(vec![node1, node2, node3]);
@@ -729,13 +737,15 @@ mod test {
 								match stream.event_type() {
 									StreamEventType::Readable => {
 										info!(
-											"read data on stream id = {}: {}",
+											"read data on stream id [elapsed={}] = {}: {}",
+											now.elapsed().as_millis() as f64 / 1000 as f64,
 											stream.sid(),
 											std::str::from_utf8(stream.get_data()?)
 												.unwrap_or("non-utf8")
 										)?;
 										assert!(local_id != 0);
 										assert_eq!(local_id, stream.sid());
+										if !read_data {}
 										read_data = true;
 									}
 									StreamEventType::Close(reason) => {
@@ -773,13 +783,12 @@ mod test {
 					}
 				}
 
-				{
-					if circuit.is_built() && !sent_begin {
-						let mut stream = circuit.open_stream_dir()?;
-						local_id = stream.id();
-						stream.write(&mut circuit, b"GET /tor/hs/3/12345 HTTP/1.0\r\n\r\n")?;
-						sent_begin = true;
-					}
+				if circuit.is_built() && !sent_begin {
+					let mut stream = circuit.open_stream_dir()?;
+					//let mut stream = circuit.open_stream("192.99.42.103:8080")?;
+					local_id = stream.id();
+					stream.write(&mut circuit, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+					sent_begin = true;
 				}
 			}
 

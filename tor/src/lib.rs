@@ -21,8 +21,8 @@ mod directory;
 pub mod ed25519;
 pub mod handshake;
 mod kdf;
+pub mod keymanip;
 mod process;
-mod rand;
 pub mod reader;
 pub mod rsa;
 pub mod stream;
@@ -35,9 +35,6 @@ pub use crate::directory::TorDirectory;
 pub use crate::ed25519::CertifiedKey;
 pub use crate::rsa::{PrivateKey, PublicKey};
 pub use crate::types::TorState;
-
-// private
-use crate::rand::get_rand_u128;
 
 /// A vector of bytes that gets cleared when it's dropped.
 type SecretBytes = nioruntime_deps::zeroize::Zeroizing<Vec<u8>>;

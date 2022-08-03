@@ -24,23 +24,24 @@
 #![allow(dead_code)]
 #![allow(unreachable_pub)]
 
-use crate::crypto::handshake::KeyGenerator;
-use crate::crypto::ll::kdf::{Kdf, ShakeKdf};
+use crate::ed25519;
+use crate::handshake::KeyGenerator;
+use crate::kdf::{Kdf, ShakeKdf};
+use crate::reader::Reader;
+use crate::util::RngCompatExt;
+use crate::writer::Writer;
 use crate::SecretBytes;
-use tor_bytes::{Reader, Writer};
-use tor_llcrypto::d::Sha3_256;
-use tor_llcrypto::pk::{curve25519, ed25519};
-use tor_llcrypto::util::rand_compat::RngCompatExt;
-
+use nioruntime_deps::aes::Aes256Ctr;
 use nioruntime_deps::cipher::{NewCipher, StreamCipher};
-
 use nioruntime_deps::digest::Digest;
 use nioruntime_deps::generic_array::GenericArray;
 use nioruntime_deps::rand_core::{CryptoRng, RngCore};
+use nioruntime_deps::sha3::Sha3_256;
+use nioruntime_deps::x25519_dalek;
 use nioruntime_deps::zeroize::Zeroizing;
+use nioruntime_err::Error;
+use nioruntime_err::ErrorKind;
 use std::convert::TryInto;
-use tor_error::into_internal;
-use tor_llcrypto::cipher::aes::Aes256Ctr;
 
 /// The ENC_KEY from the HS Ntor protocol
 type EncKey = [u8; 32];
@@ -81,7 +82,7 @@ impl KeyGenerator for HsNtorHkdfKeyGenerator {
 pub struct HsNtorClientInput {
 	/// Introduction point encryption key (aka B)
 	/// (found in the HS descriptor)
-	pub B: curve25519::PublicKey,
+	pub B: x25519_dalek::PublicKey,
 
 	/// Introduction point authentication key (aka AUTH_KEY)
 	/// (found in the HS descriptor)
@@ -104,7 +105,7 @@ pub struct HsNtorClientInput {
 impl HsNtorClientInput {
 	/// Create a new `HsNtorClientInput`
 	pub fn new(
-		B: curve25519::PublicKey,
+		B: x25519_dalek::PublicKey,
 		auth_key: ed25519::PublicKey,
 		subcredential: Subcredential,
 		plaintext: Vec<u8>,
@@ -127,9 +128,9 @@ pub struct HsNtorClientState {
 	proto_input: HsNtorClientInput,
 
 	/// The temporary curve25519 secret that we generated for this handshake.
-	x: curve25519::StaticSecret,
+	x: x25519_dalek::StaticSecret,
 	/// The corresponding private key
-	X: curve25519::PublicKey,
+	X: x25519_dalek::PublicKey,
 }
 
 /// Encrypt the 'plaintext' using 'enc_key'. Then compute the intro cell MAC
@@ -174,8 +175,8 @@ where
 	R: RngCore + CryptoRng,
 {
 	// Create client's ephemeral keys to be used for this handshake
-	let x = curve25519::StaticSecret::new(rng.rng_compat());
-	let X = curve25519::PublicKey::from(&x);
+	let x = x25519_dalek::StaticSecret::new(rng.rng_compat());
+	let X = x25519_dalek::PublicKey::from(&x);
 
 	// Get EXP(B,x)
 	let bx = x.diffie_hellman(&proto_input.B);
@@ -226,7 +227,7 @@ where
 {
 	// Extract the public key of the service from the message
 	let mut cur = Reader::from_slice(msg.as_ref());
-	let Y: curve25519::PublicKey = cur.extract()?;
+	let Y: x25519_dalek::PublicKey = cur.extract()?;
 	let mac_tag: MacTag = cur.extract()?;
 
 	// Get EXP(Y,x) and EXP(B,x)
@@ -244,7 +245,7 @@ where
 
 	// Validate the MAC!
 	if my_mac_tag != mac_tag {
-		return Err(Error::BadCircHandshake);
+		return Err(ErrorKind::Tor("BadCircHandshake".to_string()).into());
 	}
 
 	Ok(keygen)
@@ -255,9 +256,9 @@ where
 /// The input required to enter the HS Ntor protocol as a service
 pub struct HsNtorServiceInput {
 	/// Introduction point encryption privkey
-	pub b: curve25519::StaticSecret,
+	pub b: x25519_dalek::StaticSecret,
 	/// Introduction point encryption pubkey
-	pub B: curve25519::PublicKey,
+	pub B: x25519_dalek::PublicKey,
 
 	/// Introduction point authentication key (aka AUTH_KEY)
 	pub auth_key: ed25519::PublicKey,
@@ -274,8 +275,8 @@ pub struct HsNtorServiceInput {
 impl HsNtorServiceInput {
 	/// Create a new `HsNtorServiceInput`
 	pub fn new(
-		b: curve25519::StaticSecret,
-		B: curve25519::PublicKey,
+		b: x25519_dalek::StaticSecret,
+		B: x25519_dalek::PublicKey,
 		auth_key: ed25519::PublicKey,
 		subcredential: Subcredential,
 		intro_cell_data: Vec<u8>,
@@ -309,7 +310,7 @@ where
 {
 	// Extract all the useful pieces from the message
 	let mut cur = Reader::from_slice(msg.as_ref());
-	let X: curve25519::PublicKey = cur.extract()?;
+	let X: x25519_dalek::PublicKey = cur.extract()?;
 	let remaining_bytes = cur.remaining();
 	let ciphertext = &mut cur.take(remaining_bytes - 32)?.to_vec();
 	let mac_tag: MacTag = cur.extract()?;
@@ -332,7 +333,7 @@ where
 	let my_mac_tag = hs_ntor_mac(&mac_body, &mac_key)?;
 
 	if my_mac_tag != mac_tag {
-		return Err(Error::BadCircHandshake);
+		return Err(ErrorKind::Tor("BadCircHandshake".to_string()).into());
 	}
 
 	// Decrypt the ENCRYPTED_DATA from the intro cell
@@ -342,8 +343,8 @@ where
 	let plaintext = ciphertext; // it's now decrypted
 
 	// Generate ephemeral keys for this handshake
-	let y = curve25519::EphemeralSecret::new(rng.rng_compat());
-	let Y = curve25519::PublicKey::from(&y);
+	let y = x25519_dalek::EphemeralSecret::new(rng.rng_compat());
+	let Y = x25519_dalek::PublicKey::from(&y);
 
 	// Compute EXP(X,y) and EXP(X,b)
 	let xy = y.diffie_hellman(&X);
@@ -375,8 +376,16 @@ fn hs_ntor_mac(key: &[u8], message: &[u8]) -> Result<MacTag, Error> {
 	let result = d.finalize();
 	result
 		.try_into()
-		.map_err(into_internal!("failed MAC computation"))
-		.map_err(Error::from)
+		.map_err(|e| {
+			let error: Error =
+				ErrorKind::Tor(format!("hs_ntor_mac generated error1: {}", e)).into();
+			error
+		})
+		.map_err(|e| {
+			let error: Error =
+				ErrorKind::Tor(format!("hs_ntor_mac generated error2: {}", e)).into();
+			error
+		})
 }
 
 /// Helper function: Compute the part of the HS ntor handshake that generates
@@ -393,10 +402,10 @@ fn hs_ntor_mac(key: &[u8], message: &[u8]) -> Result<MacTag, Error> {
 ///
 /// Return (ENC_KEY, MAC_KEY).
 fn get_introduce1_key_material(
-	bx: &curve25519::SharedSecret,
+	bx: &x25519_dalek::SharedSecret,
 	auth_key: &ed25519::PublicKey,
-	X: &curve25519::PublicKey,
-	B: &curve25519::PublicKey,
+	X: &x25519_dalek::PublicKey,
+	B: &x25519_dalek::PublicKey,
 	subcredential: &Subcredential,
 ) -> Result<(EncKey, MacKey), Error> {
 	let hs_ntor_protoid_constant = &b"tor-hs-ntor-curve25519-sha3-256-1"[..];
@@ -423,12 +432,40 @@ fn get_introduce1_key_material(
 	// Extract the keys into arrays
 	let enc_key = hs_keys[0..32]
 		.try_into()
-		.map_err(into_internal!("converting enc_key"))
-		.map_err(Error::from)?;
+		.map_err(|e| {
+			let error: Error = ErrorKind::Tor(format!(
+				"get_introduce1_key_material generated error1: {}",
+				e
+			))
+			.into();
+			error
+		})
+		.map_err(|e| {
+			let error: Error = ErrorKind::Tor(format!(
+				"get_introduce1_key_material generated error2: {}",
+				e
+			))
+			.into();
+			error
+		})?;
 	let mac_key = hs_keys[32..64]
 		.try_into()
-		.map_err(into_internal!("converting mac_key"))
-		.map_err(Error::from)?;
+		.map_err(|e| {
+			let error: Error = ErrorKind::Tor(format!(
+				"get_introduce1_key_material generated error3: {}",
+				e
+			))
+			.into();
+			error
+		})
+		.map_err(|e| {
+			let error: Error = ErrorKind::Tor(format!(
+				"get_introduce1_key_material generated error4: {}",
+				e
+			))
+			.into();
+			error
+		})?;
 
 	Ok((enc_key, mac_key))
 }
@@ -447,12 +484,12 @@ fn get_introduce1_key_material(
 /// Return (keygen, AUTH_INPUT_MAC), where keygen is a key generator based on
 /// NTOR_KEY_SEED.
 fn get_rendezvous1_key_material(
-	xy: &curve25519::SharedSecret,
-	xb: &curve25519::SharedSecret,
+	xy: &x25519_dalek::SharedSecret,
+	xb: &x25519_dalek::SharedSecret,
 	auth_key: &ed25519::PublicKey,
-	B: &curve25519::PublicKey,
-	X: &curve25519::PublicKey,
-	Y: &curve25519::PublicKey,
+	B: &x25519_dalek::PublicKey,
+	X: &x25519_dalek::PublicKey,
+	Y: &x25519_dalek::PublicKey,
 ) -> Result<(HsNtorHkdfKeyGenerator, AuthInputMac), Error> {
 	let hs_ntor_protoid_constant = &b"tor-hs-ntor-curve25519-sha3-256-1"[..];
 	let hs_ntor_mac_constant = &b"tor-hs-ntor-curve25519-sha3-256-1:hs_mac"[..];
@@ -508,11 +545,11 @@ mod test {
 	/// Basic HS Ntor test that does the handshake between client and service
 	/// and makes sure that the resulting keys and KDF is legit.
 	fn hs_ntor() -> Result<(), Error> {
-		let mut rng = rand::thread_rng().rng_compat();
+		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 
 		// Let's initialize keys for the client (and the intro point)
-		let intro_b_privkey = curve25519::StaticSecret::new(&mut rng);
-		let intro_b_pubkey = curve25519::PublicKey::from(&intro_b_privkey);
+		let intro_b_privkey = x25519_dalek::StaticSecret::new(&mut rng);
+		let intro_b_pubkey = x25519_dalek::PublicKey::from(&intro_b_privkey);
 		let intro_auth_key_privkey = ed25519::SecretKey::generate(&mut rng);
 		let intro_auth_key_pubkey = ed25519::PublicKey::from(&intro_auth_key_privkey);
 

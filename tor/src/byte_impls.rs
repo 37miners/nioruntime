@@ -44,6 +44,12 @@ impl Readable for Signature {
 	}
 }
 
+impl<const N: usize> Writeable for [u8; N] {
+	fn write_onto<B: Writer + ?Sized>(&self, b: &mut B) {
+		b.write_all(&self[..]);
+	}
+}
+
 use nioruntime_deps::generic_array::GenericArray;
 
 // ----------------------------------------------------------------------
