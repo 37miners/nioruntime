@@ -25,15 +25,16 @@ jemallocator = "0.5.0"
 
 clap = { version = "3.1.6", features = ["yaml"] }
 
-nioruntime_deps   = { path = "./deps"         }
-nioruntime_log    = { path = "./log"          }
-nioruntime_http   = { path = "./http"         }
-nioruntime_util   = { path = "./util"         }
-nioruntime_evh    = { path = "./eventhandler" }
-nioruntime_err    = { path = "./error"        }
-nioruntime_derive = { path = "./derive"       }
-nioruntime_tests  = { path = "./tests"        }
-nioruntime_tor    = { path = "./tor"          }
+nioruntime_deps       = { path = "./deps"         }
+nioruntime_log        = { path = "./log"          }
+nioruntime_http       = { path = "./http"         }
+nioruntime_util       = { path = "./util"         }
+nioruntime_evh        = { path = "./eventhandler" }
+nioruntime_err        = { path = "./error"        }
+nioruntime_derive     = { path = "./derive"       }
+nioruntime_tests      = { path = "./tests"        }
+nioruntime_tor        = { path = "./tor"          }
+nioruntime_torclient  = { path = "./torclient"    }
 
 [build-dependencies]
 built = { version = "0.4", features = ["git2"]}

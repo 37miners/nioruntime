@@ -1131,6 +1131,7 @@ dependencies = [
  "nioruntime_log",
  "nioruntime_tests",
  "nioruntime_tor",
+ "nioruntime_torclient",
  "nioruntime_util",
 ]
 
@@ -1277,6 +1278,17 @@ dependencies = [
  "nioruntime_log",
  "nioruntime_util",
  "zeroize",
+]
+
+[[package]]
+name = "nioruntime_torclient"
+version = "0.0.3-beta3"
+dependencies = [
+ "nioruntime_deps",
+ "nioruntime_err",
+ "nioruntime_log",
+ "nioruntime_tor",
+ "nioruntime_util",
 ]
 
 [[package]]

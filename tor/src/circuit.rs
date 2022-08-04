@@ -658,12 +658,13 @@ mod test {
 		let mut _p = TorProcess::new();
 		launch_tor(&format!("{}/router3", test_dir)[..], &mut _p);
 
-		let mut stream = TcpStream::connect("195.15.242.99:9001")?;
+		/*
+		let mut stream = TcpStream::connect("104.53.221.159:9001")?;
 		let node1 = Node::new(
-			"195.15.242.99:9001",                           // router1
-			"+SHwimxgO9wC2G5WQND6ZpaOGTe5dn8+JK2560mIfC4=", // ed25519Identity
-			"BNvYeW/58WpkpUU02aGLEAJJEVw7fLUj8akrXUGih14=", // ntor pubkey
-			"ACg7VWTjBy3N2rMdbvYi3Um/Uk8=",                 // rsa identity
+			"104.53.221.159:9001",                          // router1
+			"ZtzhbIWHJpGQG+5N7hbRTtenyzq2RNJrx0QegtoY+bY=", // ed25519Identity
+			"03dOCy/Dud/kPwIzD+cbpIR+K8BxJoHIKmGsrXvJiFY=", // ntor pubkey
+			"AAoQ1DAR6kkoo19hBAX5K0QztNw=",                 // rsa identity
 		)?;
 
 		let node2 = Node::new(
@@ -674,34 +675,33 @@ mod test {
 		)?;
 
 		let node3 = Node::new(
-			"179.43.134.188:443",                           // router3
-			"7LMXlb4y8stmPtP5B0GWJ59F5jLLQD6a3Zc7Qb9pbKc=", //ed25519Identity
-			"qIlUTAqAtLgus27ctiJfxEmSfU/LOkCvZ1cbi3jTvWM=", // ntor pubkey
-			"/RJ9EBTtPTav5QVYqIvV6Ns0pkU=",                 // rsa identity
+			"5.255.101.131:9001",
+			"fKy8py24dUeTinJgQ78OW0c7BV2Q3gX24OMIDZCZQ+4=",
+			"MmMf88cx87yaT1/psofamaKdEmRg07x0NStFhbOr0yc=",
+			"CLSIimVm9rxTY0I4YvSFKUIKufc=",
 		)?;
-		/*
-				let mut stream = TcpStream::connect("127.0.0.1:39101")?;
-				let node1 = Node::new(
-					"127.0.0.1:39101",                              // router1
-					"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
-					"PtfQsnnCPPA93X3BcbFeCxGMLDfVfIG4XbzVCIlOsgU=", // ntor pubkey
-					"v29gfbDlrWStvBjWRnqwKNUhpv4=",                 // rsa identity
-				)?;
+				*/
+		let mut stream = TcpStream::connect("127.0.0.1:39101")?;
+		let node1 = Node::new(
+			"127.0.0.1:39101",                              // router1
+			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
+			"PtfQsnnCPPA93X3BcbFeCxGMLDfVfIG4XbzVCIlOsgU=", // ntor pubkey
+			"v29gfbDlrWStvBjWRnqwKNUhpv4=",                 // rsa identity
+		)?;
 
-				let node2 = Node::new(
-					"127.0.0.1:39102",                              // router2
-					"8nf9qPZ9gixbks0KrZEiLsKJYyVmmAgZUAW/iYvGnKI=", // ed25519Identity
-					"l7BJm4Cq3c8YJlq/H+vaUtdaJ4K7lsDEmqv8ZI3HUjo=", // ntor pubkey
-					"kJP6GBtWIPDGzQWJLpLA7qW2M9o",                  // rsa identity
-				)?;
+		let node2 = Node::new(
+			"127.0.0.1:39102",                              // router2
+			"8nf9qPZ9gixbks0KrZEiLsKJYyVmmAgZUAW/iYvGnKI=", // ed25519Identity
+			"l7BJm4Cq3c8YJlq/H+vaUtdaJ4K7lsDEmqv8ZI3HUjo=", // ntor pubkey
+			"kJP6GBtWIPDGzQWJLpLA7qW2M9o",                  // rsa identity
+		)?;
 
-				let node3 = Node::new(
-					"127.0.0.1:39103",                              // router3
-					"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
-					"zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=", // ntor pubkey
-					"x06BlN36ChTqd9Nqeb25o0byc0I=",                 // rsa identity
-				)?;
-		*/
+		let node3 = Node::new(
+			"127.0.0.1:39103",                              // router3
+			"Z9aVaImseaOHcmqF8PYjPRvRtsoNRkgMfVunFQUDTag=", // ed25519Identity
+			"zoxann7++99ntL8gQThK4IJPiKU+XOOhTihl3pIDa04=", // ntor pubkey
+			"x06BlN36ChTqd9Nqeb25o0byc0I=",                 // rsa identity
+		)?;
 
 		let now = Instant::now();
 		let plan = CircuitPlan::new(vec![node1, node2, node3]);
@@ -745,7 +745,6 @@ mod test {
 										)?;
 										assert!(local_id != 0);
 										assert_eq!(local_id, stream.sid());
-										if !read_data {}
 										read_data = true;
 									}
 									StreamEventType::Close(reason) => {
@@ -785,9 +784,11 @@ mod test {
 
 				if circuit.is_built() && !sent_begin {
 					let mut stream = circuit.open_stream_dir()?;
-					//let mut stream = circuit.open_stream("192.99.42.103:8080")?;
 					local_id = stream.id();
-					stream.write(&mut circuit, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+					stream.write(
+						&mut circuit,
+						b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n",
+					)?;
 					sent_begin = true;
 				}
 			}

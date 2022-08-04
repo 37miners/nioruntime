@@ -20,6 +20,7 @@
 //!
 //! Recommend more standardized ways to do these things.
 
+use crate::ed25519::Ed25519Identity;
 use nioruntime_deps::digest::Digest;
 use nioruntime_deps::sha3::Sha3_256;
 pub use nioruntime_deps::x25519_dalek;
@@ -34,6 +35,7 @@ const STR_ED25519_BASEPOINT: &[u8] =
 46316835694926478169428394003475163141307993866256225615783033603165251855960)";
 const HS_KEYBLIND_NONCE_PREFIX: &[u8] = b"key-blind";
 const HS_INDEX_PREFIX: &[u8] = b"store-at-idx";
+const HS_DIR_INDEX_PREFIX: &[u8] = b"node-idx";
 
 /// Convert a curve25519 public key (with sign bit) to an ed25519
 /// public key, for use in ntor key cross-certification.
@@ -168,14 +170,32 @@ pub fn build_hs_index(
 	time_period: u64,
 	period_length: u64,
 ) -> Result<[u8; 32], Error> {
-	Ok(Sha3_256::new()
+	let hash: [u8; 32] = Sha3_256::new()
 		.chain_update(HS_INDEX_PREFIX)
 		.chain_update(blinded_pk.to_bytes())
 		.chain_update(replica.to_be_bytes())
 		.chain_update(period_length.to_be_bytes())
 		.chain_update(time_period.to_be_bytes())
 		.finalize()
-		.try_into()?)
+		.try_into()?;
+	Ok(hash)
+}
+
+pub fn build_hs_dir_index(
+	identity: Ed25519Identity,
+	srv_value: &[u8],
+	time_period: u64,
+	period_length: u64,
+) -> Result<[u8; 32], Error> {
+	let hash: [u8; 32] = Sha3_256::new()
+		.chain_update(HS_DIR_INDEX_PREFIX)
+		.chain_update(identity.as_bytes())
+		.chain_update(srv_value)
+		.chain_update(time_period.to_be_bytes())
+		.chain_update(period_length.to_be_bytes())
+		.finalize()
+		.try_into()?;
+	Ok(hash)
 }
 
 /// Calculate the param for blinding in tor
@@ -214,6 +234,7 @@ pub fn calc_param(
 mod tests {
 	#![allow(clippy::unwrap_used)]
 	use super::*;
+	use crate::TorDirectory;
 	use nioruntime_deps::data_encoding::BASE32;
 	use nioruntime_deps::hex;
 
@@ -240,7 +261,18 @@ mod tests {
 		);
 
 		// build hsindex for this
-		let _hs_index = build_hs_index(1, &blinded_pk, 1, 1440)?;
+		for i in 0..2 {
+			let hs_index = build_hs_index(i + 1, &blinded_pk, 1, 1440)?;
+			info!("hs_index={:?}", hs_index)?;
+		}
+		let directory = TorDirectory::from_file("./test/resources/authority".to_string())?;
+		let hsdirs = directory.hsdirs();
+		let srv_value = directory.srv_value()?;
+		info!("srv_value={:?}", srv_value)?;
+		for hsdir in hsdirs {
+			let index = build_hs_dir_index(hsdir.ed25519_identity, srv_value, 1, 1440)?;
+			info!("dir={:?}", index)?;
+		}
 
 		// display current
 		let time_in_minutes = std::time::SystemTime::now()
