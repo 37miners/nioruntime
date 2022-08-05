@@ -1,0 +1,18 @@
+[package]
+name = "nioruntime_torclient"
+version = "0.0.3-beta3"
+authors = ["37 Miners, LLC"]
+description = "tor client library for nioruntime"
+license = "Apache-2.0"
+repository = "https://github.com/37miners/nioruntime"
+keywords = [ "crypto", "nioruntime", "mimblewimble" ]
+exclude = ["**/*.nio"]
+edition = "2018"
+
+[dependencies]
+
+nioruntime_log  = { path = "../log"           }
+nioruntime_err  = { path = "../error"         }
+nioruntime_util = { path = "../util"          }
+nioruntime_deps = { path = "../deps"          }
+nioruntime_tor  = { path = "../tor"           }

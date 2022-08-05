@@ -1,5 +1,3 @@
-// Copyright (c) 2022, 37 Miners, LLC
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,10 +15,11 @@ use crate::cell::{Cell, Certs, NetInfo};
 use crate::ed25519;
 use crate::ed25519::Ed25519Identity;
 use crate::rsa::RsaCrosscert;
-use crate::types::{ChannelContext, Node, TorState, Verifier};
+use crate::types::{ChannelContext, Node, TorState};
 use crate::util::x509_extract_rsa_subject_kludge;
 use crate::util::ExternallySigned;
 use crate::util::Timebound;
+use crate::util::Verifier;
 use nioruntime_deps::arrayref::array_ref;
 use nioruntime_deps::rustls::{ClientConfig, ClientConnection, Reader, RootCertStore, Writer};
 use nioruntime_deps::sha2::{Digest, Sha256};
@@ -762,7 +761,7 @@ mod test {
 												debug!(
 													"extended2 on circ id = {}, layers = {}",
 													cell.circ_id(),
-													ctx.layers(),
+													ctx.layers()?,
 												)?;
 											}
 											None => {
@@ -782,7 +781,7 @@ mod test {
 					if !verified {
 						// we don't do anything if we're not verified
 					} else {
-						let layers = ctx.layers();
+						let layers = ctx.layers()?;
 						info!("layers={}, elapsed=[{}]", layers, now.elapsed().as_millis())?;
 						if layers == 0 && !sent_create2 {
 							// send a netinfo cell

@@ -1,5 +1,3 @@
-// Copyright (c) 2022, 37 Miners, LLC
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -125,7 +123,7 @@ impl Circuit {
 		&self.channel_context
 	}
 
-	pub fn ready<'a>(&'a mut self) -> Result<Vec<StreamImpl>, Error> {
+	pub fn ready(&mut self) -> Result<Vec<StreamImpl>, Error> {
 		let circ_id = self.id();
 		if !self.built {
 			return Ok(vec![]);
@@ -733,7 +731,7 @@ mod test {
 				{
 					match circuit.process_new_packets() {
 						Ok(mut state) => {
-							for stream in state.ready()? {
+							for mut stream in state.ready()? {
 								match stream.event_type() {
 									StreamEventType::Readable => {
 										info!(
@@ -745,7 +743,11 @@ mod test {
 										)?;
 										assert!(local_id != 0);
 										assert_eq!(local_id, stream.sid());
-										read_data = true;
+										if !read_data {
+											stream
+												.write(&mut circuit, b"GET / HTTP/1.1\r\n\r\n")?;
+											read_data = true;
+										}
 									}
 									StreamEventType::Close(reason) => {
 										info!(
