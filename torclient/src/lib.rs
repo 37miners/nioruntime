@@ -19,4 +19,4 @@ mod stream;
 mod types;
 
 pub use crate::manager::StreamManagerBuilder;
-pub use crate::types::TorStreamConfig;
+pub use crate::types::{StreamManager, StreamManagerConfig, TorStreamConfig, TorStreamHandlers};

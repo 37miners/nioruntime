@@ -212,14 +212,12 @@ impl StreamManagerBuilder {
 
 #[cfg(test)]
 mod test {
-	/*
 	use crate::manager::{StreamManagerBuilder, StreamManagerConfig};
 	use crate::types::StreamManager;
 	use crate::types::TorStreamHandlers;
 	use crate::TorStreamConfig;
-		use std::sync::mpsc::sync_channel;
-		use std::time::Instant;
-	*/
+	use std::sync::mpsc::sync_channel;
+	use std::time::Instant;
 
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
@@ -278,7 +276,7 @@ mod test {
 		debug!("write GET HTTP")?;
 		stream.write(b"GET / HTTP/1.0\r\n\r\n")?;
 		std::thread::park();
-				*/
+			*/
 
 		Ok(())
 	}

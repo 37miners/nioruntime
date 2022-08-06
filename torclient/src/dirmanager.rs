@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::data::TorData;
+use nioruntime_deps::chrono::Utc;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_tor::directory::TorRelay;
@@ -67,7 +68,16 @@ impl DirManager {
 
 	fn load(data: TorData) -> Result<TorDirectory, Error> {
 		match Self::try_load_cache(&data)? {
-			Some(tor_directory) => return Ok(tor_directory),
+			Some(tor_directory) => {
+				let now = Utc::now().naive_utc().timestamp();
+				if tor_directory.valid_until() > now {
+					info!(
+						"Returning a valid tor directory. It is valid for {} more seconds.",
+						tor_directory.valid_until() - now
+					)?;
+					return Ok(tor_directory);
+				}
+			}
 			None => {}
 		}
 

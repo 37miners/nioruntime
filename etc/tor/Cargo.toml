@@ -1,0 +1,22 @@
+[package]
+name = "tor"
+version = "0.0.3-beta3"
+edition = "2018"
+description = "Utility to test nioruntime tor"
+license = "Apache-2.0"
+repository = "https://github.com/37miners/nioruntime"
+keywords = [ "socklet", "nioruntime", "rustlet" ]
+readme = "README.md"
+build = "src/build/build.rs"
+
+[[bin]]
+name = "tor"
+path = "src/bin/tor.rs"
+
+[dependencies]
+nioruntime_log =       { path = "../../log"       }
+nioruntime_err =       { path = "../../error"     }
+nioruntime_torclient = { path = "../../torclient" }
+
+[build-dependencies]
+built = { version = "0.4", features = ["git2"]}

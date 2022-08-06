@@ -167,6 +167,9 @@ pub enum ErrorKind {
 	/// AddrParseError
 	#[fail(display = "AddrParseError: {}", _0)]
 	AddrParseError(String),
+	/// ParseError
+	#[fail(display = "ParseError: {}", _0)]
+	ParseError(String),
 	/// HexError
 	#[fail(display = "HexError: {}", _0)]
 	HexError(String),

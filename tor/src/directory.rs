@@ -16,6 +16,8 @@ use crate::keymanip::{build_hs_dir_index, build_hs_index};
 use crate::rsa::RsaIdentity;
 use crate::util::RngCompatExt;
 use nioruntime_deps::base64;
+use nioruntime_deps::chrono::NaiveDateTime;
+use nioruntime_deps::chrono::Utc;
 use nioruntime_deps::rand::Rng;
 use nioruntime_deps::x25519_dalek::PublicKey as DalekPublicKey;
 use nioruntime_err::{Error, ErrorKind};
@@ -37,6 +39,7 @@ const M_LINE: &[u8] = &['m' as u8, ' ' as u8, '2' as u8];
 const ID_LINE: &[u8] = &['i' as u8, 'd' as u8, ' ' as u8];
 const PR_LINE: &[u8] = &['p' as u8, 'r' as u8, ' ' as u8];
 const S_LINE: &[u8] = &['s' as u8, ' ' as u8];
+const VALID_UNTIL_LINE: &[u8] = b"valid-until ";
 const HSDIR: &[u8] = "HSDir".as_bytes();
 const DIRCACHE: &[u8] = "DirCache=2".as_bytes();
 const GUARD: &[u8] = "Guard".as_bytes();
@@ -257,6 +260,7 @@ pub struct TorDirectory {
 	micro_map: HashMap<String, TorRelay>,
 	ed25519_id_map: HashMap<String, TorRelay>,
 	srv: Vec<u8>,
+	valid_until: i64,
 }
 
 impl Serializable for TorDirectory {
@@ -273,6 +277,7 @@ impl Serializable for TorDirectory {
 		let mut srv = vec![];
 		srv.resize(32, 0u8);
 
+		let valid_until = reader.read_i64()?;
 		for i in 0..32 {
 			srv[i] = reader.read_u8()?;
 		}
@@ -300,6 +305,7 @@ impl Serializable for TorDirectory {
 		}
 
 		Ok(Self {
+			valid_until,
 			guards,
 			relays,
 			exits,
@@ -314,6 +320,7 @@ impl Serializable for TorDirectory {
 	where
 		W: nioruntime_util::ser::Writer,
 	{
+		writer.write_i64(self.valid_until)?;
 		for i in 0..32 {
 			writer.write_u8(self.srv[i])?;
 		}
@@ -351,6 +358,7 @@ impl TorDirectory {
 		let mut guards = vec![];
 		let mut hs_dirs = vec![];
 		let mut micro_map = HashMap::new();
+		let mut valid_until = Utc::now().naive_utc().timestamp();
 		let mut ed25519_id_map = HashMap::new();
 
 		// TODO: implemnet shared random disaster recovery here
@@ -395,6 +403,25 @@ impl TorDirectory {
 					}
 				} else if i + 3 < len && bytes_eq(&b[i..i + 3], PR_LINE) {
 					is_dir_cache = bytes_find(&b[i..i + x], DIRCACHE).is_some();
+				} else if i + VALID_UNTIL_LINE.len() + 1 < len
+					&& bytes_eq(&b[i..i + VALID_UNTIL_LINE.len()], VALID_UNTIL_LINE)
+				{
+					let line = std::str::from_utf8(&b[i..i + x])?;
+					let arr: Vec<&str> = line.trim().split_whitespace().collect();
+					valid_until = NaiveDateTime::parse_from_str(
+						&format!("{} {}", arr[1], arr[2])[..],
+						"%Y-%m-%d %H:%M:%S",
+					)
+					.map_err(|e| {
+						let error: Error = ErrorKind::IllegalArgument(format!(
+							"date_time '{}' could not be parsed: {}",
+							format!("{} {}", arr[1], arr[2]),
+							e
+						))
+						.into();
+						error
+					})?
+					.timestamp();
 				} else if i + SHARED_RANDOM_LINE.len() + 1 < len
 					&& bytes_eq(&b[i..i + SHARED_RANDOM_LINE.len()], SHARED_RANDOM_LINE)
 				{
@@ -484,7 +511,12 @@ impl TorDirectory {
 			micro_map,
 			ed25519_id_map,
 			srv,
+			valid_until,
 		})
+	}
+
+	pub fn valid_until(&self) -> i64 {
+		self.valid_until
 	}
 
 	pub fn hs_dirs_for(
@@ -655,6 +687,7 @@ mod test {
 	use crate::keymanip::blind_pubkey;
 	use crate::keymanip::calc_param;
 	use crate::TorDirectory;
+	use nioruntime_deps::chrono::Utc;
 	use nioruntime_deps::data_encoding::BASE32;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
@@ -724,6 +757,9 @@ mod test {
 	#[test]
 	fn test_serializable() -> Result<(), Error> {
 		let mut directory = TorDirectory::from_file("./test/resources/authority".to_string())?;
+
+		info!("valid until = {}", directory.valid_until)?;
+		info!("now = {}", Utc::now().naive_utc().timestamp())?;
 		let guard = directory.random_guard().unwrap();
 		info!("guard={:?}", guard)?;
 
@@ -785,7 +821,7 @@ mod test {
 
 		assert_eq!(ser_out.ed25519_id_map.len(), directory.ed25519_id_map.len());
 		assert_eq!(ser_out.micro_map.len(), directory.micro_map.len());
-
+		assert_eq!(ser_out.valid_until, directory.valid_until);
 		assert_eq!(ser_out, directory);
 
 		Ok(())
