@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod data;
+mod dirmanager;
 mod manager;
 mod stream;
 mod types;
 
-//pub use crate::client::TorClientBuilder;
+pub use crate::manager::StreamManagerBuilder;
 pub use crate::types::TorStreamConfig;

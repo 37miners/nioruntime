@@ -15,22 +15,23 @@
 use nioruntime_err::Error;
 use std::pin::Pin;
 
+#[derive(Clone)]
 pub struct TorStreamHandlers<OnRead, OnConnect, OnClose>
 where
-	OnRead: Fn(&[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnConnect: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnClose: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnRead: Fn(u16, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnConnect: Fn(u16) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnClose: Fn(u16, u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
-	on_read: Option<Pin<Box<OnRead>>>,
-	on_close: Option<Pin<Box<OnClose>>>,
-	on_connect: Option<Pin<Box<OnConnect>>>,
+	pub on_read: Option<Pin<Box<OnRead>>>,
+	pub on_close: Option<Pin<Box<OnClose>>>,
+	pub on_connect: Option<Pin<Box<OnConnect>>>,
 }
 
 impl<OnRead, OnConnect, OnClose> TorStreamHandlers<OnRead, OnConnect, OnClose>
 where
-	OnRead: Fn(&[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnConnect: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnClose: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnRead: Fn(u16, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnConnect: Fn(u16) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnClose: Fn(u16, u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
 	pub fn set_on_read(&mut self, on_read: OnRead) -> Result<(), Error> {
 		self.on_read = Some(Box::pin(on_read));
@@ -48,9 +49,9 @@ where
 
 impl<OnRead, OnConnect, OnClose> Default for TorStreamHandlers<OnRead, OnConnect, OnClose>
 where
-	OnRead: Fn(&[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnConnect: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnClose: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnRead: Fn(u16, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnConnect: Fn(u16) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnClose: Fn(u16, u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
 	fn default() -> Self {
 		Self {
@@ -80,18 +81,22 @@ impl Default for TorStreamConfig {
 
 pub trait TorStream<OnRead, OnConnect, OnClose>
 where
-	OnRead: Fn(&[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnConnect: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-	OnClose: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnRead: Fn(u16, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnConnect: Fn(u16) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	OnClose: Fn(u16, u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
 {
 	fn write(&mut self, _: &[u8]) -> Result<(), Error>;
 }
 
-pub struct StreamManagerConfig {}
+pub struct StreamManagerConfig {
+	pub data_dir: String,
+}
 
 impl Default for StreamManagerConfig {
 	fn default() -> Self {
-		Self {}
+		Self {
+			data_dir: "~/.niohttpd/tor".to_string(),
+		}
 	}
 }
 
@@ -102,7 +107,7 @@ pub trait StreamManager {
 		handlers: TorStreamHandlers<OnRead, OnConnect, OnClose>,
 	) -> Result<Box<dyn TorStream<OnRead, OnConnect, OnClose>>, Error>
 	where
-		OnRead: Fn(&[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-		OnConnect: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
-		OnClose: Fn() -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin;
+		OnRead: Fn(u16, &[u8]) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+		OnConnect: Fn(u16) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+		OnClose: Fn(u16, u8) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin;
 }

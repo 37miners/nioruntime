@@ -46,9 +46,14 @@ pub struct CircuitState<'a> {
 }
 
 impl<'a> CircuitState<'a> {
-	pub fn ready(&mut self) -> Result<Vec<StreamImpl>, Error> {
-		self.circuit.ready()
+	pub fn process_stream_events<ProcessStream>(&mut self, proc: ProcessStream) -> Result<(), Error>
+	where
+		ProcessStream:
+			Fn(&mut StreamImpl) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	{
+		self.circuit.process_stream_events(proc)
 	}
+
 	pub fn built(&self) -> bool {
 		self.built
 	}
@@ -103,6 +108,16 @@ impl Circuit {
 		})
 	}
 
+	pub fn get_stream(&mut self, stream_id: u16) -> Result<StreamImpl, Error> {
+		Ok(StreamImpl::new(
+			stream_id,
+			self.id(),
+			StreamEventType::Writeable,
+			vec![],
+			self,
+		))
+	}
+
 	pub fn close(&mut self, sid: u16, reason: u8) -> Result<(), Error> {
 		let body = CellBody::Relay(Relay::new_end(
 			reason,
@@ -123,19 +138,22 @@ impl Circuit {
 		&self.channel_context
 	}
 
-	pub fn ready(&mut self) -> Result<Vec<StreamImpl>, Error> {
-		let circ_id = self.id();
+	pub fn process_stream_events<ProcessStream>(&mut self, proc: ProcessStream) -> Result<(), Error>
+	where
+		ProcessStream:
+			Fn(&mut StreamImpl) -> Result<(), Error> + Send + 'static + Clone + Sync + Unpin,
+	{
 		if !self.built {
-			return Ok(vec![]);
+			return Ok(());
 		}
 
-		let mut map: HashMap<u16, StreamImpl> = HashMap::new();
-		let mut end_map: HashMap<u16, StreamImpl> = HashMap::new();
-		let mut connected_map: HashMap<u16, StreamImpl> = HashMap::new();
+		let mut map: HashMap<u16, Vec<u8>> = HashMap::new();
+		let mut end_map: HashMap<u16, u8> = HashMap::new();
+		let mut connected_map: HashMap<u16, bool> = HashMap::new();
+		let circ_id = self.id();
 
 		match &self.tor_state {
 			Some(tor_state) => {
-				let mut ret = vec![];
 				for cell in tor_state.cells() {
 					match cell.body() {
 						CellBody::Relay(relay) => {
@@ -143,82 +161,77 @@ impl Circuit {
 							if cmd == RELAY_CMD_DATA {
 								let sid = relay.stream_id();
 								let found = match map.get_mut(&sid) {
-									Some(se) => {
-										se.data().append(&mut relay.get_relay_data().to_vec());
+									Some(d) => {
+										(*d).append(&mut relay.get_relay_data().to_vec());
 										true
 									}
 									None => false,
 								};
 								if !found {
-									let se = StreamImpl::new(
-										relay.stream_id(),
-										circ_id,
-										StreamEventType::Readable,
-										relay.get_relay_data().to_vec(),
-									);
-									map.insert(sid, se);
+									map.insert(sid, relay.get_relay_data().to_vec());
 								}
 							} else if cmd == RELAY_CMD_END {
 								let sid = relay.stream_id();
-								match end_map.get_mut(&sid) {
-									Some(_) => {}
-									None => {
-										let data = relay.get_relay_data();
-										let mut reason = 0;
-										if data.len() >= 1 {
-											reason = data[0];
-										}
-										let se = StreamImpl::new(
-											relay.stream_id(),
-											circ_id,
-											StreamEventType::Close(reason),
-											relay.get_relay_data().to_vec(),
-										);
-										end_map.insert(sid, se);
+								let found = match end_map.get_mut(&sid) {
+									Some(_) => {
+										warn!("Got an unexpected additional end message to stream: {}", sid)?;
+										true
+									}
+									None => false,
+								};
+								if !found {
+									let data = relay.get_relay_data();
+									if data.len() > 0 {
+										end_map.insert(sid, data[0]);
+									} else {
+										// no reason given put 0.
+										end_map.insert(sid, 0u8);
 									}
 								}
 							} else if cmd == RELAY_CMD_CONNECTED {
 								let sid = relay.stream_id();
-								match connected_map.get_mut(&sid) {
-									Some(_) => {}
-									None => {
-										let se = StreamImpl::new(
-											relay.stream_id(),
-											circ_id,
-											StreamEventType::Connected,
-											relay.get_relay_data().to_vec(),
-										);
-										connected_map.insert(sid, se);
+								let found = match connected_map.get_mut(&sid) {
+									Some(_) => {
+										warn!("Got an unexpected additional connected message to stream: {}", sid)?;
+										true
 									}
+									None => false,
+								};
+								if !found {
+									connected_map.insert(sid, true);
 								}
 							} else if cmd == RELAY_CMD_EXTENDED2 {
-								// note: this is expected behaviour
-								// because we set built after this cell
-								// has been added to the struct
-								// tor_state. We ignore it here.
+								// spurious extended2 here cell after
+								// we finish connecting to the last
+								// hop.
 							} else {
-								warn!("Got another type of command. Cell = {:?}", cell)?;
+								warn!("Unexpected relay command in cell: {:?}", cell)?;
 							}
 						}
 						_ => {}
 					}
 				}
-				for (_k, v) in connected_map {
-					ret.push(v);
-				}
-				for (_k, v) in map {
-					ret.push(v);
-				}
-				for (_k, v) in end_map {
-					ret.push(v);
-				}
-				Ok(ret)
 			}
-			None => Ok(vec![]),
+			None => {}
 		}
+
+		for (k, _v) in connected_map {
+			let mut stream = StreamImpl::new(k, circ_id, StreamEventType::Connected, vec![], self);
+			(proc)(&mut stream)?;
+		}
+		for (k, v) in map {
+			let mut stream = StreamImpl::new(k, circ_id, StreamEventType::Readable, v, self);
+			(proc)(&mut stream)?;
+		}
+		for (k, v) in end_map {
+			let mut stream = StreamImpl::new(k, circ_id, StreamEventType::Close(v), vec![], self);
+			(proc)(&mut stream)?;
+		}
+
+		Ok(())
 	}
 
-	pub fn open_stream_dir(&mut self) -> Result<Box<dyn Stream>, Error> {
+	pub fn open_stream_dir<'a>(&'a mut self) -> Result<Box<dyn Stream + 'a>, Error> {
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let stream_id: u16 = rng.gen();
 
@@ -232,12 +245,15 @@ impl Circuit {
 		)?);
 		self.send_cell(body)?;
 
-		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![]);
+		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![], self);
 
 		Ok(Box::new(stream))
 	}
 
-	pub fn open_stream(&mut self, address_port: &str) -> Result<Box<dyn Stream>, Error> {
+	pub fn open_stream<'a>(
+		&'a mut self,
+		address_port: &str,
+	) -> Result<Box<dyn Stream + 'a>, Error> {
 		let mut rng = nioruntime_deps::rand::thread_rng().rng_compat();
 		let stream_id: u16 = rng.gen();
 
@@ -253,7 +269,7 @@ impl Circuit {
 		)?);
 		self.send_cell(body)?;
 
-		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![]);
+		let stream = StreamImpl::new(stream_id, self.id(), StreamEventType::Created, vec![], self);
 
 		Ok(Box::new(stream))
 	}
@@ -556,8 +572,10 @@ mod test {
 	use crate::types::StreamEventType;
 	use nioruntime_err::{Error, ErrorKind};
 	use nioruntime_log::*;
+	use nioruntime_util::lockr;
 	use std::io::{Read, Write};
 	use std::net::TcpStream;
+	use std::sync::{Arc, RwLock};
 	use std::time::Instant;
 
 	info!();
@@ -642,8 +660,8 @@ mod test {
 		let test_dir = ".test_circuit.nio";
 		setup_test_dir(test_dir)?;
 
-		let mut success = false;
-		let mut read_data = false;
+		let success = Arc::new(RwLock::new(false));
+		let read_data = Arc::new(RwLock::new(false));
 		let mut wbuf = vec![];
 		let mut sent_begin = false;
 
@@ -715,7 +733,7 @@ mod test {
 		const BUFFER_SIZE: usize = 8 * 1024;
 		buffer.resize(BUFFER_SIZE, 0u8);
 
-		let mut local_id = 0;
+		let local_id = Arc::new(RwLock::new(0));
 
 		loop {
 			wbuf.clear();
@@ -731,7 +749,10 @@ mod test {
 				{
 					match circuit.process_new_packets() {
 						Ok(mut state) => {
-							for mut stream in state.ready()? {
+							let success_clone = success.clone();
+							let read_data_clone = read_data.clone();
+							let local_id = local_id.clone();
+							state.process_stream_events(move |stream| {
 								match stream.event_type() {
 									StreamEventType::Readable => {
 										info!(
@@ -741,12 +762,17 @@ mod test {
 											std::str::from_utf8(stream.get_data()?)
 												.unwrap_or("non-utf8")
 										)?;
-										assert!(local_id != 0);
-										assert_eq!(local_id, stream.sid());
-										if !read_data {
-											stream
-												.write(&mut circuit, b"GET / HTTP/1.1\r\n\r\n")?;
-											read_data = true;
+										{
+											assert!(*(lockr!(local_id)?) != 0);
+										}
+
+										{
+											assert_eq!(*(lockr!(local_id)?), stream.sid());
+										}
+										let mut read_data = lockw!(read_data_clone)?;
+										if !*read_data {
+											stream.write(b"GET / HTTP/1.1\r\n\r\n")?;
+											*read_data = true;
 										}
 									}
 									StreamEventType::Close(reason) => {
@@ -755,13 +781,15 @@ mod test {
 											stream.sid(),
 											reason
 										)?;
+										let read_data = { *lockr!(read_data_clone)? };
 										if read_data {
 											info!(
 												"Test was successful. Ran in {} seconds.",
 												now.elapsed().as_millis() as f64 / 1000 as f64
 											)?;
-											success = true;
-											break;
+											{
+												*(lockw!(success_clone)?) = true;
+											}
 										}
 									}
 									StreamEventType::Connected => {
@@ -771,7 +799,9 @@ mod test {
 										warn!("other type of event: {:?}", stream.event_type())?;
 									}
 								}
-							}
+
+								Ok(())
+							})?
 						}
 						Err(e) => {
 							error!("Error processing packets: {}", e)?;
@@ -786,9 +816,8 @@ mod test {
 
 				if circuit.is_built() && !sent_begin {
 					let mut stream = circuit.open_stream_dir()?;
-					local_id = stream.id();
+					*(lockw!(local_id)?) = stream.id();
 					stream.write(
-						&mut circuit,
 						b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive\r\n\r\n",
 					)?;
 					sent_begin = true;
@@ -806,10 +835,13 @@ mod test {
 				stream.write(&wbuf)?;
 			}
 
+			let success = { *lockr!(success)? };
 			if success {
 				break;
 			}
 		}
+
+		let _stream = circuit.get_stream(*(lockw!(local_id)?));
 
 		tear_down_test_dir(test_dir)?;
 		Ok(())

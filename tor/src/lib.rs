@@ -15,7 +15,7 @@ pub mod cell;
 pub mod channel;
 pub mod circuit;
 pub mod constants;
-mod directory;
+pub mod directory;
 pub mod ed25519;
 pub mod handshake;
 mod kdf;

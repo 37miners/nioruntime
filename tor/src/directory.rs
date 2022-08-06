@@ -11,18 +11,22 @@
 // limitations under the License.
 
 use crate::ed25519::Ed25519Identity;
-use crate::ed25519::PublicKey;
+use crate::handshake::ntor::NtorPublicKey;
 use crate::keymanip::{build_hs_dir_index, build_hs_index};
 use crate::rsa::RsaIdentity;
 use crate::util::RngCompatExt;
+use nioruntime_deps::base64;
 use nioruntime_deps::rand::Rng;
+use nioruntime_deps::x25519_dalek::PublicKey as DalekPublicKey;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::bytes_eq;
 use nioruntime_util::bytes_find;
+use nioruntime_util::ser::Serializable;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::convert::TryInto;
 use std::fs;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -48,13 +52,159 @@ pub struct TorRelay {
 	pub nickname: String,
 	pub microdesc: String,
 	pub socket_addr: String,
-	pub ntor_onion: Option<PublicKey>,
+	pub ntor_onion: Option<DalekPublicKey>,
 	pub ed25519_identity: Ed25519Identity,
 	pub rsa_identity: RsaIdentity,
 	pub is_exit: bool,
 	pub is_guard: bool,
 	pub is_hsdir: bool,
 	pub is_dir_cache: bool,
+	pub is_bad_exit: bool,
+}
+
+impl PartialOrd for TorRelay {
+	fn partial_cmp(&self, other: &TorRelay) -> std::option::Option<std::cmp::Ordering> {
+		if self.rsa_identity < other.rsa_identity {
+			Some(Ordering::Less)
+		} else if self.rsa_identity > other.rsa_identity {
+			Some(Ordering::Greater)
+		} else {
+			Some(Ordering::Equal)
+		}
+	}
+}
+
+impl Ord for TorRelay {
+	fn cmp(&self, other: &TorRelay) -> std::cmp::Ordering {
+		if self.rsa_identity < other.rsa_identity {
+			Ordering::Less
+		} else if self.rsa_identity > other.rsa_identity {
+			Ordering::Greater
+		} else {
+			Ordering::Equal
+		}
+	}
+}
+
+impl Serializable for TorRelay {
+	fn read<R>(reader: &mut R) -> Result<Self, Error>
+	where
+		R: nioruntime_util::ser::Reader,
+	{
+		let nickname = String::read(reader)?;
+		let microdesc = String::read(reader)?;
+		let socket_addr = String::read(reader)?;
+		let ntor_onion = match reader.read_u8()? != 0 {
+			true => {
+				let mut ntor_onion = [0u8; 32];
+				for i in 0..32 {
+					ntor_onion[i] = reader.read_u8()?;
+				}
+				Some(DalekPublicKey::from(ntor_onion))
+			}
+			false => None,
+		};
+		let mut ed25519_identity = [0u8; 32];
+		for i in 0..32 {
+			ed25519_identity[i] = reader.read_u8()?;
+		}
+		let ed25519_identity = match Ed25519Identity::from_bytes(&ed25519_identity) {
+			Some(x) => x,
+			None => {
+				return Err(
+					ErrorKind::CorruptedData("Expected valid ed25519_identity key".into()).into(),
+				)
+			}
+		};
+
+		let mut rsa_identity = [0u8; 20];
+		for i in 0..20 {
+			rsa_identity[i] = reader.read_u8()?;
+		}
+		let rsa_identity = match RsaIdentity::from_bytes(&rsa_identity) {
+			Some(x) => x,
+			None => {
+				return Err(
+					ErrorKind::CorruptedData("Expected valid rsa_identity key".into()).into(),
+				)
+			}
+		};
+		let is_exit = reader.read_u8()? != 0;
+		let is_guard = reader.read_u8()? != 0;
+		let is_hsdir = reader.read_u8()? != 0;
+		let is_dir_cache = reader.read_u8()? != 0;
+		let is_bad_exit = reader.read_u8()? != 0;
+
+		Ok(Self {
+			nickname,
+			microdesc,
+			socket_addr,
+			ntor_onion,
+			ed25519_identity,
+			rsa_identity,
+			is_exit,
+			is_guard,
+			is_hsdir,
+			is_dir_cache,
+			is_bad_exit,
+		})
+	}
+	fn write<W>(&self, writer: &mut W) -> Result<(), Error>
+	where
+		W: nioruntime_util::ser::Writer,
+	{
+		String::write(&self.nickname, writer)?;
+		String::write(&self.microdesc, writer)?;
+		String::write(&self.socket_addr, writer)?;
+		match self.ntor_onion {
+			Some(ntor_onion) => {
+				writer.write_u8(1)?;
+				let ntor_bytes = ntor_onion.to_bytes();
+				for b in ntor_bytes {
+					writer.write_u8(b)?;
+				}
+			}
+			None => {
+				writer.write_u8(0)?;
+			}
+		}
+
+		for b in self.ed25519_identity.as_bytes() {
+			writer.write_u8(*b)?;
+		}
+
+		for b in self.rsa_identity.as_bytes() {
+			writer.write_u8(*b)?;
+		}
+
+		if self.is_exit {
+			writer.write_u8(1)?;
+		} else {
+			writer.write_u8(0)?;
+		}
+		if self.is_guard {
+			writer.write_u8(1)?;
+		} else {
+			writer.write_u8(0)?;
+		}
+		if self.is_hsdir {
+			writer.write_u8(1)?;
+		} else {
+			writer.write_u8(0)?;
+		}
+		if self.is_dir_cache {
+			writer.write_u8(1)?;
+		} else {
+			writer.write_u8(0)?;
+		}
+		if self.is_bad_exit {
+			writer.write_u8(1)?;
+		} else {
+			writer.write_u8(0)?;
+		}
+
+		Ok(())
+	}
 }
 
 impl Hash for TorRelay {
@@ -98,13 +248,82 @@ impl Ord for RelaySorter {
 }
 
 /// Tor directory. Holds information about the tor directory.
+#[derive(Debug, PartialEq)]
 pub struct TorDirectory {
 	guards: Vec<TorRelay>,
 	relays: Vec<TorRelay>,
 	exits: Vec<TorRelay>,
 	hs_dirs: Vec<TorRelay>,
 	micro_map: HashMap<String, TorRelay>,
+	ed25519_id_map: HashMap<String, TorRelay>,
 	srv: Vec<u8>,
+}
+
+impl Serializable for TorDirectory {
+	fn read<R>(reader: &mut R) -> Result<Self, Error>
+	where
+		R: nioruntime_util::ser::Reader,
+	{
+		let mut guards = vec![];
+		let mut relays = vec![];
+		let mut exits = vec![];
+		let mut hs_dirs = vec![];
+		let mut micro_map = HashMap::new();
+		let mut ed25519_id_map = HashMap::new();
+		let mut srv = vec![];
+		srv.resize(32, 0u8);
+
+		for i in 0..32 {
+			srv[i] = reader.read_u8()?;
+		}
+
+		let count = reader.read_u64()?;
+		for _i in 0..count {
+			let r = TorRelay::read(reader)?;
+			let relay = r.clone();
+			micro_map.insert(r.microdesc, relay.clone());
+
+			ed25519_id_map.insert(base64::encode(r.ed25519_identity.as_bytes()), relay.clone());
+
+			if !relay.is_bad_exit {
+				relays.push(relay.clone());
+			}
+			if relay.is_exit && !relay.is_bad_exit {
+				exits.push(relay.clone());
+			}
+			if relay.is_guard && !relay.is_bad_exit {
+				guards.push(relay.clone());
+			}
+			if relay.is_hsdir {
+				hs_dirs.push(relay.clone());
+			}
+		}
+
+		Ok(Self {
+			guards,
+			relays,
+			exits,
+			hs_dirs,
+			micro_map,
+			ed25519_id_map,
+			srv,
+		})
+	}
+
+	fn write<W>(&self, writer: &mut W) -> Result<(), Error>
+	where
+		W: nioruntime_util::ser::Writer,
+	{
+		for i in 0..32 {
+			writer.write_u8(self.srv[i])?;
+		}
+		writer.write_u64(self.micro_map.len().try_into()?)?;
+		for (_k, v) in &self.micro_map {
+			TorRelay::write(&v, writer)?;
+		}
+
+		Ok(())
+	}
 }
 
 impl TorDirectory {
@@ -132,6 +351,7 @@ impl TorDirectory {
 		let mut guards = vec![];
 		let mut hs_dirs = vec![];
 		let mut micro_map = HashMap::new();
+		let mut ed25519_id_map = HashMap::new();
 
 		// TODO: implemnet shared random disaster recovery here
 		let mut srv = vec![0, 0, 0, 0, 0, 0, 0, 0];
@@ -208,7 +428,13 @@ impl TorDirectory {
 														is_guard,
 														is_hsdir,
 														is_dir_cache,
+														is_bad_exit,
 													};
+													micro_map.insert(microdesc, tor_relay.clone());
+													ed25519_id_map.insert(
+														base64::encode(ed25519_identity.as_bytes()),
+														tor_relay.clone(),
+													);
 
 													if !is_bad_exit {
 														relays.push(tor_relay.clone());
@@ -222,11 +448,12 @@ impl TorDirectory {
 													if is_hsdir {
 														hs_dirs.push(tor_relay.clone());
 													}
-													micro_map.insert(microdesc, tor_relay);
+
 													is_hsdir = false; // reset
 													is_dir_cache = false; // reset
 													is_exit = false; // reset
 													is_guard = false; // reset
+													is_bad_exit = false; // reset
 												}
 												None => {}
 											}
@@ -248,12 +475,14 @@ impl TorDirectory {
 
 			i += 1;
 		}
+
 		Ok(Self {
 			guards,
 			relays,
 			exits,
 			hs_dirs,
 			micro_map,
+			ed25519_id_map,
 			srv,
 		})
 	}
@@ -301,14 +530,65 @@ impl TorDirectory {
 		Ok(ret)
 	}
 
+	pub fn get_ed25519_id_map(&self) -> &HashMap<String, TorRelay> {
+		&self.ed25519_id_map
+	}
+
 	pub fn srv_value(&self) -> Result<&[u8], Error> {
 		Ok(&self.srv)
 	}
 
-	pub fn add_ntor(&mut self, microdesc: String, ntor_onion: PublicKey) -> Result<(), Error> {
-		match self.micro_map.get_mut(&microdesc) {
+	pub fn unknown_ntor_relays(&self) -> Vec<TorRelay> {
+		let mut ret = vec![];
+
+		for (_k, v) in &self.micro_map {
+			if v.ntor_onion.is_none() {
+				ret.push(v.to_owned());
+			}
+		}
+
+		ret
+	}
+
+	pub fn repopulate_ntor(&mut self) -> Result<(), Error> {
+		let mut relays = vec![];
+		let mut guards = vec![];
+		let mut hs_dirs = vec![];
+		let mut exits = vec![];
+		for (_k, v) in &self.micro_map {
+			if !v.is_bad_exit {
+				relays.push(v.clone());
+			}
+			if v.is_exit && !v.is_bad_exit {
+				exits.push(v.clone());
+			}
+			if v.is_guard && !v.is_bad_exit {
+				guards.push(v.clone());
+			}
+			if v.is_hsdir {
+				hs_dirs.push(v.clone());
+			}
+		}
+
+		self.guards = guards;
+		self.hs_dirs = hs_dirs;
+		self.exits = exits;
+		self.relays = relays;
+		Ok(())
+	}
+
+	pub fn add_ntor(
+		&mut self,
+		microdesc: &String,
+		ntor_onion_pubkey_b64: &str,
+	) -> Result<(), Error> {
+		let ntor_onion_pubkey = match NtorPublicKey::from_base64(ntor_onion_pubkey_b64) {
+			Some(id) => id,
+			None => return Err(ErrorKind::Tor("invalid ntor pubkey base64".to_string()).into()),
+		};
+		match self.micro_map.get_mut(microdesc) {
 			Some(relay) => {
-				relay.ntor_onion = Some(ntor_onion);
+				relay.ntor_onion = Some(ntor_onion_pubkey);
 			}
 			None => {
 				return Err(ErrorKind::Tor(format!(
@@ -318,6 +598,7 @@ impl TorDirectory {
 				.into())
 			}
 		}
+
 		Ok(())
 	}
 
@@ -370,12 +651,17 @@ impl TorDirectory {
 
 #[cfg(test)]
 mod test {
+	use crate::directory::TorRelay;
 	use crate::keymanip::blind_pubkey;
 	use crate::keymanip::calc_param;
 	use crate::TorDirectory;
 	use nioruntime_deps::data_encoding::BASE32;
 	use nioruntime_err::Error;
 	use nioruntime_log::*;
+	use nioruntime_util::ser::serialize;
+	use nioruntime_util::ser::BinReader;
+	use nioruntime_util::ser::Serializable;
+	use std::io::Cursor;
 	use std::time::Instant;
 
 	debug!();
@@ -432,6 +718,135 @@ mod test {
 		for dir in dirs {
 			info!("{:?}", dir)?;
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_serializable() -> Result<(), Error> {
+		let mut directory = TorDirectory::from_file("./test/resources/authority".to_string())?;
+		let guard = directory.random_guard().unwrap();
+		info!("guard={:?}", guard)?;
+
+		let exit = loop {
+			let ret = directory.random_exit().unwrap();
+			if ret != guard {
+				break ret;
+			}
+		};
+
+		info!("exit={:?}", exit)?;
+
+		assert!(guard != exit);
+
+		let mut ser_vec = vec![];
+		serialize(&mut ser_vec, guard)?;
+		let mut cursor = Cursor::new(ser_vec);
+		cursor.set_position(0);
+		let mut reader = BinReader::new(&mut cursor);
+		let ser_out = TorRelay::read(&mut reader)?;
+
+		info!("serout(guard)={:?}", ser_out)?;
+
+		assert_eq!(&ser_out, guard);
+
+		let mut ser_vec = vec![];
+		serialize(&mut ser_vec, exit)?;
+		let mut cursor = Cursor::new(ser_vec);
+		cursor.set_position(0);
+		let mut reader = BinReader::new(&mut cursor);
+		let ser_out = TorRelay::read(&mut reader)?;
+
+		info!("serout(exit)={:?}", ser_out)?;
+		assert_eq!(&ser_out, exit);
+
+		let mut ser_vec = vec![];
+		serialize(&mut ser_vec, &directory)?;
+		let mut cursor = Cursor::new(ser_vec);
+		cursor.set_position(0);
+		let mut reader = BinReader::new(&mut cursor);
+		let mut ser_out = TorDirectory::read(&mut reader)?;
+		ser_out.relays.sort();
+		directory.relays.sort();
+		assert_eq!(ser_out.relays, directory.relays);
+
+		ser_out.guards.sort();
+		directory.guards.sort();
+		assert_eq!(ser_out.guards, directory.guards);
+
+		ser_out.hs_dirs.sort();
+		directory.hs_dirs.sort();
+		assert_eq!(ser_out.hs_dirs, directory.hs_dirs);
+
+		ser_out.exits.sort();
+		directory.exits.sort();
+		assert_eq!(ser_out.exits, directory.exits);
+
+		assert_eq!(ser_out.srv, directory.srv);
+
+		assert_eq!(ser_out.ed25519_id_map.len(), directory.ed25519_id_map.len());
+		assert_eq!(ser_out.micro_map.len(), directory.micro_map.len());
+
+		assert_eq!(ser_out, directory);
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_repopulate_ntor() -> Result<(), Error> {
+		let mut directory = TorDirectory::from_file("./test/resources/authority".to_string())?;
+		let mut found = false;
+		let relays = directory.relays();
+		for relay in relays {
+			if relay.microdesc == "JjnpeYaHvjK3++17y0uNCJQcsuc98aVRPXVmxyvv/ZI" {
+				info!("relay = {:?}", relay)?;
+				found = true;
+				assert!(relay.ntor_onion.is_none());
+			}
+		}
+
+		assert!(found);
+		directory.add_ntor(
+			&"JjnpeYaHvjK3++17y0uNCJQcsuc98aVRPXVmxyvv/ZI".to_string(),
+			"z/k+9h73AUcYzRSOuke9Ee+pD4vx7HUXSq1w7hFD6no=",
+		)?;
+		directory.add_ntor(
+			&"tUd+zv64LEHmcM1/ovk7fYjh6Ke9mWrswx5dnQMcR+A".to_string(),
+			"dtDQ497XG1PRbtodI2gdQVKB8f2+SyrPBpWTjmRPn24=",
+		)?;
+		directory.repopulate_ntor()?;
+
+		let relays = directory.relays();
+		let mut found = false;
+		for relay in relays {
+			if relay.microdesc == "JjnpeYaHvjK3++17y0uNCJQcsuc98aVRPXVmxyvv/ZI" {
+				info!("relay = {:?}", relay)?;
+				found = true;
+				assert!(relay.ntor_onion.is_some());
+			}
+		}
+		assert!(found);
+
+		let mut found = false;
+		let hs_dirs = directory.hs_dirs.clone();
+		for hs_dir in hs_dirs {
+			if hs_dir.microdesc == "JjnpeYaHvjK3++17y0uNCJQcsuc98aVRPXVmxyvv/ZI" {
+				info!("hs_dir = {:?}", hs_dir)?;
+				found = true;
+				assert!(hs_dir.ntor_onion.is_some());
+			}
+		}
+		assert!(found);
+
+		let mut found = false;
+		let guards = directory.guards();
+		for guard in guards {
+			if guard.microdesc == "tUd+zv64LEHmcM1/ovk7fYjh6Ke9mWrswx5dnQMcR+A" {
+				info!("guard = {:?}", guard)?;
+				found = true;
+				assert!(guard.ntor_onion.is_some());
+			}
+		}
+		assert!(found);
 		Ok(())
 	}
 }

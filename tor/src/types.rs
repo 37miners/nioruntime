@@ -11,7 +11,7 @@
 // limitations under the License.
 
 use crate::cell::Cell;
-use crate::circuit::Circuit;
+use crate::directory::TorRelay;
 use crate::ed25519::Ed25519Identity;
 use crate::ed25519::XDalekPublicKey as PublicKey;
 use crate::handshake::ntor::NtorHandshakeState;
@@ -22,6 +22,7 @@ use crate::util::OutboundClientCrypt;
 use nioruntime_err::{Error, ErrorKind};
 use nioruntime_log::*;
 use nioruntime_util::lockr;
+use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
@@ -29,10 +30,10 @@ info!();
 
 pub trait Stream {
 	fn event_type(&self) -> StreamEventType;
-	fn write(&mut self, circuit: &mut Circuit, _: &[u8]) -> Result<(), Error>;
+	fn write(&mut self, _: &[u8]) -> Result<(), Error>;
 	fn get_data(&self) -> Result<&Vec<u8>, Error>;
 	fn available(&self) -> Result<usize, Error>;
-	fn close(&mut self, circuit: &mut Circuit, reason: u8) -> Result<(), Error>;
+	fn close(&mut self, reason: u8) -> Result<(), Error>;
 	fn id(&self) -> u16;
 }
 
@@ -40,6 +41,7 @@ pub trait Stream {
 pub enum StreamEventType {
 	Created,
 	Readable,
+	Writeable,
 	Connected,
 	Close(u8),
 }
@@ -158,6 +160,28 @@ pub struct Node {
 	pub ed_identity: Ed25519Identity,
 	pub rsa_identity: RsaIdentity,
 	pub ntor_onion_pubkey: PublicKey,
+}
+
+impl TryFrom<&TorRelay> for Node {
+	type Error = Error;
+	fn try_from(relay: &TorRelay) -> Result<Node, Error> {
+		let sockaddr = relay.socket_addr.parse()?;
+		match relay.ntor_onion {
+			Some(ntor_onion_pubkey) => Ok(Node {
+				sockaddr,
+				ed_identity: relay.ed25519_identity,
+				rsa_identity: relay.rsa_identity,
+				ntor_onion_pubkey,
+			}),
+			None => {
+				return Err(ErrorKind::Tor(format!(
+					"No ntor_onion key for this relay: {:?}",
+					sockaddr
+				))
+				.into())
+			}
+		}
+	}
 }
 
 impl Node {

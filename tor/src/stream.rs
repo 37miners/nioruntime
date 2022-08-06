@@ -20,20 +20,28 @@ use nioruntime_log::*;
 
 info!();
 
-pub struct StreamImpl {
+pub struct StreamImpl<'a> {
 	sid: u16,
 	cid: u32,
 	etype: StreamEventType,
 	data: Vec<u8>,
+	circuit: &'a mut Circuit,
 }
 
-impl StreamImpl {
-	pub fn new(sid: u16, cid: u32, etype: StreamEventType, data: Vec<u8>) -> Self {
+impl<'a> StreamImpl<'a> {
+	pub fn new(
+		sid: u16,
+		cid: u32,
+		etype: StreamEventType,
+		data: Vec<u8>,
+		circuit: &'a mut Circuit,
+	) -> Self {
 		Self {
 			sid,
 			cid,
 			etype,
 			data,
+			circuit,
 		}
 	}
 
@@ -49,17 +57,17 @@ impl StreamImpl {
 	}
 }
 
-impl Stream for StreamImpl {
+impl<'a> Stream for StreamImpl<'a> {
 	fn event_type(&self) -> StreamEventType {
 		self.etype
 	}
-	fn write(&mut self, circuit: &mut Circuit, b: &[u8]) -> Result<(), Error> {
+	fn write(&mut self, b: &[u8]) -> Result<(), Error> {
 		let body = CellBody::Relay(Relay::new_data(
 			b.to_vec(),
-			circuit.channel_context().crypt_state.clone(),
+			self.circuit.channel_context().crypt_state.clone(),
 			self.sid,
 		)?);
-		circuit.send_cell(body)?;
+		self.circuit.send_cell(body)?;
 		Ok(())
 	}
 	fn get_data(&self) -> Result<&Vec<u8>, Error> {
@@ -68,8 +76,8 @@ impl Stream for StreamImpl {
 	fn available(&self) -> Result<usize, Error> {
 		Ok(self.data.len())
 	}
-	fn close(&mut self, circuit: &mut Circuit, reason: u8) -> Result<(), Error> {
-		circuit.close(self.sid, reason)?;
+	fn close(&mut self, reason: u8) -> Result<(), Error> {
+		self.circuit.close(self.sid, reason)?;
 
 		Ok(())
 	}

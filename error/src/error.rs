@@ -461,6 +461,14 @@ impl From<RecvError> for Error {
 	}
 }
 
+impl<T> From<std::sync::mpsc::SendError<T>> for Error {
+	fn from(e: std::sync::mpsc::SendError<T>) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::SendError(format!("SendError: {}", e))),
+		}
+	}
+}
+
 #[cfg(test)]
 mod test {
 	use crate::base64;
